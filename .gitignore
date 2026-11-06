@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+dist/
+coverage/
+.sitepilot-data/
+.DS_Store

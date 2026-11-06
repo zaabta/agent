@@ -1,0 +1,109 @@
+﻿model,repeat,case,ctx,threads,correct,reason,wall_s,total_s,load_s,prompt_tokens,output_tokens,decode_tok_s,raw_calls
+granite4.1:3b-q4_K_M,1,form_en,4096,6,1,correct,6.343,6.342,0.01,321,23,10.59,"[{""id"": ""call_mtjw7d4a"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,1,form_ar,4096,6,1,correct,2.99,2.989,0.011,337,24,10.51,"[{""id"": ""call_jr3mmbx8"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+granite4.1:3b-q4_K_M,1,form_tr,4096,6,1,correct,2.428,2.426,0.011,328,23,11.48,"[{""id"": ""call_dty8abac"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,1,job,4096,6,1,correct,2.855,2.853,0.01,326,25,10.04,"[{""id"": ""call_2d1uwryr"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+granite4.1:3b-q4_K_M,1,search,4096,6,1,correct,3.004,3.003,0.01,326,25,9.47,"[{""id"": ""call_1z5zhvu8"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+granite4.1:3b-q4_K_M,1,no_tool,4096,6,1,no_tool,0.598,0.596,0.024,327,3,16.8,[]
+granite4.1:3b-q4_K_M,2,form_en,4096,6,1,correct,2.311,2.31,0.011,321,23,11.61,"[{""id"": ""call_w5emsyk8"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,2,form_ar,4096,6,1,correct,2.578,2.576,0.011,337,24,11.77,"[{""id"": ""call_490dgm2a"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+granite4.1:3b-q4_K_M,2,form_tr,4096,6,1,correct,2.424,2.423,0.009,328,23,11.34,"[{""id"": ""call_gcejopiz"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,2,job,4096,6,1,correct,2.565,2.563,0.018,326,25,11.21,"[{""id"": ""call_4s3rfgml"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+granite4.1:3b-q4_K_M,2,search,4096,6,1,correct,2.439,2.438,0.012,326,25,11.63,"[{""id"": ""call_zl7tluyg"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+granite4.1:3b-q4_K_M,2,no_tool,4096,6,1,no_tool,0.548,0.547,0.012,327,3,17.79,[]
+granite4.1:3b-q4_K_M,3,form_en,4096,6,1,correct,2.283,2.282,0.009,321,23,11.8,"[{""id"": ""call_80on4s2o"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,3,form_ar,4096,6,1,correct,2.592,2.59,0.01,337,24,11.48,"[{""id"": ""call_3t9alofb"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+granite4.1:3b-q4_K_M,3,form_tr,4096,6,1,correct,2.378,2.377,0.011,328,23,11.58,"[{""id"": ""call_zow5118w"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+granite4.1:3b-q4_K_M,3,job,4096,6,1,correct,2.501,2.499,0.011,326,25,11.61,"[{""id"": ""call_2o6vxpea"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+granite4.1:3b-q4_K_M,3,search,4096,6,1,correct,2.5,2.498,0.01,326,25,11.6,"[{""id"": ""call_zecoqoyc"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+granite4.1:3b-q4_K_M,3,no_tool,4096,6,1,no_tool,0.577,0.575,0.009,327,3,16.76,[]
+qwen3:4b-instruct-2507-q4_K_M,1,form_en,4096,6,1,correct,8.695,8.693,0.01,335,24,8.55,"[{""id"": ""tdbzm5MpjuEJYqhWZEGAKHJWqfGWemHd"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,1,form_ar,4096,6,1,correct,3.829,3.827,0.012,347,26,8.31,"[{""id"": ""6qLwsTfMS3kGceIDyEAHuNsZSZn6WSVc"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:4b-instruct-2507-q4_K_M,1,form_tr,4096,6,1,correct,3.677,3.675,0.02,342,24,7.89,"[{""id"": ""lGGqTl64L06kZsxIlxsVAKvsWujubodp"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,1,job,4096,6,1,correct,3.88,3.879,0.015,340,26,7.83,"[{""id"": ""sM8XLCV0LhQ3edK4qr8EuLsf3eerr8yK"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,1,search,4096,6,1,correct,3.572,3.57,0.012,339,27,8.59,"[{""id"": ""KEhMbOjA0HgKWm4gtWjCNT1kZbiMb2As"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,1,no_tool,4096,6,1,no_tool,1.473,1.472,0.012,340,10,9.7,[]
+qwen3:4b-instruct-2507-q4_K_M,2,form_en,4096,6,1,correct,2.805,2.804,0.009,335,24,9.74,"[{""id"": ""ePIqnwsc5slW8pHLtQAlQgHnZUYDuqPo"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,2,form_ar,4096,6,1,correct,3.193,3.191,0.009,347,26,9.66,"[{""id"": ""sTOzTlK2uCypTgPNDDjX4CQdbjkn0Dpl"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:4b-instruct-2507-q4_K_M,2,form_tr,4096,6,1,correct,3.29,3.288,0.011,342,24,9.12,"[{""id"": ""TK240SE2vvGkT1ujJHquDhW4YbYGH6hI"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,2,job,4096,6,1,correct,3.739,3.737,0.013,340,26,8.15,"[{""id"": ""gH566GbYCdkPdGum4kXSDDJeKUzZsZxM"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,2,search,4096,6,1,correct,4.042,4.04,0.013,339,27,7.59,"[{""id"": ""vPSHXaHkuXCQmn8JOKOJrpOHYCiPoIpE"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,2,no_tool,4096,6,1,no_tool,1.784,1.782,0.01,340,10,7.5,[]
+qwen3:4b-instruct-2507-q4_K_M,3,form_en,4096,6,1,correct,5.2,5.198,0.019,335,24,5.16,"[{""id"": ""U0h1KB6hRqIl1Iy5YONvhipzZOmH2wgv"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,3,form_ar,4096,6,1,correct,7.867,7.865,0.021,347,26,3.83,"[{""id"": ""IjusmIUypJKoWSQmnqQcueih5SUWDS8D"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:4b-instruct-2507-q4_K_M,3,form_tr,4096,6,1,correct,4.865,4.863,0.032,342,24,5.87,"[{""id"": ""mmiBgrSkOexkF1aflKi74eo7Gl50pBlg"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b-instruct-2507-q4_K_M,3,job,4096,6,1,correct,4.529,4.526,0.07,340,26,6.65,"[{""id"": ""Nihzlu5PTgyCWRv1FMTlr7QxRICp07Ei"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,3,search,4096,6,1,correct,6.269,6.267,0.014,339,27,4.82,"[{""id"": ""EzS86nufKpHgxA6CAMbIbvJyEYVYwtJe"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:4b-instruct-2507-q4_K_M,3,no_tool,4096,6,1,no_tool,3.68,3.679,0.022,340,10,3.86,[]
+qwen3.5:4b-q4_K_M,1,form_en,4096,6,1,correct,10.542,10.541,0.009,459,30,8.59,"[{""id"": ""call_o2p6sg56"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,1,form_ar,4096,6,1,correct,11.166,11.164,0.014,466,32,8.43,"[{""id"": ""call_bamp5nry"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3.5:4b-q4_K_M,1,form_tr,4096,6,1,correct,11.884,11.882,0.011,462,30,7.17,"[{""id"": ""call_d8undy7q"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,1,job,4096,6,1,correct,17.383,17.382,0.011,464,32,6.67,"[{""id"": ""call_berhhmc5"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3.5:4b-q4_K_M,1,search,4096,6,1,correct,10.545,10.543,0.018,463,30,9.1,"[{""id"": ""call_iwx4359w"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen3.5:4b-q4_K_M,1,no_tool,4096,6,1,no_tool,8.258,8.257,0.009,464,10,10.11,[]
+qwen3.5:4b-q4_K_M,2,form_en,4096,6,1,correct,11.371,11.37,0.011,459,30,8.3,"[{""id"": ""call_4v77v4ay"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,2,form_ar,4096,6,1,correct,13.207,13.206,0.012,466,32,8.35,"[{""id"": ""call_irycyi71"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3.5:4b-q4_K_M,2,form_tr,4096,6,1,correct,11.058,11.057,0.011,462,30,8.66,"[{""id"": ""call_vjfjugeg"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,2,job,4096,6,1,correct,11.732,11.73,0.009,464,32,8.76,"[{""id"": ""call_bfbtvnlk"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3.5:4b-q4_K_M,2,search,4096,6,1,correct,11.387,11.386,0.014,463,30,8.53,"[{""id"": ""call_bcrnmpla"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen3.5:4b-q4_K_M,2,no_tool,4096,6,1,no_tool,13.195,13.194,0.01,464,10,4.82,[]
+qwen3.5:4b-q4_K_M,3,form_en,4096,6,1,correct,13.84,13.838,0.017,459,30,9.1,"[{""id"": ""call_dkauj8vb"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,3,form_ar,4096,6,1,correct,11.306,11.304,0.011,466,32,8.77,"[{""id"": ""call_xgsae7jb"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3.5:4b-q4_K_M,3,form_tr,4096,6,1,correct,10.615,10.613,0.009,462,30,8.94,"[{""id"": ""call_a4gh4mpj"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3.5:4b-q4_K_M,3,job,4096,6,1,correct,11.069,11.068,0.01,464,32,8.97,"[{""id"": ""call_uezjl7v7"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3.5:4b-q4_K_M,3,search,4096,6,1,correct,11.414,11.413,0.009,463,30,8.77,"[{""id"": ""call_53ytv9oq"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen3.5:4b-q4_K_M,3,no_tool,4096,6,1,no_tool,9.596,9.595,0.01,464,10,8.61,[]
+qwen2.5:3b,1,form_en,4096,6,1,correct,5.008,5.007,0.009,282,24,13.34,"[{""id"": ""call_npetpkaz"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,1,form_ar,4096,6,1,correct,2.497,2.496,0.008,294,26,12.49,"[{""id"": ""call_h32fj6f2"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen2.5:3b,1,form_tr,4096,6,1,correct,2.178,2.177,0.009,289,24,13.1,"[{""id"": ""call_o9vlawxw"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,1,job,4096,6,1,correct,2.292,2.29,0.008,287,26,13.04,"[{""id"": ""call_yj99l9e2"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen2.5:3b,1,search,4096,6,1,correct,2.247,2.245,0.011,286,25,12.66,"[{""id"": ""call_w9mr60jn"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen2.5:3b,1,no_tool,4096,6,1,no_tool,1.101,1.099,0.01,287,10,12.69,[]
+qwen2.5:3b,2,form_en,4096,6,1,correct,2.384,2.382,0.01,282,24,11.43,"[{""id"": ""call_8vawo4q5"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,2,form_ar,4096,6,1,correct,3.442,3.441,0.01,294,26,9.42,"[{""id"": ""call_jrrau013"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen2.5:3b,2,form_tr,4096,6,1,correct,2.371,2.37,0.01,289,24,12.1,"[{""id"": ""call_u65b14j5"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,2,job,4096,6,1,correct,2.755,2.754,0.011,287,26,11.04,"[{""id"": ""call_c2hmuo6i"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen2.5:3b,2,search,4096,6,1,correct,2.351,2.349,0.011,286,25,12.27,"[{""id"": ""call_r243z0ca"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen2.5:3b,2,no_tool,4096,6,1,no_tool,1.095,1.093,0.012,287,10,13.07,[]
+qwen2.5:3b,3,form_en,4096,6,1,correct,2.254,2.252,0.008,282,24,11.93,"[{""id"": ""call_9zpda7a6"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,3,form_ar,4096,6,1,correct,2.539,2.537,0.01,294,26,12.5,"[{""id"": ""call_94pjp73y"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen2.5:3b,3,form_tr,4096,6,1,correct,2.303,2.276,0.019,289,24,12.47,"[{""id"": ""call_q38eav2u"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen2.5:3b,3,job,4096,6,1,correct,2.482,2.481,0.012,287,26,12.11,"[{""id"": ""call_8z85mh42"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen2.5:3b,3,search,4096,6,1,correct,2.18,2.179,0.01,286,25,13.09,"[{""id"": ""call_wxwhrq07"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations KKD""}}}]"
+qwen2.5:3b,3,no_tool,4096,6,1,no_tool,1.056,1.055,0.009,287,10,13.38,[]
+qwen3:4b,1,form_en,4096,6,1,correct,29.248,29.246,0.01,284,221,9.07,"[{""id"": ""call_2vwcc3nv"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,1,form_ar,4096,6,0,expected_one_call_got_0,28.567,28.564,0.009,296,256,9.18,[]
+qwen3:4b,1,form_tr,4096,6,1,correct,25.21,25.208,0.012,291,239,9.65,"[{""id"": ""call_ermox58q"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,1,job,4096,6,0,expected_one_call_got_0,27.26,27.245,0.012,289,256,9.56,[]
+qwen3:4b,1,search,4096,6,0,expected_one_call_got_0,32.47,32.468,0.034,288,256,8.01,[]
+qwen3:4b,1,no_tool,4096,6,1,no_tool,15.835,15.834,0.009,289,133,8.66,[]
+qwen3:4b,2,form_en,4096,6,1,correct,35.071,35.07,0.01,284,252,7.27,"[{""id"": ""call_td5y9v2i"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,2,form_ar,4096,6,0,expected_one_call_got_0,33.271,33.27,0.012,296,256,7.9,[]
+qwen3:4b,2,form_tr,4096,6,1,correct,30.05,30.048,0.009,291,239,8.11,"[{""id"": ""call_gz6raost"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,2,job,4096,6,0,expected_one_call_got_0,30.579,30.559,0.01,289,256,8.54,[]
+qwen3:4b,2,search,4096,6,0,expected_one_call_got_0,34.663,34.66,0.035,288,256,7.45,[]
+qwen3:4b,2,no_tool,4096,6,1,no_tool,19.114,19.112,0.016,289,133,7.22,[]
+qwen3:4b,3,form_en,4096,6,1,correct,32.655,32.654,0.012,284,252,7.82,"[{""id"": ""call_cd8cka4z"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,3,form_ar,4096,6,0,expected_one_call_got_0,34.086,34.084,0.01,296,256,7.64,[]
+qwen3:4b,3,form_tr,4096,6,1,correct,29.247,29.245,0.011,291,239,8.33,"[{""id"": ""call_5ki2yhpq"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:4b,3,job,4096,6,0,expected_one_call_got_0,33.99,33.989,0.01,289,256,7.66,[]
+qwen3:4b,3,search,4096,6,0,expected_one_call_got_0,33.253,33.252,0.013,288,256,7.75,[]
+qwen3:4b,3,no_tool,4096,6,1,no_tool,16.249,16.247,0.009,289,133,8.45,[]
+qwen3:8b,1,form_en,4096,6,1,correct,15.07,15.067,0.015,290,24,4.65,"[{""id"": ""call_umx9zafk"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,1,form_ar,4096,6,1,correct,7.811,7.809,0.023,302,26,4.04,"[{""id"": ""call_npm7yby9"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:8b,1,form_tr,4096,6,1,correct,8.428,8.426,0.013,297,24,3.54,"[{""id"": ""call_j6mobqkc"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,1,job,4096,6,1,correct,6.854,6.852,0.012,295,26,4.63,"[{""id"": ""call_bobcmxxd"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:8b,1,search,4096,6,1,correct,7.652,7.65,0.01,294,27,4.14,"[{""id"": ""call_aokdcium"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:8b,1,no_tool,4096,6,1,no_tool,4.392,4.391,0.015,295,10,3.7,[]
+qwen3:8b,2,form_en,4096,6,1,correct,11.516,11.498,0.026,290,24,2.47,"[{""id"": ""call_k12xwr2p"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,2,form_ar,4096,6,1,correct,7.008,7.007,0.011,302,26,4.52,"[{""id"": ""call_nzfao8ay"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:8b,2,form_tr,4096,6,1,correct,6.237,6.235,0.009,297,24,4.8,"[{""id"": ""call_p5i5u2lv"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,2,job,4096,6,1,correct,6.342,6.341,0.009,295,26,4.88,"[{""id"": ""call_7727yxai"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:8b,2,search,4096,6,1,correct,6.414,6.413,0.01,294,27,4.92,"[{""id"": ""call_9sy93ama"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:8b,2,no_tool,4096,6,1,no_tool,2.96,2.958,0.01,295,10,5.23,[]
+qwen3:8b,3,form_en,4096,6,1,correct,5.851,5.85,0.009,290,24,4.83,"[{""id"": ""call_wjw5l3qn"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,3,form_ar,4096,6,1,correct,6.676,6.674,0.011,302,26,4.78,"[{""id"": ""call_g8t2t9o7"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 2728}}}]"
+qwen3:8b,3,form_tr,4096,6,1,correct,6.255,6.254,0.012,297,24,4.73,"[{""id"": ""call_y32c6ck8"", ""function"": {""index"": 0, ""name"": ""lookup_violation"", ""arguments"": {""form_no"": 65}}}]"
+qwen3:8b,3,job,4096,6,1,correct,6.365,6.363,0.011,295,26,5.11,"[{""id"": ""call_4icliayu"", ""function"": {""index"": 0, ""name"": ""get_job_status"", ""arguments"": {""job_id"": ""job-test-42""}}}]"
+qwen3:8b,3,search,4096,6,1,correct,7.873,7.872,0.011,294,27,3.98,"[{""id"": ""call_0ux5skpm"", ""function"": {""index"": 0, ""name"": ""search_documents"", ""arguments"": {""query"": ""personal protective equipment violations (KKD)""}}}]"
+qwen3:8b,3,no_tool,4096,6,1,no_tool,4.954,4.95,0.015,295,10,3.1,[]

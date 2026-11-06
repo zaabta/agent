@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Application metadata only. TypeGraph owns its own storage tables and indexes.
+model AppDocument {
+  id         String   @id @db.Uuid
+  tenantId   String   @map("tenant_id")
+  filename   String
+  fileType   String   @map("file_type")
+  status     String   @default("processing")
+  stage      String   @default("queued")
+  progress   Int?
+  jobId      String?  @unique @map("job_id")
+  retryCount Int      @default(0) @map("retry_count")
+  failureCode String? @map("failure_code")
+  fileSize   BigInt?  @map("file_size")
+  checksum   String?
+  storageKey String?  @map("storage_key")
+  cancelRequested Boolean @default(false) @map("cancel_requested")
+  deleteRequested Boolean @default(false) @map("delete_requested")
+  completedAt DateTime? @map("completed_at")
+  structuredCells AppDocumentCell[]
+  progressEvents DocumentProgressEvent[]
+  errorCode  String?  @map("error_code")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, status, createdAt(sort: Desc)])
+  @@unique([tenantId, checksum])
+  @@map("app_documents")
+}
+
+// Durable stage transitions. Unit counts stay nullable when the underlying
+// parser or TypeGraph SDK does not expose measurable incremental progress.
+model DocumentProgressEvent {
+  id             String      @id @default(uuid()) @db.Uuid
+  documentId     String      @db.Uuid @map("document_id")
+  tenantId       String      @map("tenant_id")
+  jobId          String      @map("job_id")
+  attempt        Int
+  stage          String
+  status         String
+  startedAt      DateTime    @default(now()) @map("started_at")
+  finishedAt     DateTime?   @map("finished_at")
+  completedUnits Int?        @map("completed_units")
+  totalUnits     Int?        @map("total_units")
+  embeddingDurationMs Int?   @map("embedding_duration_ms")
+  unit           String?
+  failureCode    String?     @map("failure_code")
+  document       AppDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, jobId, startedAt])
+  @@index([documentId, attempt, startedAt])
+  @@map("document_progress_events")
+}
+
+model AppDocumentCell {
+  id          String      @id @default(uuid()) @db.Uuid
+  documentId  String      @db.Uuid @map("document_id")
+  tenantId    String      @map("tenant_id")
+  sheetName   String      @map("sheet_name")
+  rowNumber   Int         @map("row_number")
+  address     String
+  columnName  String      @map("column_name")
+  value       String      @db.Text
+  valueType   String      @map("value_type")
+  formula     String?     @db.Text
+  document    AppDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, sheetName, address])
+  @@index([tenantId, value])
+  @@index([tenantId, documentId, sheetName, rowNumber])
+  @@map("app_document_cells")
+}
+
+model Conversation {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id")
+  ownerId   String    @map("owner_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  messages  Message[]
+
+  @@index([tenantId, ownerId, updatedAt(sort: Desc)])
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid @map("conversation_id")
+  role           String
+  content        String       @db.Text
+  createdAt      DateTime     @default(now()) @map("created_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+enum TenantRole {
+  SUPER_ADMIN
+  TENANT_ADMIN
+  MEMBER
+  READ_ONLY
+}
+
+model Tenant {
+  id        String       @id
+  name      String
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+  members   Membership[]
+  sessions  RefreshSession[]
+  auditLogs AuditLog[]
+
+  @@map("tenants")
+}
+
+model User {
+  id            String       @id @default(uuid()) @db.Uuid
+  email         String       @unique
+  passwordHash  String       @map("password_hash")
+  displayName   String?      @map("display_name")
+  disabledAt    DateTime?    @map("disabled_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+  memberships   Membership[]
+  sessions      RefreshSession[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model Membership {
+  tenantId  String     @map("tenant_id")
+  userId    String     @db.Uuid @map("user_id")
+  role      TenantRole @default(MEMBER)
+  createdAt DateTime   @default(now()) @map("created_at")
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, userId])
+  @@index([userId])
+  @@map("tenant_memberships")
+}
+
+model RefreshSession {
+  id        String    @id @default(uuid()) @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  familyId  String    @db.Uuid @map("family_id")
+  tenantId  String    @map("tenant_id")
+  userId    String    @db.Uuid @map("user_id")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([familyId])
+  @@index([userId, tenantId])
+  @@map("refresh_sessions")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  userId    String?  @db.Uuid @map("user_id")
+  action    String
+  ipAddress String?  @map("ip_address")
+  details   Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

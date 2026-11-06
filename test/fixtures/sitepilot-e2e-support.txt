@@ -1,0 +1,7 @@
+SitePilot Synthetic Support Policy
+
+English: Customers may request a refund within 14 calendar days after purchase.
+Arabic: يمكن للعملاء طلب استرداد المبلغ خلال ١٤ يومًا تقويميًا من تاريخ الشراء.
+Turkish: Müşteriler satın alma tarihinden sonraki 14 takvim günü içinde para iadesi isteyebilir.
+
+These synthetic statements are for local SitePilot integration tests only.

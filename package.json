@@ -1,0 +1,62 @@
+{
+  "name": "sitepilot-mastra-starter",
+  "version": "0.2.0",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "worker": "tsx src/document-worker.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:e2e:stream": "node --import tsx --test test/agent-stream.e2e.test.ts",
+    "test:e2e:ask": "node --import tsx --test test/agent-ask.e2e.test.ts",
+    "test:e2e:documents": "node --import tsx --test test/document-processing.e2e.test.ts",
+    "test:e2e:cancellation": "node --import tsx --test test/document-cancellation.e2e.test.ts",
+    "test:e2e:auth": "node --import tsx --test test/auth-tenant.e2e.test.ts",
+    "test:e2e:typegraph": "node --import tsx --test test/typegraph-multilingual.e2e.test.ts",
+    "test:e2e:typegraph:graph": "node --import tsx --test test/typegraph-graph.e2e.test.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:generate:safe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prisma-generate-safe.ps1",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "typegraph:deploy": "tsx src/scripts/deploy-typegraph.ts",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mastra/core": "latest",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/swagger": "^11.4.8",
+    "@prisma/client": "^6.19.0",
+    "@typegraph-ai/adapter-pgvector": "0.5.0",
+    "@typegraph-ai/sdk": "0.6.0",
+    "bullmq": "^6.7.0",
+    "csv-parse": "^7.0.3",
+    "dotenv": "^16.4.0",
+    "ioredis": "^6.0.0",
+    "mammoth": "^1.10.0",
+    "multer": "^2.0.0",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.0",
+    "xlsx": "^0.18.5",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "jszip": "^3.10.2",
+    "prisma": "^6.19.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
