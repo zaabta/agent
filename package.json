@@ -1,5 +1,6 @@
 {
-  "name": "sitepilot-mastra-starter",
+  "name": "agent",
+  "author": "Ali Almanea",
   "version": "0.2.0",
   "private": true,
   "packageManager": "pnpm@10.10.0",
@@ -25,7 +26,9 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
-    "@mastra/core": "latest",
+    "@mastra/core": "1.82.0",
+    "@mastra/observability": "1.17.6",
+    "@mastra/pg": "1.35.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",

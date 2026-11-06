@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
@@ -6,6 +6,8 @@ import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { Roles } from '../auth/roles.decorator.js';
+import { readTenantTrace } from '../mastra/observability.js';
 
 interface AgentBody {
   message?: string;
@@ -102,6 +104,16 @@ export class AgentController {
   getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
     return this.agent.getConversation(id, principal);
+  }
+
+  @Get('traces/:traceId')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @ApiOperation({ summary: 'Read redacted Mastra diagnostics for the authenticated tenant' })
+  async trace(@Param('traceId') traceId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!/^[a-f0-9]{32}$/i.test(traceId)) throw new NotFoundException('TRACE_NOT_FOUND');
+    const result = await readTenantTrace(traceId, principal.tenantId);
+    if (!result) throw new NotFoundException('TRACE_NOT_FOUND');
+    return result;
   }
 
   private validateBody(body: AgentBody, requireConversation: boolean) {

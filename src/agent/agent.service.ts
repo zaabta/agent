@@ -1,4 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { TypegraphService } from '../typegraph/typegraph.service.js';
 import type { DocumentSearchHit } from '../typegraph/typegraph.service.js';
@@ -8,6 +9,9 @@ import { StructuredDataService } from '../documents/structured-data.service.js';
 import type { StructuredSource } from '../documents/structured-data.service.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { isDocumentInventoryIntent } from './request-fast-path.js';
+import { z } from 'zod';
+import { createAgentWorkflow } from './agent.workflow.js';
+import { recordWorkflowDiagnostic } from '../mastra/observability.js';
 
 export interface VerifiedSource {
   documentId: string;
@@ -32,11 +36,89 @@ export function isDocumentInventoryRequest(message: string): boolean { return is
 
 export function needsWorkspaceRecovery(results: Array<{ payload: { toolName?: string; result: unknown } }>): boolean {
   return !results.some(item => {
-    const output = item.payload.result as { hits?: unknown[]; sources?: unknown[]; records?: unknown[] } | undefined;
+    const output = item.payload.result as { hits?: unknown[]; sources?: unknown[]; records?: unknown[]; datasets?: unknown[]; documents?: unknown[]; operation?: string; total?: unknown } | undefined;
+    const tool = (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase();
+    if (tool === 'datasetdiscovery') return Array.isArray(output?.datasets);
+    if (tool === 'structureddatalookup') return Array.isArray(output?.hits);
+    if (tool === 'structuredrowlookup') return Array.isArray(output?.records);
+    if (tool === 'structureddataanalytics') {
+      return typeof output?.operation === 'string'
+        || (typeof (output as { total?: unknown } | undefined)?.total === 'number'
+          && Array.isArray((output as { datasets?: unknown[] } | undefined)?.datasets));
+    }
     return (Array.isArray(output?.hits) && output.hits.length > 0)
       || (Array.isArray(output?.sources) && output.sources.length > 0)
-      || (Array.isArray(output?.records) && output.records.length > 0);
+      || (Array.isArray(output?.records) && output.records.length > 0)
+      // A successful schema inspection is evidence even though it has no row citations.
+      || (Array.isArray(output?.datasets) && output.datasets.length > 0);
   });
+}
+
+export function hasStructuredQueryResult(results: Array<{ payload: { toolName?: string; result: unknown } }>): boolean {
+  return results.some(item => {
+    const tool = (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase();
+    const result = item.payload.result as Record<string, unknown> | undefined;
+    if (!result || result.error) return false;
+    if (tool === 'structureddataanalytics') return typeof result.operation === 'string'
+      || (typeof result.total === 'number' && Array.isArray(result.datasets));
+    if (tool === 'structuredrowlookup') return Array.isArray(result.records) && Array.isArray(result.sources);
+    if (tool === 'structureddatalookup') return Array.isArray(result.hits);
+    return false;
+  });
+}
+
+export function hasStructuredToolFailure(results: Array<{ payload: { toolName?: string; result: unknown } }>): boolean {
+  return results.some(item => {
+    const tool = (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase();
+    if (!['structureddatalookup', 'datasetdiscovery', 'structureddataanalytics', 'structuredrowlookup'].includes(tool)) return false;
+    const result = item.payload.result as { error?: unknown } | undefined;
+    return !result || Boolean(result.error);
+  });
+}
+
+/** Build auditable answers from database results without asking a small model to recreate citation IDs. */
+export function deterministicAnalyticsAnswer(results: Array<{ payload: { result: unknown } }>): string | undefined {
+  for (const item of [...results].reverse()) {
+    const result = item.payload.result as {
+      operation?: string; columnName?: string; total?: number;
+      datasets?: Array<{ filename: string; sheetName: string; count: number }>;
+      groups?: Array<{ value: string; count: number }>;
+      value?: unknown; sources?: Array<{ documentId: string; filename: string; sourceRef: string; chunkIndex: number }>;
+    } | undefined;
+    if (!result) continue;
+    const operation = result.operation ?? (typeof result.total === 'number' && Array.isArray(result.datasets) ? 'COUNT' : undefined);
+    if (!operation) continue;
+    if (!Array.isArray(result.sources)) continue;
+    const verifiedSources = result.sources.filter(source => source.documentId && source.filename && source.sourceRef && Number.isInteger(source.chunkIndex));
+    if (verifiedSources.length !== result.sources.length) continue;
+    const citations = verifiedSources.map(source => `[[${source.sourceRef}]]`).join(' ');
+    if (operation === 'COUNT' && typeof result.total === 'number') {
+      if (result.total > 0 && verifiedSources.length === 0) continue;
+      const details = (result.datasets ?? []).map(dataset => `${dataset.filename} (${dataset.sheetName}): ${dataset.count}`).join('; ');
+      return `${result.total === 0 ? 'Record count: 0 (the authorized query completed with no matching records)' : `Record count: ${result.total}`}${details ? `\nBy dataset: ${details}` : ''}${citations ? `\nSources: ${citations}` : ''}`;
+    }
+    if ((operation === 'GROUP_BY' || operation === 'DISTINCT') && Array.isArray(result.groups)) {
+      if (result.groups.length > 0 && verifiedSources.length === 0) continue;
+      const rows = result.groups.map(group => operation === 'GROUP_BY' ? `${group.value}: ${group.count}` : group.value).join('\n');
+      return `${rows ? (operation === 'GROUP_BY' ? 'Groups' : 'Distinct values') : 'Query completed successfully with no matching values'}${rows ? ` for ${result.columnName ?? 'the selected column'}:\n${rows}` : ''}${citations ? `\nSources: ${citations}` : ''}`;
+    }
+    if (result.value !== undefined) {
+      if (result.value !== null && verifiedSources.length === 0) continue;
+      return `${result.value === null ? `Query completed successfully; no numeric values were available for ${result.columnName ?? 'the selected column'}` : `${operation}${result.columnName ? ` for ${result.columnName}` : ''}: ${String(result.value)}`}${citations ? `\nSources: ${citations}` : ''}`;
+    }
+  }
+  return undefined;
+}
+
+export function deterministicDatasetSchemaAnswer(results: Array<{ payload: { toolName?: string; result: unknown } }>): string | undefined {
+  for (const item of [...results].reverse()) {
+    if ((item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase() !== 'datasetdiscovery') continue;
+    const result = item.payload.result as { datasets?: Array<{ filename: string; sheets: Array<{ sheetName: string; columns: string[] }> }> } | undefined;
+    if (!Array.isArray(result?.datasets)) continue;
+    if (!result.datasets.length) return 'There are no authorized structured datasets in this workspace.';
+    return `${result.datasets.map(dataset => `${dataset.filename}:\n${dataset.sheets.map(sheet => `- ${sheet.sheetName}: ${sheet.columns.join(', ')}`).join('\n')}`).join('\n\n')}\n\nSchema discovery completed. No row-level analytics or exact-record lookup was executed.`;
+  }
+  return undefined;
 }
 
 export function authorizedDocumentSearchFallback(typegraph: TypegraphService, message: string, principal: AuthPrincipal, abortSignal?: AbortSignal) {
@@ -53,6 +135,16 @@ export function withRetrievedEvidence(prompt: AgentMessage[], question: string, 
   if (lastUserIndex >= 0) next[lastUserIndex] = { role: 'user', content: augmented };
   else next.push({ role: 'user', content: augmented });
   return next;
+}
+
+function withCitationRepair(prompt: AgentMessage[], question: string, hits: DocumentSearchHit[]): AgentMessage[] {
+  const repaired = withRetrievedEvidence(prompt, question, hits);
+  const lastIndex = repaired.map(item => item.role).lastIndexOf('user');
+  if (lastIndex >= 0) {
+    const exactRefs = [...new Set(hits.map(hit => hit.sourceRef))];
+    repaired[lastIndex] = { role: 'user', content: `${repaired[lastIndex]!.content}\n\nCitation format validation rejected the previous draft. Write a concise answer supported only by the evidence above. Put an exact citation after each factual sentence, copied verbatim from this allowlist: ${exactRefs.map(ref => `[[${ref}]]`).join(' ')}. Do not add any other citation or factual claim.` };
+  }
+  return repaired;
 }
 
 function withStructuredEvidence(prompt: AgentMessage[], question: string, results: Array<{ payload: { result: unknown } }>): AgentMessage[] {
@@ -76,6 +168,178 @@ export class AgentService {
   ) {
     this.typegraph = typegraph;
     this.structuredData = structuredData;
+  }
+
+  private trace(event: string, detail: Record<string, unknown>) {
+    if (!config.agentTrace) return;
+    console.info(JSON.stringify({ type: 'sitepilot-agent-trace', event, ...detail }));
+  }
+
+  private traceArgs(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(item => this.traceArgs(item));
+    if (!value || typeof value !== 'object') {
+      if (typeof value === 'string') return { type: 'string', length: value.length, sha256: createHash('sha256').update(value).digest('hex').slice(0, 12) };
+      return value;
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      typeof item === 'string' && (key === 'operation' || key === 'operator') ? item
+        : typeof item === 'string' && key === 'documentId' ? { type: 'string', length: item.length, uuidValid: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item) }
+          : this.traceArgs(item),
+    ]));
+  }
+
+  private async traceToolCatalog(agent: ReturnType<typeof createSitePilotAgent>) {
+    const tools = await agent.listTools();
+    return Object.entries(tools).map(([name, tool]) => ({
+      name, description: tool.description,
+      inputSchema: z.toJSONSchema(tool.inputSchema as z.ZodType),
+      outputSchema: tool.outputSchema ? z.toJSONSchema(tool.outputSchema as z.ZodType) : undefined,
+    }));
+  }
+
+  private traceToolResults(results: Array<{ payload: { toolName?: string; result: unknown } }>) {
+    return results.map(item => {
+      const result = item.payload.result as Record<string, unknown> | undefined;
+      const sources = this.extractSources([{ payload: { result } }]);
+      return {
+        toolName: item.payload.toolName,
+        resultKeys: result && Object.keys(result),
+        operation: result?.operation,
+        total: result?.total,
+        groups: Array.isArray(result?.groups) ? result.groups.length : undefined,
+        hits: Array.isArray(result?.hits) ? result.hits.length : undefined,
+        records: Array.isArray(result?.records) ? result.records.length : undefined,
+        datasets: Array.isArray(result?.datasets) ? result.datasets.length : undefined,
+        sourceMap: sources.map(source => ({
+          documentIdHash: createHash('sha256').update(source.documentId).digest('hex').slice(0, 12),
+          sourceRefHash: createHash('sha256').update(source.sourceRef).digest('hex').slice(0, 12),
+          chunkIndex: source.chunkIndex,
+        })),
+        errorKind: result?.error === undefined ? undefined : typeof result.error,
+        errorCode: typeof result?.code === 'string' ? result.code : typeof result?.error === 'string' && /^[A-Z_]+$/.test(result.error) ? result.error : undefined,
+        errorMessageHash: typeof result?.message === 'string' ? createHash('sha256').update(result.message).digest('hex').slice(0, 12) : undefined,
+        validationIssueCount: Array.isArray(result?.validationErrors) ? result.validationErrors.length : undefined,
+        validationIssuePaths: Array.isArray(result?.validationErrors) ? result.validationErrors.slice(0, 8).map((issue: any) => Array.isArray(issue?.path) ? issue.path.map(String).join('.') : 'unknown') : undefined,
+      };
+    });
+  }
+
+  private traceCitationCheck(answer: string, results: Array<{ payload: { result: unknown } }>) {
+    const sources = this.extractSources(results);
+    const citedRefs = [...answer.matchAll(/\[\[([^\]]+)\]\]/g)].map(match => match[1] ?? '');
+    const allowed = new Set(sources.map(source => source.sourceRef));
+    return {
+      citedRefHashes: citedRefs.map(ref => createHash('sha256').update(ref).digest('hex').slice(0, 12)),
+      sourceRefHashes: [...allowed].map(ref => createHash('sha256').update(ref).digest('hex').slice(0, 12)),
+      missingCitation: sources.length > 0 && citedRefs.length === 0,
+      invalidCitationCount: citedRefs.filter(ref => !allowed.has(ref)).length,
+    };
+  }
+
+  private deterministicStructuredFinalization(results: Array<{ payload: { toolName?: string; result: unknown } }>) {
+    const analytics = deterministicAnalyticsAnswer(results);
+    if (analytics !== undefined) return { answer: analytics, sources: this.extractSources(results) };
+    for (const item of [...results].reverse()) {
+      const tool = (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase();
+      const result = item.payload.result as { hits?: DocumentSearchHit[]; records?: Array<{ cells?: Array<{ columnName: string; value: string }>; source?: StructuredSource; rowNumber?: number }>; sources?: StructuredSource[] } | undefined;
+      if (!result) continue;
+      if (tool === 'structureddatalookup' && Array.isArray(result.hits)) {
+        const sources = this.extractSources([item]);
+        if (sources.length !== result.hits.length) continue;
+        const lines = result.hits.map(hit => `- ${hit.content} [[${hit.sourceRef}]]`);
+        return { answer: lines.length ? `Matching records:\n${lines.join('\n')}` : 'The exact-value lookup completed successfully and found no matching authorized rows.', sources };
+      }
+      if (tool === 'structuredrowlookup' && Array.isArray(result.records) && Array.isArray(result.sources)) {
+        const sources = this.extractSources([item]);
+        if (sources.length !== result.sources.length || (result.records.length > 0 && sources.length === 0)) continue;
+        const sourceRefs = new Set(sources.map(source => source.sourceRef));
+        const lines = result.records.map(record => {
+          const ref = record.source?.sourceRef;
+          if (!ref || !sourceRefs.has(ref)) return undefined;
+          const cells = (record.cells ?? []).map(cell => `${cell.columnName}=${cell.value}`).join(' | ');
+          return `- Row ${record.rowNumber ?? ''}: ${cells} [[${ref}]]`;
+        });
+        if (lines.some(line => line === undefined)) continue;
+        return { answer: lines.length ? `Matching records:\n${lines.join('\n')}` : 'The row lookup completed successfully and found no matching authorized records.', sources };
+      }
+    }
+    const schema = deterministicDatasetSchemaAnswer(results);
+    if (schema !== undefined) return { answer: schema, sources: [] as VerifiedSource[] };
+    return undefined;
+  }
+
+  private async recoverAnalyticsCall(
+    calls: Array<{ payload: { toolName?: string; args?: unknown } }>, tenantId: string,
+  ): Promise<{ payload: { toolName: string; result: unknown } } | undefined> {
+    const call = [...calls].reverse().find(item => (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase() === 'structureddatanalytics');
+    const args = call?.payload.args as Record<string, unknown> | undefined;
+    const operation = args?.operation;
+    if (!['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_BY', 'DISTINCT'].includes(String(operation))) return undefined;
+    const sheetName = typeof args?.sheetName === 'string' ? args.sheetName : undefined;
+    const columnName = typeof args?.columnName === 'string' ? args.columnName : undefined;
+    const suppliedId = typeof args?.documentId === 'string' ? args.documentId : undefined;
+    const filters = args?.filters;
+    if (filters !== undefined && (!Array.isArray(filters) || filters.some(filter => {
+      const item = filter as Record<string, unknown>;
+      return typeof item?.columnName !== 'string' || typeof item?.value !== 'string'
+        || !['EQ', 'CONTAINS', 'GT', 'GTE', 'LT', 'LTE'].includes(String(item.operator));
+    }))) return undefined;
+
+    const datasets = await this.structuredData.discoverDatasets(tenantId);
+    const validUuid = typeof suppliedId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(suppliedId);
+    if (validUuid && !datasets.some(dataset => dataset.documentId === suppliedId)) return undefined;
+    const candidates = datasets.flatMap(dataset => dataset.sheets
+      .filter(sheet => (!sheetName || sheet.sheetName === sheetName)
+        && (!columnName || sheet.columns.includes(columnName)))
+      .filter(() => !validUuid || dataset.documentId === suppliedId)
+      .map(sheet => ({ documentId: dataset.documentId, sheetName: sheet.sheetName })));
+    if (candidates.length !== 1) return undefined;
+    const selected = candidates[0]!;
+    const result = await this.structuredData.aggregate(
+      operation as 'COUNT' | 'SUM' | 'AVG' | 'MIN' | 'MAX' | 'GROUP_BY' | 'DISTINCT',
+      columnName, tenantId, { documentId: selected.documentId, sheetName: selected.sheetName, filters: filters as never },
+    );
+    if (hasStructuredQueryResult([{ payload: { toolName: 'structured-data-analytics', result } }])) {
+      this.trace('structured-argument-recovery', { operation, reason: suppliedId === selected.documentId ? 'authorized-argument-retry' : 'unique-schema-match', sourceMap: this.traceToolResults([{ payload: { toolName: 'structured-data-analytics', result } }]) });
+      return { payload: { toolName: 'structured-data-analytics', result } };
+    }
+    return undefined;
+  }
+
+  private async recoverRowLookupCall(
+    calls: Array<{ payload: { toolName?: string; args?: unknown } }>, tenantId: string,
+  ): Promise<{ payload: { toolName: string; result: unknown } } | undefined> {
+    const call = [...calls].reverse().find(item => (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase() === 'structuredrowlookup');
+    const args = call?.payload.args as Record<string, unknown> | undefined;
+    const filters = args?.filters;
+    if (!Array.isArray(filters) || filters.length === 0 || filters.some(filter => {
+      const item = filter as Record<string, unknown>;
+      return typeof item?.columnName !== 'string' || typeof item?.value !== 'string'
+        || !['EQ', 'CONTAINS', 'GT', 'GTE', 'LT', 'LTE'].includes(String(item.operator));
+    })) return undefined;
+    const sheetName = typeof args?.sheetName === 'string' ? args.sheetName : undefined;
+    const suppliedId = typeof args?.documentId === 'string' ? args.documentId : undefined;
+    const datasets = await this.structuredData.discoverDatasets(tenantId);
+    const validUuid = typeof suppliedId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(suppliedId);
+    if (validUuid && !datasets.some(dataset => dataset.documentId === suppliedId)) return undefined;
+    const candidates = datasets.flatMap(dataset => dataset.sheets
+      .filter(sheet => (!sheetName || sheet.sheetName === sheetName)
+        && (filters as Array<{ columnName: string }>).every(filter => sheet.columns.includes(filter.columnName)))
+      .filter(() => !validUuid || dataset.documentId === suppliedId)
+      .map(sheet => ({ documentId: dataset.documentId, sheetName: sheet.sheetName })));
+    if (candidates.length !== 1) return undefined;
+    const selected = candidates[0]!;
+    const result = await this.structuredData.lookupRows(filters as never, tenantId, selected, Number.isInteger(args?.limit) ? Number(args?.limit) : 10);
+    if (!Array.isArray(result.records) || !Array.isArray(result.sources)) return undefined;
+    this.trace('structured-argument-recovery', { operation: 'ROW_LOOKUP', reason: suppliedId === selected.documentId ? 'authorized-argument-retry' : 'unique-schema-match', recordCount: result.records.length, sourceMap: this.traceToolResults([{ payload: { toolName: 'structured-row-lookup', result } }]) });
+    return { payload: { toolName: 'structured-row-lookup', result } };
+  }
+
+  private documentHits(results: Array<{ payload: { result: unknown } }>): DocumentSearchHit[] {
+    return results.flatMap(item => {
+      const output = item.payload.result as { hits?: DocumentSearchHit[] } | undefined;
+      return Array.isArray(output?.hits) ? output.hits : [];
+    });
   }
 
   async createConversation(principal: AuthPrincipal) {
@@ -105,7 +369,9 @@ export class AgentService {
   }
 
   async ask(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
+    if (config.agentOrchestration === 'workflow') return this.askWorkflow(message, conversationId, principal);
     const startedAt = performance.now();
+    const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
     const abortSignal = AbortSignal.timeout(config.agentTimeoutMs);
 
@@ -122,18 +388,39 @@ export class AgentService {
     }
 
     const agent = createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId);
+    if (config.agentTrace) {
+      this.trace('tool-catalog', { modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
+    }
     const response = await agent.generate(turn.prompt, {
       maxSteps: 4, abortSignal, ...this.ollamaGenerationOptions(),
     });
     let toolResults = response.toolResults;
     const toolNames = response.toolCalls.map(call => this.publicToolName(call.payload.toolName));
     let answer = response.text;
+    this.trace('model-step', {
+      mode: 'generate', requestHash, requestLength: message.length, stepCount: response.steps?.length, finishReason: response.finishReason,
+      toolCalls: response.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })),
+      toolResults: this.traceToolResults(response.toolResults), draft: { length: answer.length, citationCount: [...answer.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' },
+    });
     let fallbackDurationMs = 0;
 
-    const route = needsWorkspaceRecovery(toolResults)
-      ? await this.classifyUnresolvedRequest(agent, message, answer, abortSignal)
+    const unresolvedWithoutTool = response.toolCalls.length === 0;
+
+    const structuredFailure = hasStructuredToolFailure(toolResults);
+    const inventoryOnly = toolResults.some(item => (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase() === 'listdocuments')
+      && !toolResults.some(item => ['documentsearch', 'structureddatalookup', 'structureddataanalytics', 'structuredrowlookup'].includes((item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase()));
+    const route = structuredFailure
+      ? 'DATASET'
+      : inventoryOnly
+        ? 'DOCUMENT'
+      : unresolvedWithoutTool || needsWorkspaceRecovery(toolResults)
+        ? await this.classifyUnresolvedRequest(agent, message, answer, abortSignal)
       : 'GENERAL';
-    if (route === 'DOCUMENT') {
+    const resolvedRoute = route;
+    if (structuredFailure) this.trace('fallback-classification', { requestHash, output: resolvedRoute, reason: 'structured-tool-execution-failed' });
+    if (inventoryOnly) this.trace('fallback-classification', { requestHash, output: resolvedRoute, reason: 'inventory-does-not-answer-content' });
+    if (unresolvedWithoutTool) this.trace('fallback-classification', { requestHash, output: resolvedRoute, reason: 'no-tool-call' });
+    if (resolvedRoute === 'DOCUMENT') {
       const search = await authorizedDocumentSearchFallback(this.typegraph, message, principal, abortSignal);
       fallbackDurationMs += search.timing.searchMs;
       toolNames.push('documentSearch');
@@ -142,28 +429,60 @@ export class AgentService {
       else answer = (await agent.generate(withRetrievedEvidence(turn.prompt, message, search.hits), {
         maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(),
       })).text;
-    } else if (route === 'DATASET') {
+    } else if (resolvedRoute === 'SCHEMA') {
+      const schemaResult = { datasets: await this.structuredData.discoverDatasets(principal.tenantId) };
+      toolNames.push('datasetDiscovery');
+      toolResults = [...toolResults, { payload: { toolName: 'dataset-discovery', result: schemaResult } } as typeof toolResults[number]];
+      answer = deterministicDatasetSchemaAnswer([{ payload: { toolName: 'dataset-discovery', result: schemaResult } }]) ?? 'I could not inspect the authorized dataset schema.';
+    } else if (resolvedRoute === 'DATASET') {
       const datasets = await this.structuredData.discoverDatasets(principal.tenantId);
       if (!datasets.length) answer = 'I could not find authorized structured datasets for this request.';
       else {
+        const recovered = await this.recoverAnalyticsCall(response.toolCalls, principal.tenantId)
+          ?? await this.recoverRowLookupCall(response.toolCalls, principal.tenantId);
+        if (recovered) {
+          toolResults = [...toolResults, recovered as typeof toolResults[number]];
+          toolNames.push(this.publicToolName(recovered.payload.toolName));
+          answer = this.deterministicStructuredFinalization([recovered])?.answer ?? 'The authorized structured query completed, but its result could not be formatted.';
+        } else {
         const schemaPrompt = [...turn.prompt];
         const last = schemaPrompt.at(-1);
         if (last?.role === 'user') schemaPrompt[schemaPrompt.length - 1] = { role: 'user', content: `${last.content}\n\nAuthorized dataset schema (JSON): ${JSON.stringify(datasets).slice(0, 10000)}\nChoose and call the appropriate structured data tool. Do not infer values from schema.` };
-        const analytic = await agent.generate(schemaPrompt, { maxSteps: 3, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions() });
+        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions() });
+        this.trace('recovery-model-step', { requestHash, stepCount: analytic.steps?.length, finishReason: analytic.finishReason, toolCalls: analytic.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })), toolResults: this.traceToolResults(analytic.toolResults) });
         toolResults = [...toolResults, ...analytic.toolResults];
         toolNames.push(...analytic.toolCalls.map(call => this.publicToolName(call.payload.toolName)));
-        if (needsWorkspaceRecovery(analytic.toolResults)) answer = 'I could not retrieve authorized structured records to support this answer.';
+        if (!hasStructuredQueryResult(analytic.toolResults)) answer = 'I inspected the authorized dataset schema but could not complete the requested structured operation. Please clarify the dataset or operation.';
         else answer = (await agent.generate(withStructuredEvidence(turn.prompt, message, analytic.toolResults), {
           maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(),
         })).text;
+        }
       }
     }
 
-    if (route === 'GENERAL') toolResults = toolResults.filter(item => {
+    if (resolvedRoute === 'GENERAL') toolResults = toolResults.filter(item => {
       const output = item.payload.result as { hits?: unknown[]; sources?: unknown[] } | undefined;
       return !(Array.isArray(output?.hits) && output.hits.length === 0 && (!Array.isArray(output.sources) || output.sources.length === 0));
     });
-    const result = this.validateAnswer(answer, toolResults, [...new Set(toolNames)]);
+    const structuredResult = this.deterministicStructuredFinalization(toolResults);
+    answer = structuredResult?.answer ?? answer;
+    let result = structuredResult
+      ? { answer, sources: structuredResult.sources, toolsCalled: [...new Set(toolNames)], conversationId: '', timing: {}, citationValidation: 'valid' as const }
+      : this.validateAnswer(answer, toolResults, [...new Set(toolNames)]);
+    if (!structuredResult && result.citationValidation === 'fallback') {
+      const hits = this.documentHits(toolResults);
+      if (hits.length) {
+        try {
+          const retry = await agent.generate(withCitationRepair(turn.prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions() });
+          this.trace('citation-retry', { mode: 'generate', requestHash, stepCount: retry.steps?.length, finishReason: retry.finishReason, toolResults: this.traceToolResults(retry.toolResults), draft: { length: retry.text.length, citationCount: [...retry.text.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' } });
+          answer = retry.text;
+          result = this.validateAnswer(answer, toolResults, [...new Set(toolNames)]);
+        } catch (error) {
+          this.trace('citation-retry-failed', { mode: 'generate', requestHash, errorType: error instanceof Error ? error.name : 'unknown' });
+        }
+      }
+    }
+    this.trace('answer-finalized', { mode: 'generate', citationValidation: result.citationValidation, sources: result.sources.length, answerLength: result.answer.length, citationCheck: this.traceCitationCheck(answer, toolResults), draft: '[redacted]', toolResults: this.traceToolResults(toolResults) });
     await this.saveAssistant(turn.conversationId, result.answer);
     const timings = this.extractTimings(toolResults);
     return {
@@ -178,15 +497,37 @@ export class AgentService {
     };
   }
 
+  private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
+    const startedAt = performance.now();
+    const turn = await this.beginTurn(message, conversationId, principal);
+    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs));
+    const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
+    try {
+      const run = await workflow.createRun();
+      const execution = await run.start({ inputData: { message } });
+      if (execution.status !== 'success' || !execution.result) throw new Error('AGENT_WORKFLOW_FAILED');
+      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
+      await this.saveAssistant(turn.conversationId, final.answer);
+      return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
+        conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
+        timing: { totalMs: Math.round(performance.now() - startedAt), workflow: true } };
+    } catch (error) {
+      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'workflow-execution', code: error instanceof Error ? error.name : 'UNKNOWN', outcome: 'failure' });
+      throw error;
+    }
+  }
+
   private async classifyUnresolvedRequest(
     agent: ReturnType<typeof createSitePilotAgent>, question: string, draft: string, abortSignal: AbortSignal,
-  ): Promise<'GENERAL' | 'DOCUMENT' | 'DATASET'> {
+  ): Promise<'GENERAL' | 'DOCUMENT' | 'DATASET' | 'SCHEMA'> {
     const decision = await agent.generate([{
       role: 'user',
-      content: `Classify what evidence source is needed to answer the request. Reply with exactly one word: GENERAL (no workspace facts needed), DOCUMENT (semantic document content), or DATASET (structured rows, filtering, counts, or calculations). If uncertain, reply DOCUMENT. Do not answer the request.\nRequest: ${question}\nDraft answer: ${draft.slice(0, 600)}`,
+      content: `Classify the evidence or operation needed from the request alone. Ignore any draft answer because it may contain unsupported claims. Reply with one word: GENERAL (conversation or questions independent of the workspace), SCHEMA (the requested answer is a dataset or column list), DOCUMENT (semantic document content), or DATASET (the request needs structured row values, filters, counts, groups, or calculations). Facts about projects, people, policies, or uploaded files require DOCUMENT evidence even when no filename is mentioned. A request to count, group, filter, look up, or calculate over structured records is DATASET, even when the dataset name or sheet is supplied. Questions whose answer depends on the workspace are not GENERAL. Handle multilingual requests using their meaning; when the language or intent is uncertain, choose an evidence-based route rather than GENERAL. If uncertain, choose DOCUMENT. Do not answer the request.\nRequest: ${question}`,
     }], { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions() });
-    const label = decision.text.trim().toUpperCase().match(/^(GENERAL|DOCUMENT|DATASET)\b/)?.[1];
-    return label === 'GENERAL' ? 'GENERAL' : label === 'DATASET' ? 'DATASET' : 'DOCUMENT';
+    const label = decision.text.trim().toUpperCase().match(/^(GENERAL|SCHEMA|DOCUMENT|DATASET)\b/)?.[1];
+    const route = label === 'GENERAL' ? 'GENERAL' : label === 'SCHEMA' ? 'SCHEMA' : label === 'DATASET' ? 'DATASET' : 'DOCUMENT';
+    this.trace('fallback-classification', { requestHash: createHash('sha256').update(question).digest('hex').slice(0, 12), output: route, rawLength: decision.text.length, rawOutput: '[redacted]' });
+    return route;
   }
   async stream(
     message: string,
@@ -195,7 +536,9 @@ export class AgentService {
     write: EventWriter,
     principal: AuthPrincipal,
   ): Promise<AgentStreamResult> {
+    if (config.agentOrchestration === 'workflow') return this.streamWorkflow(message, conversationId, abortSignal, write, principal);
     const startedAt = performance.now();
+    const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
     await write('status', { status: 'started', conversationId: turn.conversationId });
 
@@ -214,6 +557,9 @@ export class AgentService {
     }
 
     const agent = createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId);
+    if (config.agentTrace) {
+      this.trace('tool-catalog', { mode: 'stream', modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
+    }
     const output = await agent.stream(turn.prompt, {
       maxSteps: 4,
       abortSignal,
@@ -360,18 +706,37 @@ export class AgentService {
       fullOutput.text || streamedText.join(''),
       { hidden: false, pending: '' },
     );
+    this.trace('model-step', {
+      mode: 'stream', requestHash, requestLength: message.length, stepCount: modelCallCount, finishObserved: nativeFinishSeen,
+      toolCalls: fullOutput.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })),
+      toolResults: this.traceToolResults(fullOutput.toolResults),
+      draft: { length: finalText.length, citationCount: [...finalText.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' },
+    });
 
-    const recoveryRoute = needsWorkspaceRecovery(fullOutput.toolResults)
-      ? await this.classifyUnresolvedRequest(agent, message, finalText, abortSignal)
+    const unresolvedWithoutTool = fullOutput.toolCalls.length === 0;
+
+    const structuredFailure = hasStructuredToolFailure(fullOutput.toolResults);
+    const inventoryOnly = fullOutput.toolResults.some(item => (item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase() === 'listdocuments')
+      && !fullOutput.toolResults.some(item => ['documentsearch', 'structureddatalookup', 'structureddataanalytics', 'structuredrowlookup'].includes((item.payload.toolName ?? '').replace(/[-_]/g, '').toLowerCase()));
+    const recoveryRoute = structuredFailure
+      ? 'DATASET'
+      : inventoryOnly
+        ? 'DOCUMENT'
+      : unresolvedWithoutTool || needsWorkspaceRecovery(fullOutput.toolResults)
+        ? await this.classifyUnresolvedRequest(agent, message, finalText, abortSignal)
       : 'GENERAL';
-    if (recoveryRoute === 'DOCUMENT') {
+    const resolvedRecoveryRoute = recoveryRoute;
+    if (structuredFailure) this.trace('fallback-classification', { requestHash, mode: 'stream', output: resolvedRecoveryRoute, reason: 'structured-tool-execution-failed' });
+    if (inventoryOnly) this.trace('fallback-classification', { requestHash, mode: 'stream', output: resolvedRecoveryRoute, reason: 'inventory-does-not-answer-content' });
+    if (unresolvedWithoutTool) this.trace('fallback-classification', { requestHash, mode: 'stream', output: resolvedRecoveryRoute, reason: 'no-tool-call' });
+    if (resolvedRecoveryRoute === 'DOCUMENT') {
       // Buffer the model's unverified draft. If auto tool choice skipped
       // documentSearch, do the same authorized TypeGraph search and regenerate
       // with its actual chunks before emitting any answer text.
       bufferedText.length = 0;
+      const search = await authorizedDocumentSearchFallback(this.typegraph, message, principal, abortSignal);
       toolsCalled.add('documentSearch');
       await write('tool-start', { toolName: 'documentSearch' });
-      const search = await authorizedDocumentSearchFallback(this.typegraph, message, principal, abortSignal);
       embeddingMs += search.timing.embeddingMs;
       retrievalMs += search.timing.retrievalMs;
       toolExecutionMs += search.timing.searchMs;
@@ -433,18 +798,43 @@ export class AgentService {
         fullOutput = groundedOutput;
         finalText = this.removeThinkingContent(groundedOutput.text || groundedText.join(''), { hidden: false, pending: '' });
       }
-    } else if (recoveryRoute === 'DATASET') {
+    } else if (resolvedRecoveryRoute === 'SCHEMA') {
+      const schemaResult = { datasets: await this.structuredData.discoverDatasets(principal.tenantId) };
+      toolsCalled.add('datasetDiscovery');
+      finalToolResults = [...fullOutput.toolResults, { payload: { toolName: 'dataset-discovery', result: schemaResult } } as typeof fullOutput.toolResults[number]];
+      await write('tool-start', { toolName: 'datasetDiscovery', recovery: true });
+      await write('tool-finish', { toolName: 'datasetDiscovery', sourceCount: 0, recovery: true });
+      finalText = deterministicDatasetSchemaAnswer([{ payload: { toolName: 'dataset-discovery', result: schemaResult } }]) ?? 'I could not inspect the authorized dataset schema.';
+    } else if (resolvedRecoveryRoute === 'DATASET') {
       bufferedText.length = 0;
       const datasets = await this.structuredData.discoverDatasets(principal.tenantId);
       if (!datasets.length) {
-        hasSearchResult = true;
+        hasSearchResult = false;
         suppressTextAfterNoEvidence = true;
         finalText = 'I could not find authorized structured datasets for this request.';
       } else {
+        const recovered = await this.recoverAnalyticsCall(fullOutput.toolCalls, principal.tenantId)
+          ?? await this.recoverRowLookupCall(fullOutput.toolCalls, principal.tenantId);
+        if (recovered) {
+          const recoveredResult = recovered as typeof fullOutput.toolResults[number];
+          finalToolResults = [...fullOutput.toolResults, recoveredResult];
+          const recoveredToolName = this.publicToolName(recovered.payload.toolName);
+          toolsCalled.add(recoveredToolName);
+          await write('tool-start', { toolName: recoveredToolName, recovery: true });
+          const structuredSources = this.extractSources([recoveredResult]);
+          hasSearchResult = true;
+          hasAnySearchHits = structuredSources.length > 0;
+          suppressTextAfterNoEvidence = false;
+          if (structuredSources.length) await write('sources', { sources: structuredSources });
+          for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
+          await write('tool-finish', { toolName: recoveredToolName, recovery: true, sourceCount: structuredSources.length });
+          finalText = this.deterministicStructuredFinalization([recoveredResult])?.answer ?? 'The authorized structured query completed, but its result could not be formatted.';
+        } else {
         const schemaPrompt = [...turn.prompt];
         const last = schemaPrompt.at(-1);
         if (last?.role === 'user') schemaPrompt[schemaPrompt.length - 1] = { role: 'user', content: `${last.content}\n\nAuthorized dataset schema (JSON): ${JSON.stringify(datasets).slice(0, 10000)}\nChoose and call the appropriate structured data tool. Do not infer values from schema.` };
-        const analytic = await agent.generate(schemaPrompt, { maxSteps: 3, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions() });
+        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions() });
+        this.trace('recovery-model-step', { requestHash, mode: 'stream', stepCount: analytic.steps?.length, finishReason: analytic.finishReason, toolCalls: analytic.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })), toolResults: this.traceToolResults(analytic.toolResults) });
         finalToolResults = [...fullOutput.toolResults, ...analytic.toolResults];
         for (const call of analytic.toolCalls) {
           const toolName = this.publicToolName(call.payload.toolName);
@@ -452,10 +842,10 @@ export class AgentService {
           toolsCalled.add(toolName);
           await write('tool-start', { toolName, recovery: true });
         }
-        if (needsWorkspaceRecovery(analytic.toolResults)) {
-          hasSearchResult = true;
+        if (!hasStructuredQueryResult(analytic.toolResults)) {
+          hasSearchResult = false;
           suppressTextAfterNoEvidence = true;
-          finalText = 'I could not retrieve authorized structured records to support this answer.';
+          finalText = 'I inspected the authorized dataset schema but could not complete the requested structured operation. Please clarify the dataset or operation.';
         } else {
           const structuredSources = this.extractSources(analytic.toolResults);
           hasSearchResult = true;
@@ -474,6 +864,7 @@ export class AgentService {
             await write('text-delta', { text: finalText, verification: 'provisional' });
           }
         }
+        }
       }
     } else if (bufferedText.length > 0) {
       for (const text of bufferedText.splice(0)) {
@@ -487,12 +878,42 @@ export class AgentService {
     if (promptTokens === null && typeof totalUsage.inputTokens === 'number') promptTokens = totalUsage.inputTokens;
     if (completionTokens === null && typeof totalUsage.outputTokens === 'number') completionTokens = totalUsage.outputTokens;
     const reasoningTokens = typeof totalUsage.reasoningTokens === 'number' ? totalUsage.reasoningTokens : null;
-    if (recoveryRoute === 'GENERAL') finalToolResults = finalToolResults.filter(item => {
+    if (resolvedRecoveryRoute === 'GENERAL') finalToolResults = finalToolResults.filter(item => {
       const output = item.payload.result as { hits?: unknown[]; sources?: unknown[] } | undefined;
       return !(Array.isArray(output?.hits) && output.hits.length === 0 && (!Array.isArray(output.sources) || output.sources.length === 0));
     });
-    const result = this.validateAnswer(finalText, finalToolResults, [...toolsCalled]);
-    if (recoveryRoute !== 'GENERAL' && hasSearchResult && !hasAnySearchHits) {
+    const structuredResult = this.deterministicStructuredFinalization(finalToolResults);
+    if (structuredResult !== undefined) finalText = structuredResult.answer;
+    let result = structuredResult !== undefined
+      ? { answer: finalText, sources: structuredResult.sources, toolsCalled: [...toolsCalled], conversationId: '', timing: {}, citationValidation: 'valid' as const }
+      : this.validateAnswer(finalText, finalToolResults, [...toolsCalled]);
+    if (!structuredResult && result.citationValidation === 'fallback') {
+      const hits = this.documentHits(finalToolResults);
+      if (hits.length) {
+        try {
+          const retryStep = modelCallCount + 1;
+          await write('step-start', { step: retryStep, recovery: 'citation' });
+          const retry = await agent.generate(withCitationRepair(turn.prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions() });
+          modelCallCount += retry.steps?.length ?? 1;
+          const usage = retry.totalUsage;
+          if (typeof usage.inputTokens === 'number') promptTokens = (promptTokens ?? 0) + usage.inputTokens;
+          if (typeof usage.outputTokens === 'number') completionTokens = (completionTokens ?? 0) + usage.outputTokens;
+          await write('step-finish', { step: retryStep, recovery: 'citation', promptTokens: usage.inputTokens ?? null, completionTokens: usage.outputTokens ?? null });
+          finalText = retry.text;
+          if (finalText) {
+            streamedText.push(finalText);
+            if (ttftMs === null) ttftMs = Math.round(performance.now() - startedAt);
+            await write('text-delta', { text: finalText, verification: 'provisional' });
+          }
+          this.trace('citation-retry', { mode: 'stream', requestHash, stepCount: retry.steps?.length, finishReason: retry.finishReason, draft: { length: retry.text.length, citationCount: [...retry.text.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' } });
+          result = this.validateAnswer(finalText, finalToolResults, [...toolsCalled]);
+        } catch (error) {
+          this.trace('citation-retry-failed', { mode: 'stream', requestHash, errorType: error instanceof Error ? error.name : 'unknown' });
+        }
+      }
+    }
+    this.trace('answer-finalized', { mode: 'stream', citationValidation: result.citationValidation, sources: result.sources.length, answerLength: result.answer.length, citationCheck: this.traceCitationCheck(finalText, finalToolResults), discardProvisional: result.citationValidation !== 'valid' || streamedText.join('') !== result.answer, finishObserved: nativeFinishSeen, toolResults: this.traceToolResults(finalToolResults) });
+    if (structuredResult === undefined && resolvedRecoveryRoute !== 'GENERAL' && hasSearchResult && !hasAnySearchHits) {
       result.answer = 'The indexed documents do not provide evidence to answer this question.';
       result.sources = [];
       result.citationValidation = 'no-evidence';
@@ -516,7 +937,7 @@ export class AgentService {
       retrievalMs: Math.round(retrievalMs),
       totalMs,
     };
-    const discardProvisional = result.citationValidation !== 'valid';
+    const discardProvisional = result.citationValidation !== 'valid' || streamedText.join('') !== result.answer;
     await write('done', {
       answer: result.answer,
       sources: result.sources,
@@ -528,6 +949,36 @@ export class AgentService {
       telemetry,
     });
     return { ...result, conversationId: turn.conversationId, timing: telemetry };
+  }
+
+  private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal): Promise<AgentStreamResult> {
+    const startedAt = performance.now();
+    const turn = await this.beginTurn(message, conversationId, principal);
+    await write('status', { status: 'started', orchestration: 'workflow', conversationId: turn.conversationId });
+    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal);
+    const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
+    let abort: (() => void) | undefined;
+    try {
+      const run = await workflow.createRun();
+      abort = () => { void run.cancel().catch(() => undefined); };
+      abortSignal.addEventListener('abort', abort, { once: true });
+      const execution = await run.start({ inputData: { message } });
+      if (execution.status !== 'success' || !execution.result) throw new Error('AGENT_WORKFLOW_FAILED');
+      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
+      await this.saveAssistant(turn.conversationId, final.answer);
+      for (const toolName of final.toolsCalled) await write('tool-finish', { toolName, status: 'validated' });
+      await write('text-delta', { text: final.answer, verification: 'verified' });
+      const timing = { totalMs: Math.round(performance.now() - startedAt), llmCalls: null, orchestration: 1 };
+      const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
+        conversationId: turn.conversationId, timing };
+      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
+      return result;
+    } catch (error) {
+      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'sse-workflow', code: error instanceof Error ? error.name : 'UNKNOWN', outcome: abortSignal.aborted ? 'cancelled' : 'failure' });
+      throw error;
+    } finally {
+      if (abort) abortSignal.removeEventListener('abort', abort);
+    }
   }
 
   private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{ conversationId: string; prompt: AgentMessage[] }> {

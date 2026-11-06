@@ -2,6 +2,10 @@
 import { test } from 'node:test';
 import {
   authorizedDocumentSearchFallback,
+  deterministicAnalyticsAnswer,
+  deterministicDatasetSchemaAnswer,
+  hasStructuredToolFailure,
+  hasStructuredQueryResult,
   needsWorkspaceRecovery,
   withRetrievedEvidence,
 } from '../src/agent/agent.service.js';
@@ -15,6 +19,26 @@ test('fallback eligibility depends on missing evidence, regardless of wording', 
   assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'document-search', result: { hits: [] } } }]), true);
   assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'document-search', result: { hits: [{ sourceRef: 'source-a' }] } } }]), false);
   assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'structured-data-lookup', result: { hits: [{ sourceRef: 'sheet row 4' }] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'dataset-discovery', result: { datasets: [{ documentId: 'd1' }] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'dataset-discovery', result: { datasets: [] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'structured-data-analytics', result: { operation: 'COUNT', total: 0, datasets: [], sources: [] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'structured-row-lookup', result: { records: [], sources: [] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'list-documents', result: { documents: [], durationMs: 1 } } }]), true);
+  assert.equal(hasStructuredQueryResult([{ payload: { toolName: 'structured-data-analytics', result: { operation: 'COUNT', total: 0, datasets: [], sources: [] } } }]), true);
+  assert.equal(hasStructuredQueryResult([{ payload: { toolName: 'structured-data-analytics', result: { error: true, message: 'invalid argument' } } }]), false);
+  assert.equal(hasStructuredToolFailure([{ payload: { toolName: 'structured-row-lookup', result: { error: true, message: 'invalid input' } } }]), true);
+  assert.equal(hasStructuredToolFailure([{ payload: { toolName: 'structured-data-analytics', result: { operation: 'COUNT', total: 0, datasets: [], sources: [] } } }]), false);
+});
+
+test('structured analytics answers preserve database values and exact provenance deterministically', () => {
+  const answer = deterministicAnalyticsAnswer([{ payload: { result: {
+    operation: 'GROUP_BY', columnName: 'FORM TÜRÜ',
+    groups: [{ value: 'Onay', count: 4 }, { value: 'Red', count: 2 }],
+    sources: [{ documentId: '12345678-aaaa-bbbb-cccc-dddddddddddd', filename: 'records.xlsx', sourceRef: 'records.xlsx [12345678] (Sheet1, rows 2-7)', chunkIndex: 0 }],
+  } } }]);
+  assert.equal(answer, 'Groups for FORM TÜRÜ:\nOnay: 4\nRed: 2\nSources: [[records.xlsx [12345678] (Sheet1, rows 2-7)]]');
+  assert.equal(deterministicAnalyticsAnswer([{ payload: { result: { operation: 'COUNT', total: 0, datasets: [], sources: [] } } }]), 'Record count: 0 (the authorized query completed with no matching records)');
+  assert.equal(deterministicDatasetSchemaAnswer([{ payload: { toolName: 'dataset-discovery', result: { datasets: [{ filename: 'records.xlsx', sheets: [{ sheetName: 'Sheet1', columns: ['FORM TÜRÜ'] }] }] } } }]), 'records.xlsx:\n- Sheet1: FORM TÜRÜ\n\nSchema discovery completed. No row-level analytics or exact-record lookup was executed.');
 });
 
 test('fallback search keeps authenticated tenant/user scope and supplies retrieved chunk text to the grounded prompt', async () => {

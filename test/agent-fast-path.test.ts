@@ -23,5 +23,5 @@ test('workspace recovery depends on evidence results, not question wording', () 
   assert.equal(needsWorkspaceRecovery([]), true);
   assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'document-search', result: { hits: [] } } }]), true);
   assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'document-search', result: { hits: [{ sourceRef: 'source-a' }] } } }]), false);
-  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'structured-data-analytics', result: { sources: [{ sourceRef: 'source-b' }] } } }]), false);
+  assert.equal(needsWorkspaceRecovery([{ payload: { toolName: 'structured-data-analytics', result: { operation: 'COUNT', total: 1, datasets: [], sources: [{ sourceRef: 'source-b' }] } } }]), false);
 });

@@ -20,8 +20,13 @@ test('Mastra exposes tenant-bound retrieval, inventory, exact lookup, and analyt
   const tools = await agent.listTools();
 
   assert.deepEqual(Object.keys(tools).sort(), ['datasetDiscovery', 'documentSearch', 'listDocuments', 'structuredDataAnalytics', 'structuredDataLookup', 'structuredRowLookup']);
+  for (const tool of Object.values(tools) as any[]) {
+    assert.ok(tool.inputSchema);
+    assert.ok(tool.outputSchema);
+  }
   await (tools as any).documentSearch.execute({ query: 'project leader', topK: 8 });
-  await (tools as any).listDocuments.execute({});
+  const listed = await (tools as any).listDocuments.execute({});
+  assert.deepEqual(listed, { documents: [], durationMs: 0 });
   await (tools as any).structuredDataLookup.execute({ value: 'CASE-17' });
   await (tools as any).structuredDataAnalytics.execute({ operation: 'GROUP_BY', columnName: 'Violation Type' });
   await (tools as any).datasetDiscovery.execute({});

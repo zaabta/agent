@@ -36,6 +36,8 @@ export const config = {
   documentWorkerConcurrency: Math.min(8, Math.max(1, Number(process.env.DOCUMENT_WORKER_CONCURRENCY || 2))),
   documentJobAttempts: Math.min(5, Math.max(1, Number(process.env.DOCUMENT_JOB_ATTEMPTS || 3))),
   agentTimeoutMs: Number(process.env.AGENT_REQUEST_TIMEOUT_MS || 180000),
+  agentTrace: process.env.AGENT_TRACE === 'true',
+  agentOrchestration: process.env.SITEPILOT_AGENT_ORCHESTRATION === 'workflow' ? 'workflow' : 'legacy',
   conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'dev-shared-api-key',
   conversationHistoryMessages: Math.max(0, Number(process.env.AGENT_HISTORY_MESSAGES || 10)),
   conversationHistoryChars: Math.max(256, Number(process.env.AGENT_HISTORY_MESSAGE_CHARS || 3000)),
