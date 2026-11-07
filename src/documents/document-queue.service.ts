@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { DOCUMENT_QUEUE } from './document-queue.constants.js';
 
 export interface ProcessDocumentJob {
-  documentId: string; tenantId: string; userId?: string; storageKey: string; filename: string; checksum: string; fileSize: number;
+  documentId: string; tenantId: string; userId?: string; storageKey: string; filename: string; checksum: string; fileSize: number; versionId?: string;
 }
 
 @Injectable()

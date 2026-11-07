@@ -1,8 +1,21 @@
 import { Mastra } from '@mastra/core/mastra';
-import type { AnySpan } from '@mastra/core/observability';
+import type { AnySpan, LogEvent } from '@mastra/core/observability';
 import { Observability, MastraStorageExporter, SamplingStrategyType } from '@mastra/observability';
 import { PostgresStore } from '@mastra/pg';
 import { config } from '../config.js';
+
+/** PostgresStore's legacy observability domain stores spans, not signal logs. */
+export class SitePilotMastraStorageExporter extends MastraStorageExporter {
+  override async onLogEvent(_event: LogEvent): Promise<void> {
+    // Application diagnostics remain in recordWorkflowDiagnostic and spans
+    // continue through MastraStorageExporter; only unsupported log persistence
+    // is disabled. In particular, no-op-trace logger signals are not exported.
+  }
+}
+
+export function createSitePilotStorageExporter() {
+  return new SitePilotMastraStorageExporter({ maxBatchSize: 100, maxBatchWaitMs: 1000 });
+}
 
 type LocalWorkflowDiagnostic = { traceId: string; tenantHash: string; recordedAt: string; details: Record<string, unknown> };
 const localDiagnostics = new Map<string, LocalWorkflowDiagnostic>();
@@ -64,13 +77,16 @@ function ensureObservability() {
       default: {
         serviceName: 'sitepilot-agent',
         sampling: { type: SamplingStrategyType.RATIO, probability: 0.1 },
-        exporters: [new MastraStorageExporter({ maxBatchSize: 100, maxBatchWaitMs: 1000 })],
+        exporters: [createSitePilotStorageExporter()],
         spanOutputProcessors: [redactSpan],
         serializationOptions: { maxStringLength: 256, maxDepth: 4, maxArrayLength: 20, maxObjectKeys: 30 },
       },
     },
   });
-  sitePilotMastra = new Mastra({ storage, observability });
+  // Provider SDK errors may carry raw response bodies; operational failures are
+  // already captured in redacted workflow diagnostics, so do not let the
+  // framework logger print request/provider payloads.
+  sitePilotMastra = new Mastra({ storage, observability, logger: false });
   const prune = () => { void sitePilotMastra?.getStorage()?.prune().catch(() => undefined); };
   prune();
   const retentionTimer = setInterval(prune, 24 * 60 * 60 * 1000);

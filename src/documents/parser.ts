@@ -37,12 +37,13 @@ function parseSpreadsheet(buffer: Buffer): { text: string; structuredCells: Stru
         const cell = sheet[address] as XLSX.CellObject | undefined;
         if (!cell || (cell.v == null && !cell.f)) continue;
         const display = cell.w ?? (cell.v == null ? '' : String(cell.v));
-        cells.push(`${address}=${cell.f ? `formula=${cell.f}; cached=${display}` : display}`);
         const headerAddress = XLSX.utils.encode_cell({ r: range.s.r, c: col });
         const headerCell = sheet[headerAddress] as XLSX.CellObject | undefined;
+        const columnName = headerCell?.w ?? String(headerCell?.v ?? `Column ${col - range.s.c + 1}`);
+        cells.push(`${address}=${cell.f ? `formula=${cell.f}; cached=${display}` : display}${row > range.s.r ? ` [${columnName}]` : ''}`);
         structuredCells.push({
           sheetName, rowNumber: row + 1, address,
-          columnName: headerCell?.w ?? String(headerCell?.v ?? `Column ${col - range.s.c + 1}`),
+          columnName,
           value: String(display), valueType: cell.t || typeof cell.v,
           ...(cell.f ? { formula: cell.f } : {}),
         });
@@ -67,7 +68,7 @@ function parseCsvDocument(text: string): { text: string; structuredCells: Struct
   const structuredCells: StructuredCell[] = [];
   const lines = [`CSV headers: ${headers.join(' | ')}`, ...rows.slice(1).map((row, index) => {
     row.forEach((value, col) => structuredCells.push({ sheetName: 'CSV', rowNumber: index + 2, address: `${index + 2}:${col + 1}`, columnName: headers[col] || `Column ${col + 1}`, value, valueType: 'string' }));
-    const values = headers.map((header, col) => `${header} (column ${col + 1})=${row[col] ?? ''}`);
+    const values = headers.map((header, col) => `${header} (column ${col + 1})=${row[col] ?? ''} [cell ${index + 2}:${col + 1}]`);
     return `Row ${index + 2}: ${values.join(' | ')}`;
   })];
   return { text: lines.join('\n'), structuredCells };
@@ -83,12 +84,14 @@ export async function parseDocument(filename: string, buffer: Buffer): Promise<P
     try {
       const converted = await mammoth.convertToHtml({ buffer });
       text = converted.value
-        .replace(/<h([1-6])\b[^>]*>/gi, 'Heading: ')
-        .replace(/<\/h[1-6]>/gi, '\n')
+        .replace(/<h([1-6])\b[^>]*>/gi, (_match, level: string) => `Heading ${level}: `)
+        .replace(/<\/h[1-6]>/gi, '\n\n')
+        .replace(/<li\b[^>]*>/gi, '- ')
+        .replace(/<\/li>/gi, '\n')
         .replace(/<tr\b[^>]*>/gi, 'Table row: ')
         .replace(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi, (_match, cell: string) => `${cell.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()} | `)
         .replace(/<\/tr>/gi, '\n')
-        .replace(/<\/(?:p|div|table|ul|ol)>/gi, '\n')
+        .replace(/<\/(?:p|div|table|ul|ol)>/gi, '\n\n')
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<[^>]+>/g, '')
         .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')

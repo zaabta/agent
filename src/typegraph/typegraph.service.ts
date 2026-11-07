@@ -5,6 +5,9 @@ import { Pool } from 'pg';
 import { config } from '../config.js';
 import { EmbeddingsService } from './embeddings.service.js';
 import { typegraphConfig } from './typegraph.config.js';
+import type { SmartChunk } from '../documents/smart-chunker.js';
+import { repairFilenameEncoding } from '../documents/display-name.js';
+import { PrismaService } from '../prisma/prisma.service.js';
 
 export interface DocumentSearchHit {
   content: string;
@@ -17,6 +20,11 @@ export interface DocumentSearchHit {
     chunkIndex: number;
     chunkCount: number;
     location?: string;
+    documentVersionId?: string;
+    chunkId?: string;
+    contentHash?: string;
+    paragraphStart?: number;
+    paragraphEnd?: number;
   };
   metadata: Record<string, unknown>;
 }
@@ -29,7 +37,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: config.databaseUrl });
   private readonly clients = new Map<string, Promise<typegraphInstance>>();
 
-  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService) {}
+  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService, @Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async onModuleInit(): Promise<void> {
     try {
@@ -45,15 +53,22 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     await this.pool.end();
   }
 
-  async ingestDocument(document: { id: string; name: string; content: string; metadata: Record<string, unknown> }, abortSignal?: AbortSignal, tenantId = config.tenantId, userId?: string, graphExtraction = config.typegraphGraphExtraction, onProgress?: (event: TypegraphIngestProgress) => void) {
+  async ingestDocument(document: { id: string; name: string; content: string; metadata: Record<string, unknown> }, abortSignal?: AbortSignal, tenantId = config.tenantId, userId?: string, graphExtraction = config.typegraphGraphExtraction, onProgress?: (event: TypegraphIngestProgress) => void, chunks?: SmartChunk[]) {
     const startedAt = performance.now();
     const client = await this.clientFor(tenantId);
-    const measured = await this.embeddings.measure(() => client.document.ingest(document, {
+    const inputs = chunks?.length ? chunks.map(chunk => ({
+      id: `${document.id}::${String(document.metadata.documentVersionId || 'legacy')}::g${String(document.metadata.indexGeneration || 1)}::${chunk.id}`,
+      name: document.name,
+      content: chunk.content,
+      metadata: { ...document.metadata, ...chunk, chunkId: chunk.id, chunkIndex: chunk.index, chunkCount: chunks.length },
+    })) : document;
+    const measured = await this.embeddings.measure(() => client.document.ingest(inputs, {
         bucketId: 'documents',
         context: this.actor(userId),
         // SDK 0.6 resolves chunk identity from deduplicateBy. Its default is
         // ['url']; uploads have no URL, so all documents otherwise share a key.
         deduplicateBy: ['id'],
+        ...(chunks?.length ? { chunkSize: 2400, chunkOverlap: 0 } : {}),
         abortSignal,
         graphExtraction,
         ...(onProgress ? { onProgress: event => {
@@ -79,19 +94,58 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   async listDocuments(tenantId = config.tenantId, userId?: string) {
     const startedAt = performance.now();
     const client = await this.clientFor(tenantId);
-    const documents = await client.document.list(
-      { bucketId: 'documents' },
-      { context: this.actor(userId) },
-    );
+    const active = await this.activeVersionScopes(tenantId);
+    const activeIds = new Set(await this.activeTypegraphDocumentIds(client, userId, active));
+    const documents: Array<{ id: string; metadata: Record<string, unknown> }> = [];
+    let offset = 0;
+    while (true) {
+      const page = await client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: 500, offset });
+      const items = Array.isArray(page) ? page : page.items;
+      documents.push(...items.filter(document => activeIds.has(document.id)));
+      if (items.length < 500) break;
+      offset += items.length;
+    }
     return { documents, durationMs: Math.round(performance.now() - startedAt) };
   }
 
   async deleteDocument(id: string, tenantId = config.tenantId, userId?: string) {
     const client = await this.clientFor(tenantId);
-    return client.document.delete(
-      { bucketId: 'documents', documentIds: [id] },
-      { context: this.actor(userId) },
-    );
+    return this.deleteDocumentScope(id, undefined, tenantId, userId);
+  }
+
+  async deleteDocumentScope(documentId: string, documentVersionId?: string, tenantId = config.tenantId, userId?: string, indexGeneration?: number) {
+    const client = await this.clientFor(tenantId);
+    const documents: Array<{ id: string; metadata: Record<string, unknown> }> = [];
+    let offset = 0;
+    while (true) {
+      const page = await client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: 500, offset });
+      const items = Array.isArray(page) ? page : page.items;
+      documents.push(...items);
+      if (items.length < 500) break;
+      offset += items.length;
+    }
+    const ids = documents.filter(document => document.metadata.documentId === documentId &&
+      (documentVersionId === undefined || document.metadata.documentVersionId === documentVersionId) &&
+      (indexGeneration === undefined || Number(document.metadata.indexGeneration ?? 1) === indexGeneration)).map(document => document.id);
+    if (!ids.includes(documentId) && documentVersionId === undefined) ids.push(documentId); // legacy TypeGraph identity
+    if (!ids.length) return 0;
+    return client.document.delete({ bucketId: 'documents', documentIds: ids }, { context: this.actor(userId) });
+  }
+
+  async deleteLegacyDocumentScope(documentId: string, tenantId = config.tenantId, userId?: string) {
+    const client = await this.clientFor(tenantId);
+    const documents: Array<{ id: string; metadata: Record<string, unknown> }> = [];
+    let offset = 0;
+    while (true) {
+      const page = await client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: 500, offset });
+      const items = Array.isArray(page) ? page : page.items;
+      documents.push(...items);
+      if (items.length < 500) break;
+      offset += items.length;
+    }
+    const ids = documents.filter(document => (document.metadata.documentId === documentId && typeof document.metadata.documentVersionId !== 'string') || document.id === documentId).map(document => document.id);
+    if (!ids.length) return 0;
+    return client.document.delete({ bucketId: 'documents', documentIds: ids }, { context: this.actor(userId) });
   }
 
   async searchDocuments(query: string, limit = 5, tenantId = config.tenantId, userId?: string, abortSignal?: AbortSignal, minScore = config.typegraphMinScore): Promise<{
@@ -101,13 +155,28 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   }> {
     const startedAt = performance.now();
     const client = await this.clientFor(tenantId);
+    const candidateLimit = Math.min(Math.max(limit * 8, 16), 64);
+    const activeScopes = await this.activeVersionScopes(tenantId);
+    const candidateDocumentIds = await this.activeTypegraphDocumentIds(client, userId, activeScopes, query);
+    if (!candidateDocumentIds.length) {
+      return { query, hits: [], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: Math.round(performance.now() - startedAt) } };
+    }
     const measured = await this.embeddings.measure(() => client.search(query, {
         buckets: ['documents'],
         resources: config.typegraphGraphExtraction ? ['documents', 'entities', 'facts'] : ['documents'],
         weights: { semantic: 1, bm25: 1, graph: config.typegraphGraphExtraction ? 0.5 : false, recency: false },
         fusion: { method: 'rrf', k: 60 },
-        ...(config.typegraphRerank ? { rerank: { topK: Math.max(8, limit) } } : {}),
-        limit: Math.min(Math.max(limit, 1), 8),
+        // Graph-only additions are not constrained by documentIds in SDK 0.6.
+        // Permit graph evidence only when it reinforces an already-authorized
+        // indexed chunk, whose candidates were filtered before ranking.
+        graphReinforcement: 'only',
+        ...(config.typegraphRerank ? { rerank: { topK: candidateLimit } } : {}),
+        limit: candidateLimit,
+        // TypeGraph SDK 0.6 supports documentIds filtering before semantic,
+        // BM25/hybrid fusion, and reranking. The IDs are enumerated from the
+        // tenant's active published versions below; post-filtering remains a
+        // second fail-closed check for publication races and stale index rows.
+        documentFilter: { bucketId: 'documents', documentIds: candidateDocumentIds },
         context: this.actor(userId),
         abortSignal,
       }),
@@ -121,9 +190,10 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       query,
       // Keep retrieval inside TypeGraph, then discard weak native-ranked hits so
       // unrelated high-level matches cannot be offered as factual evidence.
-      hits: response.results.chunks
+      hits: (await this.activeVersionHits(response.results.chunks, tenantId))
         .map(hit => this.toSearchHit(hit))
-        .filter(hit => hit.score >= minScore),
+        .filter(hit => hit.score >= minScore)
+        .slice(0, Math.min(Math.max(limit, 1), 8)),
       timing: {
         embeddingMs: Math.round(embeddingDurationMs),
         retrievalMs: Math.max(0, Math.round(searchDurationMs - embeddingDurationMs)),
@@ -132,28 +202,118 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private async activeVersionScopes(tenantId: string) {
+    const docs = await this.prisma.appDocument.findMany({
+      where: { tenantId, status: 'ready', activeVersionId: { not: null } },
+      select: { id: true, activeVersionId: true },
+    });
+    const activeVersionIds = docs.flatMap(doc => doc.activeVersionId ? [doc.activeVersionId] : []);
+    const versions = activeVersionIds.length ? await this.prisma.appDocumentVersion.findMany({
+      where: { id: { in: activeVersionIds }, tenantId },
+      select: { id: true, chunkingStrategy: true, activeIndexGeneration: true },
+    }) : [];
+    return new Map(docs.map(doc => {
+      const version = versions.find(item => item.id === doc.activeVersionId);
+      return [doc.id, {
+        versionId: doc.activeVersionId,
+        activeGeneration: version?.activeIndexGeneration,
+        legacy: Boolean(version && version.chunkingStrategy === 'legacy'),
+      }] as const;
+    }));
+  }
+
+  private async activeTypegraphDocumentIds(client: typegraphInstance, userId: string | undefined, active: Awaited<ReturnType<TypegraphService['activeVersionScopes']>>, query?: string) {
+    const ids: string[] = [];
+    const filenameMatches: string[] = [];
+    const normalizedQuery = query?.normalize('NFC').toLocaleLowerCase();
+    const pageSize = 2000;
+    const collect = (items: Array<{ id: string; name?: string; metadata: Record<string, unknown> }>) => {
+      for (const document of items) {
+        const logicalId = typeof document.metadata.documentId === 'string' ? document.metadata.documentId : document.id.split('::')[0]!;
+        const scope = active.get(logicalId);
+        if (!scope || !scope.versionId) continue;
+        const indexedVersionId = document.metadata.documentVersionId;
+        let isActive = false;
+        if (typeof indexedVersionId === 'string') {
+          isActive = indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration;
+        } else {
+          isActive = scope.legacy;
+        }
+        if (isActive) {
+          ids.push(document.id);
+          const names = [document.name, document.metadata.originalFilename].filter((name): name is string => typeof name === 'string');
+          if (normalizedQuery && names.some(name => {
+            const normalizedName = name.normalize('NFC').toLocaleLowerCase();
+            const index = normalizedQuery.indexOf(normalizedName);
+            const isWord = (character: string | undefined) => Boolean(character && /[\p{L}\p{N}_]/u.test(character));
+            return index >= 0 && !isWord(normalizedQuery[index - 1]) && !isWord(normalizedQuery[index + normalizedName.length]);
+          })) filenameMatches.push(document.id);
+        }
+      }
+    };
+    const firstPage = await client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: pageSize, offset: 0 });
+    const firstItems = Array.isArray(firstPage) ? firstPage : firstPage.items;
+    collect(firstItems);
+    if (!Array.isArray(firstPage)) {
+      const pageCount = Math.ceil(firstPage.total / pageSize);
+      const remaining = await Promise.all(Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) =>
+        client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: pageSize, offset: (pageIndex + 1) * pageSize }),
+      ));
+      for (const page of remaining) collect(Array.isArray(page) ? page : page.items);
+    }
+    // When the request contains an exact indexed filename, constrain retrieval
+    // to that file before semantic/BM25 fusion and reranking. If no exact name
+    // was found, retain normal tenant-scoped semantic search behavior.
+    return filenameMatches.length ? [...new Set(filenameMatches)] : ids;
+  }
+
+  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string) {
+    const active = await this.activeVersionScopes(tenantId);
+    return chunks.flatMap(hit => {
+      const id = typeof hit.metadata.documentId === 'string' ? hit.metadata.documentId : hit.document.id.split('::')[0]!;
+      const state = active.get(id);
+      if (!state || !state.versionId) return [];
+      const versionId = hit.metadata.documentVersionId;
+      if (typeof versionId === 'string') {
+        return state.versionId === versionId && Number(hit.metadata.indexGeneration ?? 1) === state.activeGeneration ? [hit] : [];
+      }
+      return state.legacy ? [{ ...hit, metadata: { ...hit.metadata, documentVersionId: state.versionId } }] : [];
+    });
+  }
+
   private toSearchHit(hit: QueryChunkResult): DocumentSearchHit {
-    const filename = hit.document.name;
+    const filename = repairFilenameEncoding(hit.document.name);
     const chunkIndex = hit.chunk.index;
-    const location = this.sourceLocation(hit.content);
+    const location = this.sourceLocation(hit.content, hit.metadata);
     const sourceRef = `${filename} (${location || `chunk ${chunkIndex + 1}`})`;
     return {
       content: hit.content,
       score: hit.score,
       sourceRef,
       citation: {
-        documentId: hit.document.id,
+        documentId: typeof hit.metadata.documentId === 'string' ? hit.metadata.documentId : hit.document.id.split('::')[0]!,
         filename,
         bucketId: hit.document.bucketId,
-        chunkIndex,
-        chunkCount: hit.chunk.total,
+        chunkIndex: Number.isInteger(hit.metadata.chunkIndex) ? Number(hit.metadata.chunkIndex) : chunkIndex,
+        chunkCount: Number.isInteger(hit.metadata.chunkCount) ? Number(hit.metadata.chunkCount) : hit.chunk.total,
         ...(location ? { location } : {}),
+        ...(typeof hit.metadata.documentVersionId === 'string' ? { documentVersionId: hit.metadata.documentVersionId } : {}),
+        ...(typeof hit.metadata.chunkId === 'string' ? { chunkId: hit.metadata.chunkId } : {}),
+        ...(typeof hit.metadata.contentHash === 'string' ? { contentHash: hit.metadata.contentHash } : {}),
+        ...(Number.isInteger(hit.metadata.paragraphStart) ? { paragraphStart: Number(hit.metadata.paragraphStart) } : {}),
+        ...(Number.isInteger(hit.metadata.paragraphEnd) ? { paragraphEnd: Number(hit.metadata.paragraphEnd) } : {}),
       },
       metadata: hit.metadata,
     };
   }
 
-  private sourceLocation(content: string): string | undefined {
+  private sourceLocation(content: string, metadata: Record<string, unknown> = {}): string | undefined {
+    if (Number.isInteger(metadata.pageNumber)) return `page ${metadata.pageNumber}`;
+    if (Array.isArray(metadata.headingPath) && metadata.headingPath.length) return `section ${metadata.headingPath.join(' › ')}${Number.isInteger(metadata.paragraphStart) ? `, paragraph${metadata.paragraphStart === metadata.paragraphEnd ? '' : 's'} ${metadata.paragraphStart}${metadata.paragraphStart === metadata.paragraphEnd ? '' : `-${metadata.paragraphEnd}`}` : ''}`;
+    if (typeof metadata.sheetName === 'string' && Number.isInteger(metadata.rowStart)) {
+      const rows = metadata.rowStart === metadata.rowEnd ? `row ${metadata.rowStart}` : `rows ${metadata.rowStart}-${metadata.rowEnd}`;
+      return `sheet ${metadata.sheetName}, ${rows}${typeof metadata.cellRange === 'string' ? `, cells ${metadata.cellRange}` : ''}`;
+    }
     const page = content.match(/\bPage\s+(\d+)\s*:/i)?.[1];
     if (page) return `page ${page}`;
     const sheet = content.match(/^Sheet:\s*(.+)$/im)?.[1]?.trim();

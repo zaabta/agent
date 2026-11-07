@@ -5,7 +5,7 @@ import { config } from '../config.js';
 
 type CellFilter = { columnName: string; operator: 'EQ' | 'CONTAINS' | 'GT' | 'GTE' | 'LT' | 'LTE'; value: string };
 type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[] };
-export type StructuredSource = { documentId: string; filename: string; sourceRef: string; chunkIndex: number };
+export type StructuredSource = { documentId: string; filename: string; sourceRef: string; chunkIndex: number; documentVersionId?: string; chunkId?: string; contentHash?: string };
 type QueryRow = Record<string, unknown>;
 
 function joinClauses(clauses: Prisma.Sql[]): Prisma.Sql {
@@ -29,17 +29,28 @@ function rowRanges(values: number[]): string {
   return `rows ${ranges.join(', ')}`;
 }
 
-function source(documentId: string, filename: string, sheetName: string, rows: number[], chunkIndex: number): StructuredSource {
-  return { documentId, filename, sourceRef: `${filename} [${documentId.slice(0, 8)}] (${sheetName}, ${rowRanges(rows)})`, chunkIndex };
+function source(documentId: string, filename: string, sheetName: string, rows: number[], chunkIndex: number, documentVersionId?: string): StructuredSource {
+  return { documentId, ...(documentVersionId ? { documentVersionId } : {}), filename, sourceRef: `${filename} [${documentId.slice(0, 8)}] (${sheetName}, ${rowRanges(rows)})`, chunkIndex };
 }
 
 @Injectable()
 export class StructuredDataService {
-  constructor(@Inject(PrismaService) private readonly prisma: Pick<PrismaService, 'appDocumentCell' | '$queryRaw'>) {}
+  constructor(@Inject(PrismaService) private readonly prisma: Pick<PrismaService, 'appDocument' | 'appDocumentCell' | '$queryRaw'>) {}
+
+  private async activeVersionIds(tenantId: string, documentId?: string) {
+    const documents = await this.prisma.appDocument.findMany({ where: { tenantId, status: 'ready', activeVersionId: { not: null }, ...(documentId ? { id: documentId } : {}) }, select: { activeVersionId: true } });
+    return [...new Set(documents.flatMap(document => document.activeVersionId ? [document.activeVersionId] : []))];
+  }
+
+  private versionSql(ids: string[], alias = 'c'): Prisma.Sql {
+    if (!ids.length) return Prisma.sql`AND FALSE`;
+    return Prisma.sql`AND ${Prisma.raw(`${alias}.version_id`)} IN (${Prisma.join(ids.map(id => Prisma.sql`${id}::uuid`))})`;
+  }
 
   private async structuredColumns(tenantId: string, documentId?: string, sheetName?: string): Promise<string[]> {
+    const activeVersionIds = await this.activeVersionIds(tenantId, documentId);
     const columns = await this.prisma.appDocumentCell.findMany({
-      where: { tenantId, ...(documentId ? { documentId } : {}), ...(sheetName ? { sheetName } : {}), document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } } },
+      where: { tenantId, versionId: { in: activeVersionIds }, ...(documentId ? { documentId } : {}), ...(sheetName ? { sheetName } : {}), document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } } },
       distinct: ['columnName'], select: { columnName: true }, orderBy: { columnName: 'asc' }, take: 500,
     });
     return columns.map(column => column.columnName);
@@ -69,6 +80,7 @@ export class StructuredDataService {
       return Prisma.sql`AND EXISTS (
         SELECT 1 FROM app_document_cells f
         WHERE f.tenant_id = c.tenant_id AND f.document_id = c.document_id
+          AND f.version_id = c.version_id
           AND f.sheet_name = c.sheet_name AND f.row_number = c.row_number
           AND f.column_name = ${column} AND ${compare}
       )`;
@@ -76,9 +88,11 @@ export class StructuredDataService {
   }
 
   async discoverDatasets(tenantId = config.tenantId, documentId?: string) {
+    const activeVersionIds = await this.activeVersionIds(tenantId, documentId);
     const rows = await this.prisma.appDocumentCell.findMany({
       where: {
         tenantId,
+        versionId: { in: activeVersionIds },
         ...(documentId ? { documentId } : {}),
         document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } },
       },
@@ -111,37 +125,37 @@ export class StructuredDataService {
     const documentClause = filter.documentId ? Prisma.sql`AND d.id = ${filter.documentId}::uuid` : Prisma.empty;
     const sheetClause = filter.sheetName ? Prisma.sql`AND c.sheet_name = ${filter.sheetName}` : Prisma.empty;
     const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
-      SELECT r.document_id AS "documentId", d.filename, r.sheet_name AS "sheetName",
+      SELECT r.document_id AS "documentId", r.version_id AS "versionId", d.filename, r.sheet_name AS "sheetName",
         COUNT(*)::int AS count, MIN(r.row_number)::int AS "firstRow", MAX(r.row_number)::int AS "lastRow"
       FROM (
-        SELECT DISTINCT c.document_id, c.tenant_id, c.sheet_name, c.row_number
+        SELECT DISTINCT c.document_id, c.version_id, c.tenant_id, c.sheet_name, c.row_number
         FROM app_document_cells c
         JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
-        WHERE c.tenant_id = ${tenantId} AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
+        WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
           ${documentClause} ${sheetClause} ${joinClauses(rowFilters)}
           AND c.row_number > (
             SELECT MIN(h.row_number) FROM app_document_cells h
-            WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.sheet_name = c.sheet_name
+            WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name
           )
           AND EXISTS (
             SELECT 1 FROM app_document_cells populated
-            WHERE populated.tenant_id = c.tenant_id AND populated.document_id = c.document_id
+            WHERE populated.tenant_id = c.tenant_id AND populated.document_id = c.document_id AND populated.version_id = c.version_id
               AND populated.sheet_name = c.sheet_name AND populated.row_number = c.row_number
               AND BTRIM(populated.value) <> ''
           )
       ) r
       JOIN app_documents d ON d.id = r.document_id AND d.tenant_id = r.tenant_id
-      GROUP BY r.document_id, d.filename, r.sheet_name
+      GROUP BY r.document_id, r.version_id, d.filename, r.sheet_name
       ORDER BY d.filename, r.sheet_name
     `);
     const datasets = rows.map(row => ({
-      documentId: String(row.documentId), filename: String(row.filename), sheetName: String(row.sheetName),
+      documentId: String(row.documentId), documentVersionId: String(row.versionId), filename: String(row.filename), sheetName: String(row.sheetName),
       count: Number(row.count), firstRow: Number(row.firstRow), lastRow: Number(row.lastRow),
     }));
     const total = datasets.reduce((sum, dataset) => sum + dataset.count, 0);
     const sources = datasets.map((dataset, index) => source(
       dataset.documentId, dataset.filename, dataset.sheetName,
-      dataset.firstRow <= dataset.lastRow ? [dataset.firstRow, dataset.lastRow] : [], index,
+      dataset.firstRow <= dataset.lastRow ? [dataset.firstRow, dataset.lastRow] : [], index, dataset.documentVersionId,
     ));
     return {
       operation: 'COUNT', total, definition: 'A record is one distinct source row containing at least one nonblank cell. The first used row in each sheet is treated as the header and excluded.',
@@ -156,11 +170,11 @@ export class StructuredDataService {
     const documentClause = filter.documentId ? Prisma.sql`AND d.id = ${filter.documentId}::uuid` : Prisma.empty;
     const sheetClause = filter.sheetName ? Prisma.sql`AND c.sheet_name = ${filter.sheetName}` : Prisma.empty;
     const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
-      SELECT c.document_id AS "documentId", d.filename, c.sheet_name AS "sheetName", c.row_number AS "rowNumber"
+      SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName", c.row_number AS "rowNumber"
       FROM app_document_cells c JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
-      WHERE c.tenant_id = ${tenantId} AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
+      WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
         ${documentClause} ${sheetClause} ${joinClauses(clauses)}
-        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.sheet_name = c.sheet_name))
+        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
       GROUP BY c.document_id, d.filename, c.sheet_name, c.row_number
       ORDER BY d.filename, c.sheet_name, c.row_number LIMIT ${safeLimit}
     `);
@@ -171,10 +185,11 @@ export class StructuredDataService {
       const sheetName = String(row.sheetName);
       const rowNumber = Number(row.rowNumber);
       const cells = await this.prisma.appDocumentCell.findMany({
-        where: { tenantId, documentId, sheetName, rowNumber },
+        where: { tenantId, documentId, versionId: String(row.versionId ?? ''), sheetName, rowNumber },
         orderBy: { address: 'asc' }, select: { address: true, columnName: true, value: true },
       });
-      const ref = source(documentId, String(row.filename), sheetName, [rowNumber], sources.length);
+      const versionId = String(row.versionId);
+      const ref = source(documentId, String(row.filename), sheetName, [rowNumber], sources.length, versionId);
       sources.push(ref);
       records.push({ documentId, filename: String(row.filename), sheetName, rowNumber, cells, source: ref });
     }
@@ -200,16 +215,16 @@ export class StructuredDataService {
 
     if (operation === 'GROUP_BY' || operation === 'DISTINCT') {
       const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
-        SELECT c.document_id AS "documentId", d.filename, c.sheet_name AS "sheetName",
+        SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName",
           LOWER(BTRIM(c.value)) AS normalized, MIN(BTRIM(c.value)) AS label,
           COUNT(DISTINCT c.row_number)::int AS count,
           ARRAY_AGG(DISTINCT c.row_number ORDER BY c.row_number) AS "rowNumbers"
         FROM app_document_cells c
         JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
-        WHERE c.tenant_id = ${tenantId} AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
+        WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
           ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn} AND BTRIM(c.value) <> ''
-          AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.sheet_name = c.sheet_name))
-        GROUP BY c.document_id, d.filename, c.sheet_name, LOWER(BTRIM(c.value))
+          AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
+        GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name, LOWER(BTRIM(c.value))
         ORDER BY count DESC, normalized ASC, d.filename ASC LIMIT 1000
       `);
       const groups = new Map<string, { value: string; count: number; sources: StructuredSource[] }>();
@@ -219,7 +234,7 @@ export class StructuredDataService {
         const group = groups.get(key) ?? { value: String(row.label), count: 0, sources: [] };
         group.count += Number(row.count);
         const rowNumbers = Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [];
-        const ref = source(String(row.documentId), String(row.filename), String(row.sheetName), rowNumbers, allSources.length);
+        const ref = source(String(row.documentId), String(row.filename), String(row.sheetName), rowNumbers, allSources.length, String(row.versionId));
         group.sources.push(ref); allSources.push(ref); groups.set(key, group);
       }
       const values = [...groups.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
@@ -240,24 +255,24 @@ export class StructuredDataService {
         COUNT(*) FILTER (WHERE BTRIM(c.value) ~ ${numberPattern})::int AS "numericCount",
         COUNT(*) FILTER (WHERE BTRIM(c.value) <> '' AND BTRIM(c.value) !~ ${numberPattern})::int AS "nonnumericCount"
       FROM app_document_cells c JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
-      WHERE c.tenant_id = ${tenantId} AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
+      WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
         ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn}
         AND BTRIM(c.value) <> ''
-        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.sheet_name = c.sheet_name))
+        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
     `);
     const value = numeric[0]?.value ?? null;
     const provenanceRows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
-      SELECT c.document_id AS "documentId", d.filename, c.sheet_name AS "sheetName",
+      SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName",
         ARRAY_AGG(DISTINCT c.row_number ORDER BY c.row_number) FILTER (WHERE BTRIM(c.value) ~ ${numberPattern}) AS "rowNumbers"
       FROM app_document_cells c JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
-      WHERE c.tenant_id = ${tenantId} AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
+      WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
         ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn}
-        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.sheet_name = c.sheet_name))
-      GROUP BY c.document_id, d.filename, c.sheet_name
+        AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
+      GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name
     `);
     const sources = provenanceRows.map((row, index) => source(
       String(row.documentId), String(row.filename), String(row.sheetName),
-      Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [], index,
+      Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [], index, String(row.versionId),
     ));
     return {
       operation, columnName: safeColumn, value,
@@ -274,13 +289,15 @@ export class StructuredDataService {
     const candidates = [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, 40);
     if (!candidates.length) return { query: '', hits: [], durationMs: 0 };
     const startedAt = performance.now();
+    const activeVersionIds = await this.activeVersionIds(tenantId);
     const matches = await this.prisma.appDocumentCell.findMany({
       where: {
         tenantId,
+        versionId: { in: activeVersionIds },
         OR: candidates.map(value => ({ value: { equals: value, mode: 'insensitive' as const } })),
         document: { status: 'ready', tenantId },
       },
-      include: { document: { select: { id: true, filename: true } } },
+      include: { document: { select: { id: true, filename: true, activeVersionId: true } } },
       orderBy: [{ documentId: 'asc' }, { sheetName: 'asc' }, { rowNumber: 'asc' }],
       take: 5,
     });
@@ -297,7 +314,7 @@ export class StructuredDataService {
       const [, sheetName, rowText] = key.split(':');
       const rowNumber = Number(rowText);
       const cells = await this.prisma.appDocumentCell.findMany({
-        where: { documentId: match.documentId, tenantId, sheetName, rowNumber },
+        where: { documentId: match.documentId, tenantId, versionId: match.versionId, sheetName, rowNumber },
         orderBy: { address: 'asc' },
         select: { address: true, columnName: true, value: true, formula: true },
       });
@@ -305,7 +322,7 @@ export class StructuredDataService {
       const content = `Source reference: [[${sourceRef}]]\n${match.document.filename} — ${sheetName} row ${rowNumber}: ${cells.map(cell => `${cell.columnName}=${cell.value}${cell.formula ? ` (formula ${cell.formula})` : ''}`).join(' | ')}`;
       hits.push({
         content, score: 1, sourceRef,
-        citation: { documentId: match.documentId, filename: match.document.filename, bucketId: 'structured-data', chunkIndex: index, chunkCount: groups.size },
+        citation: { documentId: match.documentId, documentVersionId: match.versionId, filename: match.document.filename, bucketId: 'structured-data', chunkIndex: index, chunkCount: groups.size },
         metadata: { sheetName, rowNumber, matchedCell: match.address, matchedColumn: match.columnName, matchedColumns: [...group.columns] },
       });
     }

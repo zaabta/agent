@@ -4,12 +4,14 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { TypegraphService } from "../typegraph/typegraph.service.js";
 import { StructuredDataService } from "../documents/structured-data.service.js";
+import { modelWithExplicitFallback } from "../agent/provider-errors.js";
 
 export function createSitePilotAgent(
   typegraph: TypegraphService,
   structuredData: StructuredDataService,
   tenantId = config.tenantId,
   userId?: string,
+  maxRetries = 2,
 ) {
   const documentSearch = createTool({
     id: "document-search",
@@ -126,7 +128,7 @@ export function createSitePilotAgent(
       ),
   });
 
-  const model =
+  const primaryModel =
     config.modelProvider === "ollama"
       ? {
           providerId: "ollama",
@@ -136,10 +138,17 @@ export function createSitePilotAgent(
           api: "chat" as const,
         }
       : config.model;
+  const fallbackModel = config.modelFallback
+    ? config.modelProvider === "ollama"
+      ? { providerId: "ollama", modelId: config.modelFallback, url: `${config.ollamaUrl.replace(/\/+$/, "")}/v1`, apiKey: "local-ollama", api: "chat" as const }
+      : config.modelFallback
+    : undefined;
+  const model = modelWithExplicitFallback(primaryModel, fallbackModel, config.modelProvider);
   return new Agent({
     id: "sitepilot-agent",
     name: "SitePilot RAG Agent",
     model,
+    maxRetries,
     instructions: `You are SitePilot, a multilingual document Q&A assistant.\n
     Use the tools to answer requests that require authorized workspace documents or datasets, regardless of topic or wording. Do not infer that an unfamiliar question is general conversation just because its terms are unfamiliar. For general questions that do not depend on workspace data, answer directly.\n
     Treat facts about the user's own workspace, projects, organization, people, policies, records, and decisions as requiring authorized evidence, even when the question does not mention an uploaded file. When unsure whether a requested fact is workspace-specific, use the appropriate discovery or retrieval tool.\n

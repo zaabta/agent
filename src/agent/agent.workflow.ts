@@ -8,6 +8,7 @@ import type { StructuredDataService } from '../documents/structured-data.service
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { recordWorkflowDiagnostic, registerWorkflowTracing, tenantTraceKey } from '../mastra/observability.js';
+import { modelWithExplicitFallback, safeProviderFailure, withProviderRetry } from './provider-errors.js';
 
 const filterSchema = z.object({
   columnName: z.string().min(1).max(250),
@@ -23,7 +24,7 @@ const planFields = {
   value: z.string().optional().describe('Exact cell value to search across authorized structured rows.'),
   reply: z.string().optional().describe('Brief non-factual conversational response; do not use for workspace-dependent facts.'),
 };
-const operationDescription = 'Choose discover for structured dataset, sheet, or column schemas; list for file inventory; aggregate for row counts, calculations, groups, or distinct values; lookup for exact values or filtered records; retrieve for semantic document content; respond only for ordinary conversation independent of workspace evidence. Greetings, thanks, and simple social acknowledgements are ordinary conversation and must not call workspace tools.';
+const operationDescription = 'Choose discover for structured dataset, sheet, or column schemas; list only for explicit file inventory; retrieve for semantic content questions, including questions about a named file; aggregate for row counts, calculations, groups, or distinct values; lookup for exact values or filtered records; respond only for ordinary conversation independent of workspace evidence. A filename mention alone is not an inventory request. Greetings, thanks, and simple social acknowledgements are ordinary conversation and must not call workspace tools.';
 const planSchema = z.discriminatedUnion('operation', [
   z.object({ ...planFields, operation: z.literal('aggregate').describe(operationDescription), aggregate: z.enum(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_BY', 'DISTINCT']).describe('Required operation within structured analytics. COUNT counts source rows and requires no column.') }),
   z.object({ ...planFields, operation: z.literal('lookup').describe(operationDescription) }),
@@ -44,7 +45,7 @@ const evidenceSchema = z.object({
 });
 const finalSchema = z.object({
   answer: z.string(),
-  sources: z.array(z.object({ documentId: z.string(), filename: z.string(), sourceRef: z.string(), chunkIndex: z.number().int() })),
+  sources: z.array(z.object({ documentId: z.string(), documentVersionId: z.string().optional(), chunkId: z.string().optional(), contentHash: z.string().optional(), paragraphStart: z.number().int().optional(), paragraphEnd: z.number().int().optional(), filename: z.string(), sourceRef: z.string(), chunkIndex: z.number().int() })),
   toolsCalled: z.array(z.string()),
   citationValidation: z.enum(['valid', 'no-evidence', 'fallback']),
   outcome: z.enum(['success', 'empty', 'clarification', 'failure']),
@@ -54,12 +55,12 @@ type Plan = z.infer<typeof planSchema>;
 type PublicTool = { inputSchema?: { parse: (input: unknown) => unknown }; execute: (input: any, context: any) => Promise<unknown> };
 
 function sourceList(results: Array<{ result: any }>) {
-  const byRef = new Map<string, { documentId: string; filename: string; sourceRef: string; chunkIndex: number }>();
+  const byRef = new Map<string, { documentId: string; documentVersionId?: string; chunkId?: string; contentHash?: string; paragraphStart?: number; paragraphEnd?: number; filename: string; sourceRef: string; chunkIndex: number }>();
   for (const { result } of results) {
     for (const hit of result?.hits ?? []) {
       const citation = hit.citation;
       if (citation?.documentId && citation?.filename && hit.sourceRef && Number.isInteger(citation.chunkIndex)) {
-        byRef.set(hit.sourceRef, { documentId: citation.documentId, filename: citation.filename, sourceRef: hit.sourceRef, chunkIndex: citation.chunkIndex });
+        byRef.set(hit.sourceRef, { documentId: citation.documentId, ...(citation.documentVersionId ? { documentVersionId: citation.documentVersionId } : {}), ...(citation.chunkId ? { chunkId: citation.chunkId } : {}), ...(citation.contentHash ? { contentHash: citation.contentHash } : {}), ...(citation.paragraphStart ? { paragraphStart: citation.paragraphStart } : {}), ...(citation.paragraphEnd ? { paragraphEnd: citation.paragraphEnd } : {}), filename: citation.filename, sourceRef: hit.sourceRef, chunkIndex: citation.chunkIndex });
       }
     }
     for (const source of result?.sources ?? []) {
@@ -70,7 +71,7 @@ function sourceList(results: Array<{ result: any }>) {
 }
 
 function schemaAwarePrompt(message: string, datasets: any[]) {
-  return `Create a constrained execution plan using ONLY this authorized schema. Use exact dataset IDs, sheet names, and column names from it. Never invent a column, value, ID, answer, or SQL. Choose discover for schema/column information, list only for document inventory, retrieve for unstructured document facts, aggregate for row counts/calculations/groups/distinct values, lookup only for an exact cell value or row criteria, and respond only for ordinary conversation independent of workspace evidence. Greetings, thanks, and simple social acknowledgements are ordinary conversation and must not call workspace tools. COUNT means total source data rows and takes no column. GROUP_BY means counts per distinct value in a named actual column; do not substitute total COUNT when the request asks for groups by a column. A lookup value must be a cell value, never a filename, sheet name, or column label. If the request names a dataset file, select that exact file's document ID from the schema. Filters use actual column names. If operation or target remains ambiguous, omit unsafe arguments. Preserve the user's language in a conversational reply.\nAuthorized schema: ${JSON.stringify(datasets)}\nRequest: ${message}`;
+  return `Create a constrained execution plan using ONLY this authorized schema. Use exact dataset IDs, sheet names, and column names from it. Never invent a column, value, ID, answer, or SQL. Choose discover for schema/column information, list only when the user explicitly asks which files/documents are available or asks to list them, retrieve when the user asks to explain, summarize, or answer a content question about a named file, aggregate for row counts/calculations/groups/distinct values, lookup only for an exact cell value or row criteria, and respond only for ordinary conversation independent of workspace evidence. A filename mention alone is not a request to list files. Greetings, thanks, and simple social acknowledgements are ordinary conversation and must not call workspace tools. COUNT means total source data rows and takes no column. GROUP_BY means counts per distinct value in a named actual column; do not substitute total COUNT when the request asks for groups by a column. A lookup value must be a cell value, never a filename, sheet name, or column label. If the request names a dataset file, select that exact file's document ID from the schema. Filters use actual column names. If operation or target remains ambiguous, omit unsafe arguments. Preserve the user's language in a conversational reply.\nAuthorized schema: ${JSON.stringify(datasets)}\nRequest: ${message}`;
 }
 function fingerprint(value?: string) { return value ? createHash('sha256').update(value).digest('hex').slice(0, 12) : undefined; }
 function containsExactFilename(message: string, filename: string) {
@@ -112,17 +113,45 @@ function exactValueCandidates(message: string): string[] {
   return candidates;
 }
 
-export function createAgentWorkflow(typegraph: TypegraphService, structured: StructuredDataService, principal: AuthPrincipal, abortSignal?: AbortSignal) {
-  const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId);
+export interface AgentWorkflowProgress {
+  stage: string;
+  status: 'in_progress' | 'completed';
+  message: string;
+  toolName?: string;
+}
+
+export interface AgentWorkflowStreamCallbacks {
+  onProgress?: (progress: AgentWorkflowProgress) => Promise<void>;
+  onTextDelta?: (text: string) => Promise<void>;
+  onTextReset?: () => Promise<void>;
+}
+
+export function createAgentWorkflow(typegraph: TypegraphService, structured: StructuredDataService, principal: AuthPrincipal, abortSignal?: AbortSignal, callbacks: AgentWorkflowStreamCallbacks = {}) {
+  const progress = (stage: string, status: AgentWorkflowProgress['status'], message: string, toolName?: string) =>
+    callbacks.onProgress?.({ stage, status, message, ...(toolName ? { toolName } : {}) }) ?? Promise.resolve();
+  const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId, 0);
   const requestId = randomUUID();
   const stepDurations: Record<string, number> = {};
   const planner = new Agent({
     id: `sitepilot-planner-${requestId}`,
     name: 'SitePilot constrained planner',
-    model: config.modelProvider === 'ollama'
+    model: modelWithExplicitFallback(config.modelProvider === 'ollama'
       ? { providerId: 'ollama', modelId: config.model, url: `${config.ollamaUrl.replace(/\/+$/, '')}/v1`, apiKey: 'local-ollama', api: 'chat' }
       : config.model,
-    instructions: 'Return only a validated operation plan, never a factual answer. Distinguish structured schema discovery from a file inventory: schema discovery selects discover; filenames or document inventory select list. Counts, calculations, groups, and distinct values select aggregate; exact cell values or criteria based on row content select lookup; semantic document facts select retrieve. Workspace-dependent facts always require authorized evidence. Greetings, thanks, and simple social acknowledgements are ordinary conversation: select respond and do not call workspace tools. Select respond only for ordinary conversation independent of workspace evidence. If uncertain, choose an evidence-seeking operation rather than respond.',
+      config.modelFallback
+        ? config.modelProvider === 'ollama'
+          ? { providerId: 'ollama', modelId: config.modelFallback, url: `${config.ollamaUrl.replace(/\/+$/, '')}/v1`, apiKey: 'local-ollama', api: 'chat' }
+          : config.modelFallback
+        : undefined,
+      config.modelProvider),
+    maxRetries: 0,
+    instructions: 'Return only a validated operation plan, never a factual answer. Distinguish a request to list available files from a question about a named file: explicit inventory requests select list; explain/summarize/content questions about a named file select retrieve. A filename mention by itself is never enough to select list. Structured schema discovery selects discover. Counts, calculations, groups, and distinct values select aggregate; exact cell values or criteria based on row content select lookup; semantic document facts select retrieve. Workspace-dependent facts always require authorized evidence. Greetings, thanks, and simple social acknowledgements are ordinary conversation: select respond and do not call workspace tools. Select respond only for ordinary conversation independent of workspace evidence. If uncertain, choose an evidence-seeking operation rather than respond.',
+  });
+  const retryPlanner = new Proxy(planner, {
+    get(target, property, receiver) {
+      if (property === 'generate') return (...args: any[]) => withProviderRetry(() => (target.generate as any)(...args), { signal: abortSignal });
+      return Reflect.get(target, property, receiver);
+    },
   });
   const plan = createStep({
     id: 'request-context-and-plan',
@@ -130,8 +159,9 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
     inputSchema,
     outputSchema: z.object({ message: z.string(), plan: planSchema }),
     execute: async ({ inputData }) => {
+      await progress('planning', 'in_progress', 'Understanding your request');
       const startedAt = performance.now();
-      const generated = await planner.generate([{ role: 'user', content: inputData.message }], {
+      const generated = await retryPlanner.generate([{ role: 'user', content: inputData.message }], {
         structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } },
         abortSignal,
         tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
@@ -140,6 +170,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       const chosen = parsed.success ? parsed.data : { operation: 'retrieve' as const, retrievalQuery: inputData.message };
       tracePlan(requestId, 'initial', chosen, inputData.message, []);
       stepDurations.planningMs = Math.round(performance.now() - startedAt);
+      await progress('planning', 'completed', 'Request plan is ready');
       return { message: inputData.message, plan: chosen };
     },
   });
@@ -165,11 +196,14 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       const invoke = async (key: string, args: unknown) => {
         const tool = toolset[key];
         if (!tool) throw new Error(`WORKFLOW_TOOL_MISSING:${key}`);
+        const stage = key === 'documentSearch' ? 'searching' : key === 'datasetDiscovery' ? 'discovering' : 'executing';
+        await progress(stage, 'in_progress', key === 'documentSearch' ? 'Searching authorized documents' : key === 'datasetDiscovery' ? 'Checking available workspace data' : 'Running a workspace lookup', key);
         try {
           const input = tool.inputSchema?.parse(args) ?? args;
           const result = await tool.execute(input, { abortSignal });
           toolResults.push({ name: key, result });
           toolNames.push(key);
+          await progress(stage, 'completed', key === 'documentSearch' ? 'Document search completed' : key === 'datasetDiscovery' ? 'Workspace data is ready' : 'Workspace lookup completed', key);
           return result as any;
         } catch (error) {
           traceFailure(requestId, principal.tenantId, { step: 'tool-execution', tool: key, code: error instanceof Error ? error.name : 'UNKNOWN', argumentHash: fingerprint(JSON.stringify(args)), elapsedMs: Math.round(performance.now() - startedAt) });
@@ -182,7 +216,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         if (!sufficientlyRanked(output.hits ?? []).length && /[^\x00-\x7F]/u.test(query)) {
           const querySchema = z.object({ query: z.string().min(2).max(600) });
           try {
-            const rewritten = await planner.generate([{ role: 'user', content: `Rewrite this request as a concise English semantic search query that preserves its meaning and named facts. Do not answer it.\nRequest: ${query}` }], {
+            const rewritten = await retryPlanner.generate([{ role: 'user', content: `Rewrite this request as a concise English semantic search query that preserves its meaning and named facts. Do not answer it.\nRequest: ${query}` }], {
               structuredOutput: { schema: querySchema, errorStrategy: 'fallback', fallbackValue: { query } }, abortSignal,
               tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
             });
@@ -207,14 +241,43 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         const citationSchema = z.object({ answer: z.string(), evidenceSufficient: z.boolean(), evidenceIds: z.array(z.enum(evidenceIds)) });
         const evidenceText = evidence.map(item => `${item.id}: ${item.hit.content}`).join('\n\n');
         try {
-          const prompt = `Answer in the user's language using only facts supported by the supplied excerpts. Select evidenceIds using only the short labels shown; select a label only if its excerpt supports a factual claim in your answer. Do not select unrelated excerpts. Set evidenceSufficient false when the excerpts do not answer the question, and then provide a brief insufficiency statement with no evidenceIds.\nQuestion: ${inputData.message}\nEvidence:\n${evidenceText}`;
-          const generationOptions = { maxSteps: 1, toolChoice: 'none' as const, structuredOutput: { schema: citationSchema, errorStrategy: 'fallback' as const, fallbackValue: { answer: '', evidenceSufficient: false, evidenceIds: [] } }, abortSignal, tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } } };
-          const grounded = await agent.generate([{ role: 'user', content: prompt }], generationOptions);
+          const generateWithoutTools = (messages: any, options: any) => withProviderRetry(
+            () => agent.generate(messages, { ...options, maxRetries: 0 }),
+            { signal: abortSignal },
+          );
+          await progress('composing', 'in_progress', 'Writing an answer from the retrieved evidence');
+          const prompt = `Answer in the user's language using only facts supported by the supplied excerpts. Do not include citations or evidence labels; the server will attach verified citations after validation. If the excerpts do not answer the question, briefly say so without adding unsupported facts.\nQuestion: ${inputData.message}\nEvidence:\n${evidenceText}`;
+          const tracingOptions = { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } };
+          const draft = await withProviderRetry(async () => {
+            const answerStream = await agent.stream([{ role: 'user', content: prompt }], { maxSteps: 1, toolChoice: 'none', abortSignal, tracingOptions });
+            let streamedDraft = '';
+            for await (const chunk of answerStream.fullStream) {
+              if (chunk.type === 'text-delta' && chunk.payload.text) {
+                streamedDraft += chunk.payload.text;
+                await callbacks.onTextDelta?.(chunk.payload.text);
+              }
+            }
+            const output = await answerStream.getFullOutput();
+            if (output.error) throw output.error;
+            return streamedDraft.trim() ? streamedDraft : output.text;
+          }, {
+            signal: abortSignal,
+            onRetry: async () => {
+              await callbacks.onTextReset?.();
+              await progress('composing', 'in_progress', 'Retrying the answer generation');
+            },
+          });
+          await progress('composing', 'completed', 'Draft answer is ready');
+          await progress('validating', 'in_progress', 'Checking the answer against its evidence');
+          const validatePrompt = `Evaluate the proposed answer using only the supplied excerpts. Preserve the proposed answer if supported; otherwise correct it or state that the evidence is insufficient. Select evidenceIds only from the excerpts that support factual claims. Set evidenceSufficient false when the excerpts do not answer the question and provide a brief insufficiency statement with no evidenceIds.\nQuestion: ${inputData.message}\nProposed answer: ${draft}\nEvidence:\n${evidenceText}`;
+          const generationOptions = { maxSteps: 1, toolChoice: 'none' as const, structuredOutput: { schema: citationSchema, errorStrategy: 'fallback' as const, fallbackValue: { answer: '', evidenceSufficient: false, evidenceIds: [] } }, abortSignal, tracingOptions };
+          const grounded = await generateWithoutTools([{ role: 'user', content: validatePrompt }], generationOptions);
           let parsed = citationSchema.safeParse(grounded.object);
           if (parsed.success && parsed.data.evidenceSufficient && !parsed.data.evidenceIds.length) {
-            const repaired = await agent.generate([{ role: 'user', content: `${prompt}\n\nYour previous draft claimed the excerpts were sufficient but omitted evidenceIds. Recheck the draft against the excerpts and return the short evidence label that supports it. If no excerpt supports the answer, change evidenceSufficient to false and state that evidence is insufficient.` }], generationOptions);
+            const repaired = await generateWithoutTools([{ role: 'user', content: `${validatePrompt}\n\nYour previous validation claimed the answer was sufficient but omitted evidenceIds. Recheck the proposed answer against the excerpts and return the short evidence label that supports it. If no excerpt supports the answer, change evidenceSufficient to false and state that the evidence is insufficient.` }], generationOptions);
             parsed = citationSchema.safeParse(repaired.object);
           }
+          await progress('validating', 'completed', 'Evidence check completed');
           if (!parsed.success || !parsed.data.answer.trim()) return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
           if (!parsed.data.evidenceSufficient) {
             if (parsed.data.evidenceIds.length) return { answer: 'The retrieved excerpts did not sufficiently support a factual answer.', outcome: 'failure' as const, citationFailure: 'unsupported' as const };
@@ -227,7 +290,8 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const sourceRefs = [...new Set(parsed.data.evidenceIds.map(id => evidence.find(item => item.id === id)?.sourceRef).filter((ref): ref is string => Boolean(ref)))];
           if (sourceRefs.length !== parsed.data.evidenceIds.length) return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'unknown' as const };
           return { answer: `${parsed.data.answer.trim()}\n\nSources: ${sourceRefs.map(ref => `[[${ref}]]`).join(' ')}`, outcome: 'success' as const, citationFailure: undefined };
-        } catch {
+        } catch (error) {
+          if (safeProviderFailure(error)) throw error;
           return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
         }
       };
@@ -238,7 +302,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           // Re-evaluate every evidence-seeking request with the actual authorized
           // schema available. This recovers from a mistaken first-step route
           // without inspecting question wording in backend routing code.
-          const refined = await planner.generate([{ role: 'user', content: schemaAwarePrompt(inputData.message, datasets) }], {
+          const refined = await retryPlanner.generate([{ role: 'user', content: schemaAwarePrompt(inputData.message, datasets) }], {
             structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } },
             abortSignal,
             tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
@@ -250,7 +314,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             if (candidate.data.operation === 'respond' && !structuredInitial) {
               planningConflict = true;
             } else if (plan.operation === 'retrieve' && ['discover', 'list'].includes(candidate.data.operation)) {
-              const conflict = await planner.generate([{ role: 'user', content: `Resolve two conflicting plans for the same request. The initial plan selected document retrieval, while a plan made after database schema inspection selected ${candidate.data.operation}. The existence of database tables does not mean the user asked about them. Choose discover only if the requested output is schema metadata, retrieve for workspace-dependent document facts, and respond for ordinary conversation independent of workspace data. Workspace-dependent facts always need evidence. Return a plan only; do not answer factual questions.\nRequest: ${inputData.message}` }], {
+              const conflict = await retryPlanner.generate([{ role: 'user', content: `Resolve two conflicting plans for the same request. The initial plan selected document retrieval, while a plan made after database schema inspection selected ${candidate.data.operation}. The existence of database tables does not mean the user asked about them. Choose discover only if the requested output is schema metadata, retrieve for workspace-dependent document facts, and respond for ordinary conversation independent of workspace data. Workspace-dependent facts always need evidence. Return a plan only; do not answer factual questions.\nRequest: ${inputData.message}` }], {
                 structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } }, abortSignal,
                 tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
               });
@@ -261,7 +325,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             } else if (candidate.data.operation === 'respond' && structuredInitial) {
               // Keep evidence-seeking requests on an evidence path.
             } else if (structuredInitial && !['aggregate', 'lookup'].includes(candidate.data.operation)) {
-              const repair = await planner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nTwo bounded planning passes conflict: the first selected ${plan.operation}${'aggregate' in plan ? ` ${plan.aggregate}` : ''}, while the schema-informed pass selected ${candidate.data.operation}. Re-evaluate once against the requested outcome and tool contract. A row count uses aggregate COUNT without a column; include filters only when the user supplied filter criteria. Do not turn an analytics request into schema discovery.` }], {
+              const repair = await retryPlanner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nTwo bounded planning passes conflict: the first selected ${plan.operation}${'aggregate' in plan ? ` ${plan.aggregate}` : ''}, while the schema-informed pass selected ${candidate.data.operation}. Re-evaluate once against the requested outcome and tool contract. A row count uses aggregate COUNT without a column; include filters only when the user supplied filter criteria. Do not turn an analytics request into schema discovery.` }], {
                 structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } }, abortSignal,
                 tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
               });
@@ -276,7 +340,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
               }
             } else if (!structuredInitial || ['aggregate', 'lookup'].includes(candidate.data.operation)) plan = candidate.data;
             if (plan.operation === 'aggregate' && plan.aggregate === 'COUNT' && plan.columnName) {
-              const repair = await planner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nThe plan selected COUNT but also supplied a column. The COUNT tool counts total rows and ignores columns. Re-plan once: use GROUP_BY with the exact supplied column if the requested result is grouped by values; otherwise use COUNT without a column.` }], {
+              const repair = await retryPlanner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nThe plan selected COUNT but also supplied a column. The COUNT tool counts total rows and ignores columns. Re-plan once: use GROUP_BY with the exact supplied column if the requested result is grouped by values; otherwise use COUNT without a column.` }], {
                 structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } }, abortSignal,
                 tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
               });
@@ -286,7 +350,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             if (plan.operation === 'lookup' && plan.value && datasets.some(dataset =>
               [dataset.filename, ...dataset.sheets.flatMap((sheet: any) => [sheet.sheetName, ...sheet.columns])]
                 .some(label => label.toLocaleLowerCase() === plan.value!.trim().toLocaleLowerCase()))) {
-              const repair = await planner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nThe previous plan was invalid because its exact lookup value was a dataset/sheet/column label, not a cell value. Re-plan once. For row counts choose aggregate COUNT without a column; otherwise choose the operation supported by the request.` }], {
+              const repair = await retryPlanner.generate([{ role: 'user', content: `${schemaAwarePrompt(inputData.message, datasets)}\n\nThe previous plan was invalid because its exact lookup value was a dataset/sheet/column label, not a cell value. Re-plan once. For row counts choose aggregate COUNT without a column; otherwise choose the operation supported by the request.` }], {
                 structuredOutput: { schema: planSchema, errorStrategy: 'fallback', fallbackValue: { operation: 'retrieve', retrievalQuery: inputData.message } },
                 abortSignal,
                 tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
@@ -298,7 +362,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         }
         if (planningConflict) {
           const intentSchema = z.object({ intent: z.enum(['conversation', 'document', 'schema', 'structured']), reply: z.string().optional() });
-          const classified = await planner.generate([{ role: 'user', content: `Classify the user's requested outcome without being influenced by available database schemas. Use conversation for greetings, thanks, social acknowledgements, and other interaction independent of workspace data; document for facts that require reading uploaded content; schema for dataset, sheet, or column metadata; structured for rows, exact values, filters, calculations, groups, and counts. Workspace-dependent facts require evidence. Do not call tools for ordinary conversation. Preserve the user's language in a concise conversation reply when the intent is conversation.\nRequest: ${inputData.message}` }], {
+          const classified = await retryPlanner.generate([{ role: 'user', content: `Classify the user's requested outcome without being influenced by available database schemas. Use conversation for greetings, thanks, social acknowledgements, and other interaction independent of workspace data; document for facts that require reading uploaded content; schema for dataset, sheet, or column metadata; structured for rows, exact values, filters, calculations, groups, and counts. Workspace-dependent facts require evidence. Do not call tools for ordinary conversation. Preserve the user's language in a concise conversation reply when the intent is conversation.\nRequest: ${inputData.message}` }], {
             structuredOutput: { schema: intentSchema, errorStrategy: 'fallback', fallbackValue: { intent: 'document' } }, abortSignal,
             tracingOptions: { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } },
           });
@@ -441,10 +505,12 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           }
         }
       } catch (error) {
+        if (safeProviderFailure(error)) throw error;
         answer = 'The authorized evidence operation failed before a result could be validated.';
         outcome = 'failure';
         traceFailure(requestId, principal.tenantId, { step: 'evidence', code: error instanceof Error ? error.name : 'UNKNOWN', operation: plan.operation, tools: toolNames });
       }
+      await progress('composing', 'completed', 'Workflow response is ready');
       stepDurations.evidenceMs = Math.round(performance.now() - startedAt);
       return { message: inputData.message, plan, toolResults, toolNames, answer, outcome, citationFailure };
     },

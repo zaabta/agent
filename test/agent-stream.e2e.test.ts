@@ -75,7 +75,7 @@ test('Mastra streams a grounded TypeGraph answer progressively and persists the 
   }));
 });
 
-test('disconnecting a stream aborts it and does not persist a partial assistant answer', {
+test('disconnecting the chat stream leaves the backend turn running and persists its final answer', {
   skip: !baseUrl || !apiKey ? 'Set AGENT_E2E_URL and DEV_API_KEY for the real local E2E test' : false,
 }, async () => {
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey! };
@@ -98,9 +98,23 @@ test('disconnecting a stream aborts it and does not persist a partial assistant 
   abortController.abort();
   await reader.cancel().catch(() => undefined);
 
-  const storedResponse = await fetch(`${baseUrl}/api/agent/conversations/${conversation.id}`, {
-    headers: { 'x-api-key': apiKey! },
-  });
-  const stored = await storedResponse.json() as { messages: Array<{ role: string }> };
-  assert.deepEqual(stored.messages.map(message => message.role), ['user']);
+  const deadline = Date.now() + 190_000;
+  let stored: { messages: Array<{ role: string; content: string; status: string; stage: string | null }> } | undefined;
+  while (Date.now() < deadline) {
+    const storedResponse = await fetch(`${baseUrl}/api/agent/conversations/${conversation.id}`, {
+      headers: { 'x-api-key': apiKey! },
+    });
+    stored = await storedResponse.json() as typeof stored;
+    const latest = stored?.messages.at(-1);
+    if (latest?.status !== 'processing') break;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  assert.deepEqual(stored?.messages.map(message => message.role), ['user', 'assistant']);
+  assert.equal(stored?.messages.at(-1)?.status, 'completed');
+  assert.match(stored?.messages.at(-1)?.content ?? '', /249/);
+  assert.equal(stored?.messages.at(-1)?.stage, null);
+
+  const listResponse = await fetch(`${baseUrl}/api/agent/conversations`, { headers: { 'x-api-key': apiKey! } });
+  const list = await listResponse.json() as { conversations: Array<{ id: string; lastMessage: { status: string } | null }> };
+  assert.equal(list.conversations.find(item => item.id === conversation.id)?.lastMessage?.status, 'interrupted');
 });

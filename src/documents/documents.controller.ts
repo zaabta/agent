@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, Post, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, Post, Query, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdir } from 'node:fs/promises';
@@ -45,6 +45,50 @@ export class DocumentsController {
   list(@CurrentPrincipal() principal: AuthPrincipal) { return this.documents.list(principal.tenantId); }
   @Get(':id') @ApiOperation({ summary: 'Get one tenant document status' })
   get(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) { return this.documents.get(id, principal.tenantId); }
+  @Get(':id/versions')
+  @ApiOperation({ summary: 'List immutable versions of a tenant document' })
+  listVersions(@Param('id') id: string, @Query('page') pageValue: string, @Query('limit') limitValue: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    const page = pageValue === undefined ? 1 : Number(pageValue);
+    const limit = limitValue === undefined ? 20 : Number(limitValue);
+    if (!validUuid(id)) throw new BadRequestException('INVALID_DOCUMENT_ID');
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new BadRequestException('INVALID_PAGINATION');
+    return this.documents.listVersions(id, principal.tenantId, page, limit);
+  }
+  @Post(':id/versions') @HttpCode(202) @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a new immutable document version; the current version stays active until indexing succeeds' })
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' }, reason: { type: 'string', maxLength: 500 } } } })
+  @UseInterceptors(FileInterceptor('file', { storage: diskUpload, fileFilter: uploadFilter, limits: { fileSize: config.maxBytes, files: 1 } }))
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
+  async uploadVersion(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Body() body: { reason?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!validUuid(id)) throw new BadRequestException('INVALID_DOCUMENT_ID');
+    if (!file) throw new BadRequestException('FILE_REQUIRED');
+    if (body?.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) throw new BadRequestException('INVALID_REPLACEMENT_REASON');
+    try { return await this.documents.upload({ filename: file.filename, originalName: file.originalname, mimetype: file.mimetype, size: file.size, path: file.path }, principal.tenantId, principal.userId, id, typeof body?.reason === 'string' ? body.reason.trim() || undefined : undefined); }
+    catch (error) { await this.storage.cleanup(file.filename).catch(() => undefined); throw error; }
+  }
+  @Get(':id/versions/:versionId')
+  getVersion(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
+    return this.documents.getVersion(id, versionId, principal.tenantId);
+  }
+  @Post(':id/versions/:versionId/restore') @HttpCode(202)
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
+  restoreVersion(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
+    return this.documents.restoreVersion(id, versionId, principal.tenantId, principal.userId);
+  }
+  @Post(':id/versions/:versionId/reindex') @HttpCode(202)
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
+  reindexVersion(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
+    return this.documents.reindexVersion(id, versionId, principal.tenantId, principal.userId);
+  }
+  @Post(':id/versions/:versionId/cancel') @HttpCode(202)
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
+  cancelVersionJob(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
+    return this.documents.cancelVersionJob(id, versionId, principal.tenantId);
+  }
   @Post('search') @HttpCode(200)
   @ApiOperation({ summary: 'Search indexed workspace documents directly with TypeGraph (no Agent generation)' })
   @ApiBody({ schema: { type: 'object', required: ['query'], properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 } } } })
@@ -83,3 +127,5 @@ export class DocumentsController {
   @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   remove(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) { return this.documents.remove(id, principal.tenantId); }
 }
+
+function validUuid(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }

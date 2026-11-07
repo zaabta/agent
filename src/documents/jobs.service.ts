@@ -4,6 +4,22 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { DocumentQueueService } from './document-queue.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
 
+const PROGRESS_BANDS: Record<string, readonly [number, number]> = {
+  upload: [0, 3], validation: [3, 6], queued: [6, 8], verification: [8, 12],
+  parsing: [12, 22], smart_chunking: [22, 30], indexing: [30, 95],
+  preparing: [30, 33], checking: [33, 35], embedding: [35, 82],
+  persisting: [82, 91], pruning: [91, 95], publication: [95, 99], completed: [99, 100],
+};
+
+function estimateOverallPercent(stage: string, stagePercent: number | null, status: string) {
+  if (status === 'ready') return 100;
+  const band = PROGRESS_BANDS[stage];
+  if (!band) return null;
+  const [start, end] = band;
+  if (stagePercent === null) return start;
+  return Math.min(99, Math.max(start, Math.round(start + (end - start) * stagePercent / 100)));
+}
+
 @Injectable()
 export class JobsService {
   constructor(
@@ -12,16 +28,21 @@ export class JobsService {
     @Inject(DocumentStorageService) private readonly storage: DocumentStorageService,
   ) {}
   private async document(jobId: string, tenantId = config.tenantId) {
-    const doc = await this.prisma.appDocument.findFirst({ where: { jobId, tenantId } });
+    const version = await this.prisma.appDocumentVersion.findFirst({ where: { jobId, tenantId } });
+    const doc = version
+      ? await this.prisma.appDocument.findFirst({ where: { id: version.documentId, tenantId } })
+      : await this.prisma.appDocument.findFirst({ where: { jobId, tenantId } });
     if (!doc) throw new NotFoundException('JOB_NOT_FOUND');
-    return doc;
+    return { doc, version };
   }
-  private async view(doc: Awaited<ReturnType<JobsService['document']>>) {
+  private async view(target: Awaited<ReturnType<JobsService['document']>>) {
+    const { doc, version } = target;
+    const jobId = version?.jobId || doc.jobId || '';
     const [loadedEvents, queueJob] = await Promise.all([
-      this.prisma.documentProgressEvent.findMany({ where: { documentId: doc.id, tenantId: doc.tenantId, jobId: doc.jobId || '' }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }], take: 100 }),
-      doc.jobId ? this.queue.queue.getJob(doc.jobId).catch(() => null) : null,
+      this.prisma.documentProgressEvent.findMany({ where: { documentId: doc.id, tenantId: doc.tenantId, jobId }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }], take: 100 }),
+      jobId ? this.queue.queue.getJob(jobId).catch(() => null) : null,
     ]);
-    const stageOrder = ['upload', 'validation', 'queued', 'verification', 'parsing', 'indexing', 'preparing', 'checking', 'embedding', 'persisting', 'pruning', 'committing', 'completed', 'cancelled', 'failed'];
+    const stageOrder = ['upload', 'validation', 'queued', 'verification', 'parsing', 'smart_chunking', 'indexing', 'preparing', 'checking', 'embedding', 'persisting', 'pruning', 'publication', 'completed', 'cancelled', 'failed'];
     const events = loadedEvents.sort((left, right) => left.startedAt.getTime() - right.startedAt.getTime()
       || left.attempt - right.attempt
       || stageOrder.indexOf(left.stage) - stageOrder.indexOf(right.stage));
@@ -31,37 +52,51 @@ export class JobsService {
         ? Math.min(100, Math.max(0, Math.round(completedUnits / totalUnits * 100)))
         : null;
     const queueState = await queueJob?.getState().catch(() => 'unknown') || 'unknown';
-    const active = doc.status === 'processing' || queueState === 'active';
+    const status = version ? ({ queued: 'queued', processing: 'processing', reindexing: 'processing', ready: 'ready', failed: 'failed', cancelled: 'cancelled' }[version.status] || version.status) : doc.status;
+    const active = status === 'processing' || queueState === 'active';
     const queueExpectation: Record<string, string[]> = {
       queued: ['waiting', 'wait', 'delayed', 'paused', 'waiting-children'],
       processing: ['active'], ready: ['completed'], failed: ['failed'],
       cancelled: ['completed', 'failed', 'unknown'],
     };
     const consistency = queueState === 'unknown' ? 'unknown'
-      : queueExpectation[doc.status]?.includes(queueState) ? 'consistent'
+      : queueExpectation[status]?.includes(queueState) ? 'consistent'
       : doc.stage === 'cancelling' && queueState === 'active' ? 'consistent'
       : 'transitioning';
     const now = Date.now();
     const latestElapsedMs = latest?.startedAt
       ? Math.max(0, (latest.finishedAt?.getTime() ?? now) - latest.startedAt.getTime())
       : 0;
-    const latestRate = latest?.completedUnits != null && latestElapsedMs >= 2000
+    const latestRate = latest?.status === 'running' && latest.completedUnits != null && latestElapsedMs >= 2000
       ? latest.completedUnits / (latestElapsedMs / 1000)
+      : null;
+    const latestStagePercent = percent(latest?.completedUnits ?? null, latest?.totalUnits ?? null) ?? doc.progress;
+    const overallPercent = estimateOverallPercent(latest?.stage ?? doc.stage, latestStagePercent, status);
+    const remainingUnits = latest?.totalUnits != null && latest.completedUnits != null
+      ? Math.max(0, latest.totalUnits - latest.completedUnits)
       : null;
     const etaMs = latest?.status === 'running' && latestRate && latest.totalUnits != null
       && latest.completedUnits != null && latest.totalUnits > latest.completedUnits
-      ? Math.round((latest.totalUnits - latest.completedUnits) / latestRate * 1000)
+      ? Math.round(remainingUnits! / latestRate * 1000)
       : null;
     return {
-      jobId: doc.jobId, documentId: doc.id, status: doc.status, stage: doc.stage,
-      progress: doc.progress,
+      jobId, documentId: doc.id, ...(version ? { versionId: version.id, versionNumber: version.versionNumber } : {}), status, stage: latest?.stage ?? doc.stage,
+      // `progress` is a coarse overall estimate during work and exact at ready.
+      // The detailed object distinguishes estimated overall from measured stage progress.
+      progress: overallPercent,
       progressDetails: {
-        stage: doc.stage, status: doc.status,
-        stagePercent: percent(latest?.completedUnits ?? null, latest?.totalUnits ?? null) ?? doc.progress,
-        overallPercent: doc.status === 'ready' ? 100 : null,
+        stage: latest?.stage ?? doc.stage, status,
+        stagePercent: latestStagePercent,
+        stageProgressMode: latestStagePercent === null ? 'indeterminate' : 'measured',
+        overallPercent,
+        overallProgressMode: status === 'ready' ? 'complete' : overallPercent === null ? 'indeterminate' : 'estimated',
         completedUnits: latest?.completedUnits ?? null,
         totalUnits: latest?.totalUnits ?? null,
+        remainingUnits,
         unit: latest?.unit ?? null,
+        unitsPerSecond: latestRate === null ? null : Math.round(latestRate * 100) / 100,
+        stageRemainingPercent: latestStagePercent === null ? null : 100 - latestStagePercent,
+        remainingPercent: overallPercent === null ? null : 100 - overallPercent,
         attempt: latest?.attempt ?? doc.retryCount + (active ? 1 : 0),
         retryCount: doc.retryCount,
         startedAt: latest?.startedAt ?? doc.createdAt,
@@ -74,6 +109,7 @@ export class JobsService {
           elapsedMs: event.finishedAt ? event.finishedAt.getTime() - event.startedAt.getTime() : Math.max(0, now - event.startedAt.getTime()),
           completedUnits: event.completedUnits, totalUnits: event.totalUnits, unit: event.unit,
           stagePercent: percent(event.completedUnits, event.totalUnits),
+          remainingUnits: event.totalUnits != null && event.completedUnits != null ? Math.max(0, event.totalUnits - event.completedUnits) : null,
           unitsPerSecond: event.completedUnits != null && event.startedAt
             && Math.max(0, (event.finishedAt?.getTime() ?? now) - event.startedAt.getTime()) >= 2000
             ? Math.round(event.completedUnits / (Math.max(1, (event.finishedAt?.getTime() ?? now) - event.startedAt.getTime()) / 1000) * 100) / 100
@@ -87,33 +123,35 @@ export class JobsService {
       },
       queue: { state: queueState, consistency, attemptsMade: queueJob?.attemptsMade ?? null, attemptsMax: queueJob?.opts.attempts ?? null },
       retryCount: doc.retryCount, failureCode: doc.failureCode,
-      fileSize: doc.fileSize == null ? null : Number(doc.fileSize),
+      fileSize: version ? Number(version.fileSize) : doc.fileSize == null ? null : Number(doc.fileSize),
       createdAt: doc.createdAt, updatedAt: doc.updatedAt, completedAt: doc.completedAt,
     };
   }
   async get(jobId: string, tenantId = config.tenantId) { return this.view(await this.document(jobId, tenantId)); }
   async cancel(jobId: string, tenantId = config.tenantId) {
-    const doc = await this.document(jobId, tenantId);
-    if (['ready', 'failed', 'cancelled'].includes(doc.status)) return this.view(doc);
+    const target = await this.document(jobId, tenantId);
+    const { doc, version } = target;
+    const status = version?.status || doc.status;
+    if (['ready', 'failed', 'cancelled'].includes(status)) return this.view(target);
     const job = await this.queue.queue.getJob(jobId);
     const state = await job?.getState();
     if (job && (state === 'waiting' || state === 'delayed' || state === 'waiting-children')) {
       await job.remove();
-      await this.storage.cleanup(doc.storageKey);
       const cancelledAt = new Date();
       await this.prisma.$transaction([
         this.prisma.documentProgressEvent.updateMany({ where: { documentId: doc.id, tenantId, jobId, finishedAt: null }, data: { status: 'cancelled', finishedAt: cancelledAt } }),
-        this.prisma.appDocument.updateMany({ where: { id: doc.id, tenantId }, data: { status: 'cancelled', stage: 'cancelled', progress: null, cancelRequested: true, completedAt: cancelledAt, storageKey: null } }),
+        ...(version ? [this.prisma.appDocumentVersion.updateMany({ where: { id: version.id, tenantId, jobId }, data: { status: version.activeIndexGeneration ? 'ready' : 'cancelled', cancelRequested: true, publishRequested: false } })] : [this.prisma.appDocument.updateMany({ where: { id: doc.id, tenantId }, data: { status: 'cancelled', stage: 'cancelled', progress: null, cancelRequested: true, completedAt: cancelledAt, storageKey: null } })]),
+        ...(version && version.activeIndexGeneration === null ? [this.prisma.appDocument.updateMany({ where: { id: doc.id, tenantId, jobId, activeVersionId: null }, data: { status: 'cancelled', stage: 'cancelled', progress: null, completedAt: cancelledAt, storageKey: null } })] : []),
         this.prisma.documentProgressEvent.create({ data: { documentId: doc.id, tenantId, jobId, attempt: job.attemptsMade + 1, stage: 'cancelled', status: 'cancelled', startedAt: cancelledAt, finishedAt: cancelledAt } }),
       ]);
-      const cancelled = await this.document(jobId, tenantId);
-      return this.view(cancelled);
-    }
-    if (state === 'active') {
-      await this.prisma.appDocument.updateMany({ where: { id: doc.id, tenantId }, data: { cancelRequested: true, stage: 'cancelling' } });
       return this.view(await this.document(jobId, tenantId));
     }
-    return this.view(doc);
+    if (state === 'active') {
+      if (version) await this.prisma.appDocumentVersion.updateMany({ where: { id: version.id, tenantId, jobId }, data: { cancelRequested: true } });
+      else await this.prisma.appDocument.updateMany({ where: { id: doc.id, tenantId }, data: { cancelRequested: true, stage: 'cancelling' } });
+      return this.view(await this.document(jobId, tenantId));
+    }
+    return this.view(target);
   }
   async stream(jobId: string, res: import('express').Response, disconnected: AbortSignal, tenantId = config.tenantId, lastEventId?: string) {
     res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });

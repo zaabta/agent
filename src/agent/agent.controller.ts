@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpException, Inject, NotFoundException, Param, Patch, Post, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
@@ -8,6 +8,7 @@ import { AgentService } from './agent.service.js';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../auth/roles.decorator.js';
 import { readTenantTrace } from '../mastra/observability.js';
+import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';
 
 interface AgentBody {
   message?: string;
@@ -26,14 +27,20 @@ export class AgentController {
   @Post('ask')
   @ApiOperation({ summary: 'Ask Mastra and return a synchronous JSON answer' })
   @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
-  ask(@Body() body: AgentBody, @CurrentPrincipal() principal: AuthPrincipal) {
+  async ask(@Body() body: AgentBody, @CurrentPrincipal() principal: AuthPrincipal) {
     const { message, conversationId } = this.validateBody(body, false);
-    return this.agent.ask(message, conversationId, principal);
+    try {
+      return await this.agent.ask(message, conversationId, principal);
+    } catch (error) {
+      const provider = safeProviderClientResponse(error);
+      if (!provider) throw error;
+      throw new HttpException(provider.body, provider.statusCode);
+    }
   }
 
   @Post('stream')
   @ApiOperation({ summary: 'Stream native Mastra Agent events as SSE from a POST request' })
-  @ApiResponse({ status: 200, description: 'SSE events: status, tool-start, tool-finish, text-delta, sources, step-start, step-finish, error, done.' })
+  @ApiResponse({ status: 200, description: 'SSE events: status, stage, tool-start, tool-finish, text-delta, text-reset, sources, step-start, step-finish, error, done.' })
   async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
     const { message, conversationId } = this.validateBody(body, false);
     const controller = new AbortController();
@@ -44,6 +51,8 @@ export class AgentController {
     }, config.agentTimeoutMs);
     timeout.unref();
 
+    // A disconnected browser stops receiving SSE but does not cancel generation;
+    // the persisted assistant turn can be restored from conversation history.
     response.status(200);
     response.set({
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -52,11 +61,6 @@ export class AgentController {
       'X-Accel-Buffering': 'no',
     });
     response.flushHeaders();
-
-    const onClose = () => {
-      if (!response.writableEnded) controller.abort(new Error('CLIENT_DISCONNECTED'));
-    };
-    response.once('close', onClose);
 
     const write = async (event: string, data: Record<string, unknown>, allowAborted = false) => {
       if (response.destroyed || (controller.signal.aborted && !allowAborted)) return;
@@ -81,17 +85,19 @@ export class AgentController {
       if (!response.destroyed && !response.writableEnded) response.end();
     } catch (error) {
       if (!response.destroyed && !response.writableEnded && !controller.signal.reason?.message?.includes('CLIENT_DISCONNECTED')) {
+        const provider = safeProviderFailure(error);
         const modelFailure = error instanceof Error && error.message === 'MODEL_STREAM_FAILED';
         await write('error', {
-          code: timedOut ? 'REQUEST_TIMEOUT' : modelFailure ? 'MODEL_ERROR' : 'AGENT_REQUEST_FAILED',
-          recoverable: false,
+          code: timedOut ? 'REQUEST_TIMEOUT' : provider?.code ?? (modelFailure ? 'MODEL_ERROR' : 'AGENT_REQUEST_FAILED'),
+          recoverable: provider?.retryable ?? false,
+          ...(provider ? { retryable: provider.retryable } : {}),
+          ...(provider?.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}),
           discardProvisional: true,
         }, true);
         response.end();
       }
     } finally {
       clearTimeout(timeout);
-      response.off('close', onClose);
     }
   }
 
@@ -100,10 +106,34 @@ export class AgentController {
     return this.agent.createConversation(principal);
   }
 
+  @Get('conversations')
+  @ApiOperation({ summary: 'List recent owned conversations with the latest message status' })
+  listConversations(@CurrentPrincipal() principal: AuthPrincipal) {
+    return this.agent.listConversations(principal);
+  }
+
   @Get('conversations/:id')
   getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
     return this.agent.getConversation(id, principal);
+  }
+
+  @Patch('conversations/:id')
+  @ApiOperation({ summary: 'Rename an owned conversation' })
+  @ApiBody({ schema: { type: 'object', required: ['title'], properties: { title: { type: 'string', minLength: 1, maxLength: 120 } } } })
+  renameConversation(@Param('id') id: string, @Body() body: { title?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
+    if (typeof body?.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) {
+      throw new BadRequestException('INVALID_CONVERSATION_TITLE');
+    }
+    return this.agent.renameConversation(id, body.title.trim(), principal);
+  }
+
+  @Delete('conversations/:id')
+  @ApiOperation({ summary: 'Soft-delete an owned conversation and its grouped messages' })
+  deleteConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
+    return this.agent.deleteConversation(id, principal);
   }
 
   @Get('traces/:traceId')

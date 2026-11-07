@@ -4,37 +4,43 @@ The React frontend is a separate repository. This contract describes how it shou
 
 ## Upload request
 
-`POST /api/documents/upload` remains authenticated multipart form data and returns `202` with the document/job identifiers. The API receives the entire multipart body before Multer calls the controller. Consequently, the backend's initial `upload` event records the actual `file.size` bytes received, but is not a live upload-network feed. For browser upload progress, use `XMLHttpRequest.upload.onprogress` (or an equivalent transport that exposes upload progress) and display it separately from the backend job progress. Do not interpret HTTP `202` as indexed.
+`POST /api/documents/upload` remains authenticated multipart form data and returns `202` with `{ document, duplicate, version }`; use `version.jobId` (or `document.jobId` for compatibility) to track the job. The API receives the entire multipart body before Multer calls the controller. Consequently, the backend's initial `upload` event records the actual `file.size` bytes received, but is not a live upload-network feed. For browser upload progress, use `XMLHttpRequest.upload.onprogress` (or an equivalent transport that exposes upload progress) and display it separately from the backend job progress. Do not interpret HTTP `202` as indexed.
 
 ## Job snapshot
 
-`GET /api/jobs/{jobId}` remains tenant scoped and preserves its existing top-level `progress` percentage (nullable). Structured data is added in `progressDetails`:
+`GET /api/jobs/{jobId}` remains tenant scoped. `progress` is the same coarse overall estimate as `progressDetails.overallPercent`; it is no longer null during known processing stages. `progressDetails.stagePercent` is measured only when the current stage has unit counters. A stage without counters is indeterminate, not unavailable. Example:
 
 ```json
 {
   "progressDetails": {
     "stage": "indexing",
     "status": "processing",
-    "stagePercent": null,
-    "overallPercent": null,
-    "completedUnits": null,
-    "totalUnits": null,
-    "unit": null,
+    "stagePercent": 64,
+    "stageProgressMode": "measured",
+    "overallPercent": 65,
+    "overallProgressMode": "estimated",
+    "completedUnits": 64,
+    "totalUnits": 100,
+    "remainingUnits": 36,
+    "unit": "chunks",
+    "unitsPerSecond": 8.4,
+    "stageRemainingPercent": 36,
+    "remainingPercent": 35,
     "attempt": 1,
     "retryCount": 0,
     "startedAt": "2026-11-06T09:00:00.000Z",
     "finishedAt": null,
     "elapsedMs": 4200,
-    "etaMs": null,
+    "etaMs": 4286,
     "stages": []
   },
   "queue": { "state": "active", "consistency": "consistent", "attemptsMade": 0, "attemptsMax": 3 }
 }
 ```
 
-The example is illustrative, not a promised live state. `stagePercent`, unit totals and ETA are nullable. `queue.consistency` explicitly labels the Redis/Prisma view as `consistent`, `transitioning` (a write boundary is in flight), or `unknown` (the retained queue record cannot be read). Indexing is owned by TypeGraph SDK, whose installed integration currently does not expose incremental chunk or embedding callbacks; it reports chunk totals only after ingest completes. Thus the UI should show an indeterminate indexing state and must not synthesize percentages or ETA. On completion, the API reports `overallPercent: 100` and keeps the legacy `progress: 100` only after TypeGraph reports complete, structured cells are persisted, and the application document state is committed.
+The example is illustrative. `stagePercent`, unit totals, speed, remaining units and ETA are nullable when the current phase does not expose measurable counters. `stageProgressMode` is `measured` or `indeterminate`; `overallProgressMode` is `estimated`, `indeterminate`, or `complete`. Overall percentage maps pipeline stages to coarse ranges and is explicitly an estimate, not a byte-accurate fraction of all remaining work. `remainingPercent` is overall estimated work remaining; `stageRemainingPercent` is current-stage remaining. ETA and units/second are derived from measured counters after at least two seconds of elapsed stage time. `queue.consistency` labels the Redis/Prisma view as `consistent`, `transitioning` (a write boundary is in flight), or `unknown` (the retained queue record cannot be read). TypeGraph progress callbacks report its fetch, hash-check, embed, store, and prune phases; the worker persists updates at phase changes and coalesces frequent updates to roughly 5% or two-second intervals. Parsing and chunk construction do not expose incremental counters, so show their stage label with indeterminate stage progress while the coarse overall estimate advances by pipeline stage. On completion, the API reports `overallPercent: 100` and `progress: 100` only after TypeGraph reports complete, structured cells are persisted, and the application document state is committed.
 
-Each `progressDetails.stages[]` item contains a durable `id`, `stage`, `status`, `attempt`, `startedAt`, `finishedAt`, `elapsedMs`, a nullable `stagePercent`, optional measured unit counts, and a sanitized `failureCode`. Current measured stages are received upload bytes, upload-time validation, queue wait, worker integrity verification, parsing, aggregate TypeGraph indexing, commit, and terminal completion. TypeGraph's internal chunking and embedding are not represented as separate stages because no callbacks are exposed at this integration boundary. After ingestion completes, the indexing event includes TypeGraph's measured aggregate embedding duration and a derived chunk/embedding-second rate; this is retrospective and is not used as in-flight progress or ETA.
+Each `progressDetails.stages[]` item contains a durable `id`, `stage`, `status`, `attempt`, `startedAt`, `finishedAt`, `elapsedMs`, nullable `stagePercent` and counters, optional unit/speed/remaining data, and a sanitized `failureCode`. Upload bytes are only confirmed once the request body reaches the backend; the browser owns live transfer progress. Indexing counters and ETA are available when TypeGraph/embedding callbacks expose totals.
 
 ## SSE
 
@@ -47,7 +53,9 @@ BullMQ/Redis owns queue execution, locks, retries and stalled-job recovery. Pris
 ## UI behavior
 
 - Show browser upload bytes and backend job processing as separate progress sections.
-- For `overallPercent: null`, render an indeterminate progress indicator.
+- Use browser upload-byte progress during transfer, then switch to the job snapshot after HTTP 202.
+- Render `progress` / `overallPercent` as an explicitly estimated pipeline percentage; use `stagePercent` when measured and an indeterminate stage indicator when `stageProgressMode` is `indeterminate`.
+- Show `completedUnits / totalUnits`, `unitsPerSecond`, `remainingUnits`, and `etaMs` only when non-null. Never present a null value as a permanent “progress unavailable” error.
 - Render stage timestamps/counters from `progressDetails.stages`; show retry attempt and sanitized failure code.
 - Confirm “indexed” only for `status: ready` / `stage: completed`.
 - Reconnect SSE with `Last-Event-ID`; always reconcile with `GET /api/jobs/{jobId}` after reconnect.

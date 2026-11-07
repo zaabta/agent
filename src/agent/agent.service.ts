@@ -12,9 +12,15 @@ import { isDocumentInventoryIntent } from './request-fast-path.js';
 import { z } from 'zod';
 import { createAgentWorkflow } from './agent.workflow.js';
 import { recordWorkflowDiagnostic } from '../mastra/observability.js';
+import { safeProviderFailure } from './provider-errors.js';
 
 export interface VerifiedSource {
   documentId: string;
+  documentVersionId?: string;
+  chunkId?: string;
+  contentHash?: string;
+  paragraphStart?: number;
+  paragraphEnd?: number;
   filename: string;
   sourceRef: string;
   chunkIndex: number;
@@ -350,22 +356,61 @@ export class AgentService {
     return conversation;
   }
 
+  async listConversations(principal: AuthPrincipal, limit = 50) {
+    const conversations = await this.prisma.conversation.findMany({
+      where: { tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(1, Math.min(100, Math.trunc(limit))),
+      select: { id: true, title: true, createdAt: true, updatedAt: true },
+    });
+    const ids = conversations.map(item => item.id);
+    await this.reconcileStaleTurns(ids);
+    const messages = ids.length ? await this.prisma.message.findMany({
+      where: { conversationId: { in: ids } }, orderBy: [{ createdAt: 'desc' }, { role: 'asc' }],
+      distinct: ['conversationId'], select: { id: true, conversationId: true, role: true, content: true, status: true, stage: true, createdAt: true },
+    }) : [];
+    const latest = new Map(messages.map(item => [item.conversationId, item]));
+    return { conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
+  }
+
   async getConversation(conversationId: string, principal: AuthPrincipal) {
     const conversation = await this.prisma.conversation.findFirst({
       where: {
         id: conversationId,
         tenantId: principal.tenantId,
         ownerId: principal.userId,
+        deletedAt: null,
       },
       select: {
         id: true,
+        title: true,
         createdAt: true,
         updatedAt: true,
-        messages: { orderBy: { createdAt: 'desc' }, take: config.conversationHistoryMessages },
       },
     });
     if (!conversation) throw new NotFoundException('CONVERSATION_NOT_FOUND');
-    return { ...conversation, messages: conversation.messages.reverse() };
+    await this.reconcileStaleTurns([conversationId]);
+    const messages = await this.prisma.message.findMany({ where: { conversationId }, orderBy: { createdAt: 'desc' }, take: config.conversationHistoryMessages });
+    return { ...conversation, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
+  }
+
+  async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {
+    const result = await this.prisma.conversation.updateMany({
+      where: { id: conversationId, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      data: { title, updatedAt: new Date() },
+    });
+    if (!result.count) throw new NotFoundException('CONVERSATION_NOT_FOUND');
+    return { id: conversationId, title };
+  }
+
+  async deleteConversation(conversationId: string, principal: AuthPrincipal) {
+    const deletedAt = new Date();
+    const result = await this.prisma.conversation.updateMany({
+      where: { id: conversationId, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      data: { deletedAt, updatedAt: deletedAt },
+    });
+    if (!result.count) throw new NotFoundException('CONVERSATION_NOT_FOUND');
+    return { id: conversationId, deletedAt };
   }
 
   async ask(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
@@ -374,14 +419,14 @@ export class AgentService {
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
     const abortSignal = AbortSignal.timeout(config.agentTimeoutMs);
-
+    try {
     if (isDocumentInventoryRequest(message)) {
       const listing = await this.typegraph.listDocuments(principal.tenantId, principal.userId);
       const documents = listing.documents as Array<{ id?: string; name?: string }>;
       const answer = documents.length
         ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}`
         : 'There are no indexed documents in your workspace.';
-      await this.saveAssistant(turn.conversationId, answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer);
       return { answer, sources: [], toolsCalled: ['listDocuments'], citationValidation: 'valid' as const,
         conversationId: turn.conversationId,
         timing: { retrievalMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) } };
@@ -483,7 +528,7 @@ export class AgentService {
       }
     }
     this.trace('answer-finalized', { mode: 'generate', citationValidation: result.citationValidation, sources: result.sources.length, answerLength: result.answer.length, citationCheck: this.traceCitationCheck(answer, toolResults), draft: '[redacted]', toolResults: this.traceToolResults(toolResults) });
-    await this.saveAssistant(turn.conversationId, result.answer);
+    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer);
     const timings = this.extractTimings(toolResults);
     return {
       answer: result.answer, sources: result.sources, toolsCalled: result.toolsCalled,
@@ -495,6 +540,10 @@ export class AgentService {
       },
       conversationId: turn.conversationId,
     };
+    } catch (error) {
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      throw error;
+    }
   }
 
   private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
@@ -505,14 +554,19 @@ export class AgentService {
     try {
       const run = await workflow.createRun();
       const execution = await run.start({ inputData: { message } });
-      if (execution.status !== 'success' || !execution.result) throw new Error('AGENT_WORKFLOW_FAILED');
+      if (execution.status !== 'success' || !execution.result) {
+        if (execution.status === 'failed') throw execution.error;
+        throw new Error('AGENT_WORKFLOW_FAILED');
+      }
       const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
-      await this.saveAssistant(turn.conversationId, final.answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
       return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { totalMs: Math.round(performance.now() - startedAt), workflow: true } };
     } catch (error) {
-      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'workflow-execution', code: error instanceof Error ? error.name : 'UNKNOWN', outcome: 'failure' });
+      const provider = safeProviderFailure(error);
+      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'workflow-execution', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: 'failure' });
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, 'failed').catch(() => undefined);
       throw error;
     }
   }
@@ -540,19 +594,31 @@ export class AgentService {
     const startedAt = performance.now();
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
-    await write('status', { status: 'started', conversationId: turn.conversationId });
+    let currentStage = 'thinking';
+    const emit: EventWriter = async (event, data) => {
+      const nextStage = event === 'tool-start'
+        ? (data.toolName === 'documentSearch' ? 'searching' : data.toolName === 'listDocuments' ? 'discovering' : 'executing')
+        : event === 'text-delta' ? 'composing' : event === 'step-start' ? 'thinking' : undefined;
+      if (nextStage && nextStage !== currentStage) {
+        currentStage = nextStage;
+        await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, nextStage);
+      }
+      await write(event, data);
+    };
+    try {
+    await emit('status', { status: 'started', conversationId: turn.conversationId, turnId: turn.assistantMessageId });
 
     if (isDocumentInventoryRequest(message)) {
-      await write('tool-start', { toolName: 'listDocuments' });
+      await emit('tool-start', { toolName: 'listDocuments' });
       const listing = await this.typegraph.listDocuments(principal.tenantId, principal.userId);
       const documents = listing.documents as Array<{ id?: string; name?: string }>;
       const answer = documents.length ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}` : 'There are no indexed documents in your workspace.';
-      await this.saveAssistant(turn.conversationId, answer);
-      await write('tool-finish', { toolName: 'listDocuments', durationMs: listing.durationMs, sourceCount: 0 });
-      await write('text-delta', { text: answer, verification: 'verified' });
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer);
+      await emit('tool-finish', { toolName: 'listDocuments', durationMs: listing.durationMs, sourceCount: 0 });
+      await emit('text-delta', { text: answer, verification: 'verified' });
       const telemetry = { timeToFirstTokenMs: Math.round(performance.now() - startedAt), llmCalls: 0, toolExecutionMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) };
       const result = { answer, sources: [], toolsCalled: ['listDocuments'], citationValidation: 'valid' as const, conversationId: turn.conversationId, timing: telemetry };
-      await write('done', { ...result, discardProvisional: false, finishObserved: true, telemetry });
+      await emit('done', { ...result, discardProvisional: false, finishObserved: true, telemetry });
       return result;
     }
 
@@ -597,7 +663,7 @@ export class AgentService {
           modelCallCount++;
           stepNumber++;
           modelStepStartedAt.set(chunk.payload.messageId ?? String(stepNumber), now);
-          await write('step-start', { step: stepNumber });
+          await emit('step-start', { step: stepNumber });
           break;
         }
         case 'step-finish': {
@@ -609,7 +675,7 @@ export class AgentService {
           const usage = chunk.payload.output.usage;
           if (typeof usage.inputTokens === 'number') promptTokens = (promptTokens ?? 0) + usage.inputTokens;
           if (typeof usage.outputTokens === 'number') completionTokens = (completionTokens ?? 0) + usage.outputTokens;
-          await write('step-finish', {
+          await emit('step-finish', {
             step: stepNumber,
             durationMs,
             promptTokens: usage.inputTokens ?? null,
@@ -622,7 +688,7 @@ export class AgentService {
           if (!allowedTools.has(toolName)) break;
           toolsCalled.add(toolName);
           toolStartedAt.set(chunk.payload.toolCallId, now);
-          await write('tool-start', { toolName });
+          await emit('tool-start', { toolName });
           break;
         }
         case 'tool-result': {
@@ -645,19 +711,19 @@ export class AgentService {
             const timing = result?.timing as { embeddingMs?: number; retrievalMs?: number } | undefined;
             embeddingMs += timing?.embeddingMs ?? 0;
             retrievalMs += timing?.retrievalMs ?? 0;
-            if (sources.length > 0) await write('sources', { sources });
+            if (sources.length > 0) await emit('sources', { sources });
           } else if (toolName === 'listDocuments') {
             const listResult = result as { documents?: unknown[]; durationMs?: number } | undefined;
             hasInventoryResult = true;
             if (typeof listResult?.durationMs === 'number') toolExecutionMs += Math.max(0, listResult.durationMs - elapsed);
           }
-          await write('tool-finish', { toolName, durationMs: Math.round(elapsed), sourceCount: sources.length });
+          await emit('tool-finish', { toolName, durationMs: Math.round(elapsed), sourceCount: sources.length });
           if (hasAnySearchHits || hasInventoryResult) {
             while (bufferedText.length) {
               const text = bufferedText.shift()!;
               streamedText.push(text);
               if (ttftMs === null) ttftMs = Math.round(now - startedAt);
-              await write('text-delta', { text, verification: 'provisional' });
+              await emit('text-delta', { text, verification: 'provisional' });
             }
           }
           break;
@@ -665,7 +731,7 @@ export class AgentService {
         case 'tool-error': {
           const toolName = this.publicToolName(chunk.payload.toolName);
           if (allowedTools.has(toolName)) {
-            await write('error', { code: 'TOOL_FAILED', toolName, recoverable: true });
+            await emit('error', { code: 'TOOL_FAILED', toolName, recoverable: true });
           }
           break;
         }
@@ -679,7 +745,7 @@ export class AgentService {
           }
           if (ttftMs === null) ttftMs = Math.round(now - startedAt);
           streamedText.push(visibleText);
-          await write('text-delta', { text: visibleText, verification: 'provisional' });
+          await emit('text-delta', { text: visibleText, verification: 'provisional' });
           break;
         }
         case 'error':
@@ -700,7 +766,8 @@ export class AgentService {
 
     if (abortSignal.aborted) throw abortSignal.reason ?? new Error('REQUEST_ABORTED');
     let fullOutput = await output.getFullOutput();
-    if (fullOutput.error || nativeError) throw new Error('MODEL_STREAM_FAILED');
+    if (fullOutput.error) throw fullOutput.error;
+    if (nativeError) throw new Error('MODEL_STREAM_FAILED');
     let finalToolResults = fullOutput.toolResults;
     let finalText = this.removeThinkingContent(
       fullOutput.text || streamedText.join(''),
@@ -736,7 +803,7 @@ export class AgentService {
       bufferedText.length = 0;
       const search = await authorizedDocumentSearchFallback(this.typegraph, message, principal, abortSignal);
       toolsCalled.add('documentSearch');
-      await write('tool-start', { toolName: 'documentSearch' });
+      await emit('tool-start', { toolName: 'documentSearch' });
       embeddingMs += search.timing.embeddingMs;
       retrievalMs += search.timing.retrievalMs;
       toolExecutionMs += search.timing.searchMs;
@@ -745,8 +812,8 @@ export class AgentService {
       hasAnySearchHits = sources.length > 0;
       suppressTextAfterNoEvidence = sources.length === 0;
       for (const source of sources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
-      if (sources.length) await write('sources', { sources });
-      await write('tool-finish', { toolName: 'documentSearch', durationMs: search.timing.searchMs, sourceCount: sources.length });
+      if (sources.length) await emit('sources', { sources });
+      await emit('tool-finish', { toolName: 'documentSearch', durationMs: search.timing.searchMs, sourceCount: sources.length });
       const fallbackResult = { payload: { toolName: 'document-search', result: search } } as typeof fullOutput.toolResults[number];
       finalToolResults = [...fullOutput.toolResults, fallbackResult];
 
@@ -768,7 +835,7 @@ export class AgentService {
             groundedStep++;
             modelCallCount++;
             groundedStepStarted.set(chunk.payload.messageId ?? String(groundedStep), now);
-            await write('step-start', { step: stepNumber + groundedStep });
+            await emit('step-start', { step: stepNumber + groundedStep });
           } else if (chunk.type === 'step-finish') {
             const key = chunk.payload.messageId ?? String(groundedStep);
             const started = groundedStepStarted.get(key);
@@ -779,14 +846,14 @@ export class AgentService {
             const usage = chunk.payload.output.usage;
             if (typeof usage.inputTokens === 'number') promptTokens = (promptTokens ?? 0) + usage.inputTokens;
             if (typeof usage.outputTokens === 'number') completionTokens = (completionTokens ?? 0) + usage.outputTokens;
-            await write('step-finish', { step: stepNumber + groundedStep, promptTokens: usage.inputTokens ?? null, completionTokens: usage.outputTokens ?? null });
+            await emit('step-finish', { step: stepNumber + groundedStep, promptTokens: usage.inputTokens ?? null, completionTokens: usage.outputTokens ?? null });
           } else if (chunk.type === 'text-delta') {
             const visible = this.removeThinkingContent(chunk.payload.text, groundedReasoningFilter);
             if (!visible) continue;
             if (ttftMs === null) ttftMs = Math.round(now - startedAt);
             groundedText.push(visible);
             streamedText.push(visible);
-            await write('text-delta', { text: visible, verification: 'provisional' });
+            await emit('text-delta', { text: visible, verification: 'provisional' });
           } else if (chunk.type === 'finish') {
             nativeFinishSeen = true;
           } else if (chunk.type === 'error' || chunk.type === 'abort') {
@@ -794,7 +861,8 @@ export class AgentService {
           }
         }
         const groundedOutput = await grounded.getFullOutput();
-        if (groundedOutput.error || nativeError) throw new Error('MODEL_STREAM_FAILED');
+        if (groundedOutput.error) throw groundedOutput.error;
+        if (nativeError) throw new Error('MODEL_STREAM_FAILED');
         fullOutput = groundedOutput;
         finalText = this.removeThinkingContent(groundedOutput.text || groundedText.join(''), { hidden: false, pending: '' });
       }
@@ -802,8 +870,8 @@ export class AgentService {
       const schemaResult = { datasets: await this.structuredData.discoverDatasets(principal.tenantId) };
       toolsCalled.add('datasetDiscovery');
       finalToolResults = [...fullOutput.toolResults, { payload: { toolName: 'dataset-discovery', result: schemaResult } } as typeof fullOutput.toolResults[number]];
-      await write('tool-start', { toolName: 'datasetDiscovery', recovery: true });
-      await write('tool-finish', { toolName: 'datasetDiscovery', sourceCount: 0, recovery: true });
+      await emit('tool-start', { toolName: 'datasetDiscovery', recovery: true });
+      await emit('tool-finish', { toolName: 'datasetDiscovery', sourceCount: 0, recovery: true });
       finalText = deterministicDatasetSchemaAnswer([{ payload: { toolName: 'dataset-discovery', result: schemaResult } }]) ?? 'I could not inspect the authorized dataset schema.';
     } else if (resolvedRecoveryRoute === 'DATASET') {
       bufferedText.length = 0;
@@ -820,14 +888,14 @@ export class AgentService {
           finalToolResults = [...fullOutput.toolResults, recoveredResult];
           const recoveredToolName = this.publicToolName(recovered.payload.toolName);
           toolsCalled.add(recoveredToolName);
-          await write('tool-start', { toolName: recoveredToolName, recovery: true });
+          await emit('tool-start', { toolName: recoveredToolName, recovery: true });
           const structuredSources = this.extractSources([recoveredResult]);
           hasSearchResult = true;
           hasAnySearchHits = structuredSources.length > 0;
           suppressTextAfterNoEvidence = false;
-          if (structuredSources.length) await write('sources', { sources: structuredSources });
+          if (structuredSources.length) await emit('sources', { sources: structuredSources });
           for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
-          await write('tool-finish', { toolName: recoveredToolName, recovery: true, sourceCount: structuredSources.length });
+          await emit('tool-finish', { toolName: recoveredToolName, recovery: true, sourceCount: structuredSources.length });
           finalText = this.deterministicStructuredFinalization([recoveredResult])?.answer ?? 'The authorized structured query completed, but its result could not be formatted.';
         } else {
         const schemaPrompt = [...turn.prompt];
@@ -840,7 +908,7 @@ export class AgentService {
           const toolName = this.publicToolName(call.payload.toolName);
           if (!allowedTools.has(toolName)) continue;
           toolsCalled.add(toolName);
-          await write('tool-start', { toolName, recovery: true });
+          await emit('tool-start', { toolName, recovery: true });
         }
         if (!hasStructuredQueryResult(analytic.toolResults)) {
           hasSearchResult = false;
@@ -851,9 +919,9 @@ export class AgentService {
           hasSearchResult = true;
           hasAnySearchHits = structuredSources.length > 0;
           suppressTextAfterNoEvidence = !hasAnySearchHits;
-          if (structuredSources.length) await write('sources', { sources: structuredSources });
+          if (structuredSources.length) await emit('sources', { sources: structuredSources });
           for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
-          for (const call of analytic.toolCalls) await write('tool-finish', { toolName: this.publicToolName(call.payload.toolName), recovery: true, sourceCount: structuredSources.length });
+          for (const call of analytic.toolCalls) await emit('tool-finish', { toolName: this.publicToolName(call.payload.toolName), recovery: true, sourceCount: structuredSources.length });
           const grounded = await agent.generate(withStructuredEvidence(turn.prompt, message, analytic.toolResults), {
             maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(),
           });
@@ -861,7 +929,7 @@ export class AgentService {
           if (finalText) {
             if (ttftMs === null) ttftMs = Math.round(performance.now() - startedAt);
             streamedText.push(finalText);
-            await write('text-delta', { text: finalText, verification: 'provisional' });
+            await emit('text-delta', { text: finalText, verification: 'provisional' });
           }
         }
         }
@@ -870,7 +938,7 @@ export class AgentService {
       for (const text of bufferedText.splice(0)) {
         streamedText.push(text);
         if (ttftMs === null) ttftMs = Math.round(performance.now() - startedAt);
-        await write('text-delta', { text, verification: 'provisional' });
+        await emit('text-delta', { text, verification: 'provisional' });
       }
     }
 
@@ -892,18 +960,18 @@ export class AgentService {
       if (hits.length) {
         try {
           const retryStep = modelCallCount + 1;
-          await write('step-start', { step: retryStep, recovery: 'citation' });
+          await emit('step-start', { step: retryStep, recovery: 'citation' });
           const retry = await agent.generate(withCitationRepair(turn.prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions() });
           modelCallCount += retry.steps?.length ?? 1;
           const usage = retry.totalUsage;
           if (typeof usage.inputTokens === 'number') promptTokens = (promptTokens ?? 0) + usage.inputTokens;
           if (typeof usage.outputTokens === 'number') completionTokens = (completionTokens ?? 0) + usage.outputTokens;
-          await write('step-finish', { step: retryStep, recovery: 'citation', promptTokens: usage.inputTokens ?? null, completionTokens: usage.outputTokens ?? null });
+          await emit('step-finish', { step: retryStep, recovery: 'citation', promptTokens: usage.inputTokens ?? null, completionTokens: usage.outputTokens ?? null });
           finalText = retry.text;
           if (finalText) {
             streamedText.push(finalText);
             if (ttftMs === null) ttftMs = Math.round(performance.now() - startedAt);
-            await write('text-delta', { text: finalText, verification: 'provisional' });
+            await emit('text-delta', { text: finalText, verification: 'provisional' });
           }
           this.trace('citation-retry', { mode: 'stream', requestHash, stepCount: retry.steps?.length, finishReason: retry.finishReason, draft: { length: retry.text.length, citationCount: [...retry.text.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' } });
           result = this.validateAnswer(finalText, finalToolResults, [...toolsCalled]);
@@ -918,7 +986,7 @@ export class AgentService {
       result.sources = [];
       result.citationValidation = 'no-evidence';
     }
-    await this.saveAssistant(turn.conversationId, result.answer);
+    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer);
 
     const totalMs = Math.round(performance.now() - startedAt);
     const telemetry = {
@@ -938,7 +1006,7 @@ export class AgentService {
       totalMs,
     };
     const discardProvisional = result.citationValidation !== 'valid' || streamedText.join('') !== result.answer;
-    await write('done', {
+    await emit('done', {
       answer: result.answer,
       sources: result.sources,
       toolsCalled: result.toolsCalled,
@@ -949,13 +1017,34 @@ export class AgentService {
       telemetry,
     });
     return { ...result, conversationId: turn.conversationId, timing: telemetry };
+    } catch (error) {
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      throw error;
+    }
   }
 
   private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
-    await write('status', { status: 'started', orchestration: 'workflow', conversationId: turn.conversationId });
-    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal);
+    await write('status', { status: 'started', orchestration: 'workflow', conversationId: turn.conversationId, turnId: turn.assistantMessageId });
+    let streamedAnswer = false;
+    let provisionalAnswer = '';
+    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal, {
+      onProgress: async progress => {
+        await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, progress.stage);
+        await write('stage', { ...progress });
+      },
+      onTextDelta: async text => {
+        streamedAnswer = true;
+        provisionalAnswer += text;
+        await write('text-delta', { text, verification: 'provisional' });
+      },
+      onTextReset: async () => {
+        streamedAnswer = false;
+        provisionalAnswer = '';
+        await write('text-reset', { reason: 'provider-retry' });
+      },
+    });
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     let abort: (() => void) | undefined;
     try {
@@ -963,31 +1052,38 @@ export class AgentService {
       abort = () => { void run.cancel().catch(() => undefined); };
       abortSignal.addEventListener('abort', abort, { once: true });
       const execution = await run.start({ inputData: { message } });
-      if (execution.status !== 'success' || !execution.result) throw new Error('AGENT_WORKFLOW_FAILED');
+      if (execution.status !== 'success' || !execution.result) {
+        if (execution.status === 'failed') throw execution.error;
+        throw new Error('AGENT_WORKFLOW_FAILED');
+      }
       const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
-      await this.saveAssistant(turn.conversationId, final.answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
       for (const toolName of final.toolsCalled) await write('tool-finish', { toolName, status: 'validated' });
-      await write('text-delta', { text: final.answer, verification: 'verified' });
+      if (!streamedAnswer) await write('text-delta', { text: final.answer, verification: 'verified' });
+      await write('stage', { stage: 'completed', status: 'completed', message: 'Answer is ready' });
       const timing = { totalMs: Math.round(performance.now() - startedAt), llmCalls: null, orchestration: 1 };
       const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, timing };
-      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
+      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: streamedAnswer && provisionalAnswer !== final.answer, finishObserved: true, telemetry: timing });
       return result;
     } catch (error) {
-      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'sse-workflow', code: error instanceof Error ? error.name : 'UNKNOWN', outcome: abortSignal.aborted ? 'cancelled' : 'failure' });
+      const provider = safeProviderFailure(error);
+      recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'sse-workflow', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: abortSignal.aborted ? 'cancelled' : 'failure' });
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
       throw error;
     } finally {
       if (abort) abortSignal.removeEventListener('abort', abort);
     }
   }
 
-  private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{ conversationId: string; prompt: AgentMessage[] }> {
+  private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{ conversationId: string; assistantMessageId: string; prompt: AgentMessage[] }> {
     const conversation = conversationId
       ? await this.prisma.conversation.findFirst({
           where: {
             id: conversationId,
             tenantId: principal.tenantId,
             ownerId: principal.userId,
+            deletedAt: null,
           },
           select: { id: true },
         })
@@ -1003,25 +1099,49 @@ export class AgentService {
       take: config.conversationHistoryMessages,
       select: { role: true, content: true },
     });
-    await this.prisma.$transaction([
+    const [, assistantMessage] = await this.prisma.$transaction([
       this.prisma.message.create({
         data: { conversationId: conversation.id, role: 'user', content: message },
       }),
+      this.prisma.message.create({ data: { conversationId: conversation.id, role: 'assistant', content: '', status: 'processing', stage: 'thinking' } }),
       this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }),
     ]);
-    const prompt = history.reverse().map(item => ({
+    const prompt = history.filter(item => item.role !== 'assistant' || item.content.trim()).reverse().map(item => ({
       role: item.role === 'assistant' ? 'assistant' as const : 'user' as const,
       content: item.content.slice(0, config.conversationHistoryChars),
     }));
     prompt.push({ role: 'user', content: message });
-    return { conversationId: conversation.id, prompt };
+    return { conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt };
   }
 
-  private async saveAssistant(conversationId: string, content: string) {
+  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string) {
     await this.prisma.$transaction([
-      this.prisma.message.create({ data: { conversationId, role: 'assistant', content } }),
+      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null } }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
+  }
+
+  private async updateAssistantStage(conversationId: string, assistantMessageId: string, stage: string) {
+    await this.prisma.$transaction([
+      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' }, data: { stage } }),
+      this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
+    ]);
+  }
+
+  private async finishAssistantTurn(conversationId: string, assistantMessageId: string, status: 'interrupted' | 'failed') {
+    await this.prisma.$transaction([
+      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' }, data: { status, stage: status } }),
+      this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
+    ]);
+  }
+
+  private async reconcileStaleTurns(conversationIds: string[]) {
+    if (!conversationIds.length) return;
+    const staleBefore = new Date(Date.now() - config.agentTimeoutMs - 10_000);
+    await this.prisma.message.updateMany({
+      where: { conversationId: { in: conversationIds }, role: 'assistant', status: 'processing', createdAt: { lt: staleBefore } },
+      data: { status: 'interrupted', stage: 'interrupted' },
+    });
   }
 
   private validateAnswer(
@@ -1061,15 +1181,15 @@ export class AgentService {
     for (const result of toolResults) {
       const output = result.payload.result as { hits?: DocumentSearchHit[] } | undefined;
       for (const hit of output?.hits ?? []) {
-        const { documentId, filename, chunkIndex } = hit.citation;
+        const { documentId, filename, chunkIndex, documentVersionId, chunkId, contentHash, paragraphStart, paragraphEnd } = hit.citation;
         const sourceRef = hit.sourceRef;
         if (!documentId || !filename || !sourceRef || !Number.isInteger(chunkIndex)) continue;
-        sources.set(`${documentId}:${chunkIndex}`, { documentId, filename, sourceRef, chunkIndex });
+        sources.set(`${documentId}:${documentVersionId || 'legacy'}:${chunkIndex}`, { documentId, filename, sourceRef, chunkIndex, ...(documentVersionId ? { documentVersionId } : {}), ...(chunkId ? { chunkId } : {}), ...(contentHash ? { contentHash } : {}), ...(paragraphStart ? { paragraphStart } : {}), ...(paragraphEnd ? { paragraphEnd } : {}) });
       }
       const structured = result.payload.result as { sources?: StructuredSource[] } | undefined;
       for (const source of structured?.sources ?? []) {
         if (!source.documentId || !source.filename || !source.sourceRef || !Number.isInteger(source.chunkIndex)) continue;
-        sources.set(`${source.documentId}:${source.chunkIndex}`, { ...source });
+        sources.set(`${source.documentId}:${source.documentVersionId || 'legacy'}:${source.chunkIndex}`, { ...source });
       }
     }
     return [...sources.values()];

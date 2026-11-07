@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
+import { domainToUnicode } from 'node:url';
 import { Inject, Injectable, UnauthorizedException, HttpException, HttpStatus, ConflictException, ForbiddenException, OnModuleDestroy, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -11,6 +12,13 @@ const REFRESH_COOKIE = 'sitepilot_refresh';
 const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_DAYS = 30;
 type Claims = { sub: string; tid: string; sid: string; role: TenantRole; iat: number; exp: number; iss: string };
+
+function displayEmail(email: string) {
+  const at = email.lastIndexOf('@');
+  if (at < 0) return email;
+  const domain = email.slice(at + 1);
+  return `${email.slice(0, at)}@${domainToUnicode(domain) || domain}`;
+}
 
 @Injectable()
 export class AuthService implements OnModuleDestroy {
@@ -103,7 +111,8 @@ export class AuthService implements OnModuleDestroy {
   }
 
   async listMembers(tenantId: string) {
-    return this.prisma.membership.findMany({ where: { tenantId }, orderBy: { createdAt: 'asc' }, select: { role: true, createdAt: true, user: { select: { id: true, email: true, displayName: true, disabledAt: true } } } });
+    const members = await this.prisma.membership.findMany({ where: { tenantId }, orderBy: { createdAt: 'asc' }, select: { role: true, createdAt: true, user: { select: { id: true, email: true, displayName: true, disabledAt: true } } } });
+    return members.map(member => ({ ...member, user: { ...member.user, emailDisplay: displayEmail(member.user.email) } }));
   }
 
   async addMember(tenantId: string, emailInput: string, role: TenantRole, actorId: string) {
@@ -117,7 +126,7 @@ export class AuthService implements OnModuleDestroy {
       throw error;
     }
     await this.audit(tenantId, actorId, 'tenant.member_added', undefined, { targetUserId: user.id, role });
-    return { user, tenantId, role };
+    return { user: { ...user, emailDisplay: displayEmail(user.email) }, tenantId, role };
   }
 
   async changeMemberRole(tenantId: string, userId: string, role: TenantRole, actorId: string) {

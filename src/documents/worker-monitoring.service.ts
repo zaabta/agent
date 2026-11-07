@@ -154,23 +154,30 @@ export class WorkerMonitoringService implements OnModuleDestroy {
   async listJobs(tenantId: string, page = 1, limit = 25, status?: string) {
     const safePage = Math.max(1, Math.floor(page));
     const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
-    const where = { tenantId, ...(status ? { status } : {}) };
+    const versionStatuses = status === 'processing' ? ['processing', 'reindexing'] : status ? [status] : [];
+    const where = { tenantId, ...(status ? { OR: [{ status }, ...(versionStatuses.length ? [{ versions: { some: { status: { in: versionStatuses } } } }] : [])] } : {}) };
     const [total, rows] = await Promise.all([
       this.prisma.appDocument.count({ where }),
       this.prisma.appDocument.findMany({ where, orderBy: { updatedAt: 'desc' }, skip: (safePage - 1) * safeLimit, take: safeLimit, select: { id: true, jobId: true, filename: true, status: true, stage: true, retryCount: true, failureCode: true, createdAt: true, updatedAt: true, completedAt: true } }),
     ]);
-    return { page: safePage, limit: safeLimit, total, jobs: rows };
+    const versions = await this.prisma.appDocumentVersion.findMany({ where: { jobId: { in: rows.flatMap(row => row.jobId ? [row.jobId] : []) }, tenantId }, select: { id: true, jobId: true, versionNumber: true, status: true, indexedChunkCount: true, indexGeneration: true } });
+    const byJob = new Map(versions.map(version => [version.jobId, version]));
+    return { page: safePage, limit: safeLimit, total, jobs: rows.map(row => {
+      const version = byJob.get(row.jobId);
+      return { ...row, ...(version ? { versionId: version.id, versionNumber: version.versionNumber, indexedChunkCount: version.indexedChunkCount, indexGeneration: version.indexGeneration, status: version.status === 'reindexing' ? 'processing' : version.status } : {}) };
+    }) };
   }
 
   async jobDetail(tenantId: string, jobId: string) {
-    const document = await this.prisma.appDocument.findFirst({ where: { tenantId, jobId }, select: { id: true, jobId: true, filename: true, status: true, stage: true, retryCount: true, failureCode: true, errorCode: true, createdAt: true, updatedAt: true, completedAt: true } });
+    const version = await this.prisma.appDocumentVersion.findFirst({ where: { tenantId, jobId }, select: { id: true, versionNumber: true, status: true, indexedChunkCount: true, indexGeneration: true, activeIndexGeneration: true, documentId: true } });
+    const document = await this.prisma.appDocument.findFirst({ where: { tenantId, ...(version ? { id: version.documentId } : { jobId }) }, select: { id: true, jobId: true, filename: true, status: true, stage: true, retryCount: true, failureCode: true, errorCode: true, createdAt: true, updatedAt: true, completedAt: true } });
     if (!document) return null;
     const [progressEvents, queueJob] = await Promise.all([
       this.prisma.documentProgressEvent.findMany({ where: { tenantId, jobId }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }], take: 100 }),
       this.queue.getJob(jobId).catch(() => null),
     ]);
     return {
-      ...document, failureCode: document.failureCode || document.errorCode, progressEvents,
+      ...document, ...(version ? { versionId: version.id, versionNumber: version.versionNumber, indexedChunkCount: version.indexedChunkCount, indexGeneration: version.indexGeneration, activeIndexGeneration: version.activeIndexGeneration, status: version.status } : {}), failureCode: document.failureCode || document.errorCode, progressEvents,
       queue: { state: await queueJob?.getState().catch(() => 'unknown') || 'unknown', attemptsMade: queueJob?.attemptsMade ?? null, attemptsMax: queueJob?.opts.attempts ?? null },
     };
   }

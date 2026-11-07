@@ -9,6 +9,7 @@ const modelProvider = process.env.MASTRA_PROVIDER ||
   (process.env.MASTRA_MODEL?.startsWith('openrouter/') ? 'openrouter' : 'ollama');
 const model = process.env.MASTRA_MODEL ||
   (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+const modelFallback = process.env.MASTRA_FALLBACK_MODEL?.trim() || undefined;
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
 
 export const config = {
@@ -25,6 +26,7 @@ export const config = {
     : 0.32,
   modelProvider,
   model,
+  modelFallback,
   ollamaThink: process.env.OLLAMA_THINK === 'true',
   maxBytes: Number(process.env.MAX_FILE_BYTES || 10485760),
   uploadDir: process.env.UPLOAD_DIR || '.sitepilot-data/uploads',

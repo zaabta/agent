@@ -22,10 +22,12 @@ model AppDocument {
   fileSize   BigInt?  @map("file_size")
   checksum   String?
   storageKey String?  @map("storage_key")
+  activeVersionId String? @map("active_version_id") @db.Uuid
   cancelRequested Boolean @default(false) @map("cancel_requested")
   deleteRequested Boolean @default(false) @map("delete_requested")
   completedAt DateTime? @map("completed_at")
   structuredCells AppDocumentCell[]
+  versions   AppDocumentVersion[]
   progressEvents DocumentProgressEvent[]
   errorCode  String?  @map("error_code")
   createdAt  DateTime @default(now()) @map("created_at")
@@ -35,6 +37,40 @@ model AppDocument {
   @@index([tenantId, status, createdAt(sort: Desc)])
   @@unique([tenantId, checksum])
   @@map("app_documents")
+}
+
+model AppDocumentVersion {
+  id                 String   @id @default(uuid()) @db.Uuid
+  documentId         String   @db.Uuid @map("document_id")
+  tenantId           String   @map("tenant_id")
+  versionNumber      Int      @map("version_number")
+  filename           String
+  checksum           String?
+  fileSize           BigInt   @map("file_size")
+  mimeType           String   @map("mime_type")
+  uploadedAt         DateTime @default(now()) @map("uploaded_at")
+  uploadedBy         String?  @map("uploaded_by")
+  status             String   @default("queued")
+  indexedChunkCount  Int      @default(0) @map("indexed_chunk_count")
+  chunkingStrategy   String?  @map("chunking_strategy")
+  chunkerVersion     String?  @map("chunker_version")
+  embeddingModel     String?  @map("embedding_model")
+  embeddingDimensions Int?    @map("embedding_dimensions")
+  storageKey         String?  @map("storage_key")
+  jobId              String?  @unique @map("job_id")
+  cancelRequested    Boolean  @default(false) @map("cancel_requested")
+  publishRequested   Boolean  @default(false) @map("publish_requested")
+  replacementReason  String?  @map("replacement_reason")
+  indexGeneration    Int      @default(1) @map("index_generation")
+  activeIndexGeneration Int?  @map("active_index_generation")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  document           AppDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, versionNumber])
+  @@unique([documentId, checksum])
+  @@index([tenantId, documentId, uploadedAt(sort: Desc)])
+  @@map("app_document_versions")
 }
 
 // Durable stage transitions. Unit counts stay nullable when the underlying
@@ -64,6 +100,7 @@ model DocumentProgressEvent {
 model AppDocumentCell {
   id          String      @id @default(uuid()) @db.Uuid
   documentId  String      @db.Uuid @map("document_id")
+  versionId   String?     @db.Uuid @map("version_id")
   tenantId    String      @map("tenant_id")
   sheetName   String      @map("sheet_name")
   rowNumber   Int         @map("row_number")
@@ -74,9 +111,9 @@ model AppDocumentCell {
   formula     String?     @db.Text
   document    AppDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
-  @@unique([documentId, sheetName, address])
+  @@unique([documentId, versionId, sheetName, address])
   @@index([tenantId, value])
-  @@index([tenantId, documentId, sheetName, rowNumber])
+  @@index([tenantId, documentId, versionId, sheetName, rowNumber])
   @@map("app_document_cells")
 }
 
@@ -84,11 +121,13 @@ model Conversation {
   id        String    @id @default(uuid()) @db.Uuid
   tenantId  String    @map("tenant_id")
   ownerId   String    @map("owner_id")
+  title     String?   @db.VarChar(120)
+  deletedAt DateTime? @map("deleted_at")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   messages  Message[]
 
-  @@index([tenantId, ownerId, updatedAt(sort: Desc)])
+  @@index([tenantId, ownerId, deletedAt, updatedAt(sort: Desc)])
   @@map("conversations")
 }
 
@@ -97,6 +136,8 @@ model Message {
   conversationId String       @db.Uuid @map("conversation_id")
   role           String
   content        String       @db.Text
+  status         String       @default("completed")
+  stage          String?
   createdAt      DateTime     @default(now()) @map("created_at")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
