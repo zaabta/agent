@@ -1,6 +1,6 @@
 # Live Ollama / Qwen3 8B follow-up validation
 
-This supersedes the earlier first-pass environment blockers in `REPORT.md`. The follow-up obtained portable Redis and Ollama binaries, downloaded real models, and exercised the backend with real inference. The complete live quality result is in `quality-live-qwen3-8b-final.json`; check its `complete` field before treating the run as finished.
+This supersedes the earlier first-pass environment blockers in `REPORT.md`. The follow-up obtained portable Redis and Ollama binaries, downloaded real models, and exercised the backend with real inference. The resumed live quality result will be in `quality-live-qwen3-8b-resumed.json`; check its presence and `complete` field before treating the run as finished. The earlier final run was not saved before the ephemeral environment ended, and is not counted.
 
 ## Actual test environment
 
@@ -79,4 +79,11 @@ Ollama ran with one parallel request and one loaded model to fit the 8 GiB test 
 
 ## Final evaluation status
 
-The final 33-case run is in progress at this checkpoint. Its JSON uses `complete: false` until all cases finish. The earlier native attempts are preserved separately and include real failures and interruptions. Do not interpret a partial attempt as a completed 33-question benchmark.
+The earlier final 33-case run was lost when the ephemeral environment ended. Only the saved partial attempts count as durable evidence. A fresh resumed run is being prepared. No unsaved result is claimed.
+
+## Resumed validation fixes
+
+- A verified `evidenceSufficient=false` response with no evidence IDs now remains a `no-evidence` refusal even when retrieval returned irrelevant candidate passages. Unknown or invalid references still fail validation. A real Mastra workflow regression verifies the Arabic refusal and empty source list.
+- The long-running quality and upload harness can use `AGENT_E2E_REFRESH_COOKIE` (the test login cookie pair, passed privately via environment) to rotate an expired bearer token through the existing `/api/auth/refresh` API and retry once. No credential is written to reports. This fixes the harness, not the application authentication design. Without the cookie a 401 remains a visible failure.
+- The live SSE reader preserves UTF-8 decoder state across byte chunks. Quality records include available timing/usage fields and require Arabic text for Arabic cases; Turkish language and semantic entailment still require human review.
+- Resumed broad checks: 74 passed, 0 failed, 15 skipped (89 total); source and audit-script typechecks and Prisma validation passed.

@@ -48,9 +48,14 @@ for (const item of cases) {
       record.citedDocuments = documents;
       record.citationValidity = valid;
       record.llmCalls = result.timing?.llmCalls ?? null;
+      record.timing = result.timing ?? null;
+      record.inputTokens = result.timing?.promptTokens ?? null;
+      record.outputTokens = result.timing?.completionTokens ?? null;
+      record.languageCheck = item.language === 'ar' ? /\p{Script=Arabic}/u.test(result.answer) : 'human-review';
       record.pass = valid && item.expectedSourceDocuments.every((d: string) => documents.includes(d)) && item.expectedFacts.every((f: string) => (factAlternatives[f] ?? [f]).some(variant => normalize(result.answer).includes(normalize(variant))));
       if (item.expectedAnyTools?.length && !item.expectedAnyTools.some((name: string) => result.toolsCalled?.includes(name))) record.pass = false;
       if (item.category === 'missing') record.pass = result.citationValidation === 'no-evidence' || (!result.sources.length && /insufficient|not.*evidence|could not find/i.test(result.answer));
+      if (record.languageCheck === false) record.pass = false;
       record.status = record.pass ? 'passed' : 'failed'; record.reason = null;
       record.latencyMs = Math.round(performance.now() - started);
     } catch (error) { record.status = 'failed'; record.pass = false; record.reason = error instanceof Error ? error.message : 'Unknown failure'; record.latencyMs = Math.round(performance.now() - started); }

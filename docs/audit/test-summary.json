@@ -19,8 +19,20 @@
     "prismaValidate": "passed"
   },
   "limitations": [
-    "HTTP regression uses in-memory persistence and mocked models",
-    "Docker/PostgreSQL/Redis/Ollama missing; apt installation blocked",
-    "33 live quality cases skipped; see quality JSON files"
-  ]
+    "Broad HTTP regression uses in-memory persistence and mocked model methods",
+    "Real CPU Ollama and Redis used separately; disposable PGlite is not native PostgreSQL16 concurrency validation",
+    "Original-main complete live quality baseline unavailable; prior final run lost with ephemeral environment",
+    "GitHub branch creation rejected403; PR not opened"
+  ],
+  "resumed": {
+    "tests": 89,
+    "passed": 74,
+    "failed": 0,
+    "skipped": 15,
+    "typecheck": "passed",
+    "evaluationScriptsTypecheck": "passed",
+    "prismaValidate": "passed",
+    "command": "npm run prisma:generate && npm run typecheck && npm run typecheck:audit && npm test; npm exec prisma validate",
+    "dependencyNote": "Frozen pnpm 11 install downloaded locked packages but returned ERR_PNPM_IGNORED_BUILDS; Prisma generation ran explicitly. Earlier frozen pnpm10.10 install passed."
+  }
 }

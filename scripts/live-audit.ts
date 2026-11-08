@@ -61,9 +61,10 @@ try {
   const response: Response = await request('/api/agent/stream', { method: 'POST', headers, body: JSON.stringify({ message: 'متى إطلاق مشروع Orion؟' }), signal: AbortSignal.timeout(300_000) });
   assert.equal(response.status, 200); assert.ok(response.body);
   let pending = '', firstTextMs: number | null = null;
+  const decoder = new TextDecoder();
   const frames: Array<{ name: string; data: any }> = [];
   for await (const bytes of response.body) {
-    pending += Buffer.from(bytes).toString();
+    pending += decoder.decode(bytes, { stream: true });
     let boundary;
     while ((boundary = pending.indexOf('\n\n')) >= 0) {
       const frame = pending.slice(0, boundary); pending = pending.slice(boundary + 2);

@@ -1,6 +1,6 @@
 # SitePilot backend reliability and RAG audit
 
-Baseline: `3cc78e47cce4a0fc741c506f1543a224471ac0c0` (latest main at checkout). Backend only; no deployment, migration execution, production access, conversation deletion, index removal or volume reset.
+Baseline: `3cc78e47cce4a0fc741c506f1543a224471ac0c0` (latest main rechecked on November 8). Backend only; no production access, deployment, historical conversation deletion, index removal or volume reset. Existing migrations were executed only against a disposable test database. Read `LIVE_VALIDATION.md` for real Ollama follow-up results; the original skipped benchmark files are historical first-pass artifacts.
 
 ## Confirmed causes and changes
 
@@ -18,7 +18,7 @@ The entire reported UI disappearance incident cannot be fully attributed without
 
 Initial baseline: TypeScript passed; **56 passed, 0 failed, 15 skipped** out of 71 tests.
 
-Updated suite: **62 passed, 0 failed, 15 skipped** out of 77 tests; TypeScript passed. The same totals passed after a frozen pnpm 10.10.0 installation and Prisma generation; the evaluation scripts also passed their separate TypeScript check.
+Initial updated suite: **62 passed, 0 failed, 15 skipped** out of 77 tests. The resumed suite now reports **74 passed, 0 failed, 15 skipped** out of 89; application and evaluation-script typechecks and Prisma validation passed. Additional tests cover Ollama wire options, projected provenance, routing recovery, legitimate insufficient-evidence replies, and long-running audit session refresh.
 
 The added HTTP regression starts a real Nest listener with the actual controller, auth guard, service, Mastra workflow and tools. It uses a test-token identity validator, an in-memory Prisma-shaped store and mocked Mastra model methods. It verifies:
 
@@ -48,16 +48,17 @@ History was absent in the original planner and present in the updated planner. T
 
 ### Live quality benchmark
 
-`test/quality/cases.json` contains 33 cases: 11 categories × Arabic/Turkish/English. Categories include factual retrieval, costs, risk, timeline, synthesis, follow-up, Excel lookup, aggregation, missing evidence, conflict and citation checks. `quality-before.json` and `quality-after.json` explicitly record all 33 as skipped in this environment, with null actual answers/latencies/calls. No live quality improvement is claimed.
+`test/quality/cases.json` contains 33 cases: 11 categories × Arabic/Turkish/English. Categories include factual retrieval, costs, risk, timeline, synthesis, follow-up, Excel lookup, aggregation, missing evidence, conflict and citation checks. `quality-before.json` and `quality-after.json` record the first-pass skipped execution. Subsequent `quality-live-*.json` files contain actual inference; distinguish complete runs from partial checkpoints. The ephemeral environment ended before its earlier final run was saved, so that unsaved result is unavailable. See `LIVE_VALIDATION.md` for the current status. There is no complete original-main live benchmark, so no controlled original-main quality gain is claimed.
 
 The live runner stores question, expected facts/documents, actual answer, cited documents, citation validity, latency, available call counts, pass/fail and human-review flags. Raw retrieved documents are `null` because the public ask response exposes cited sources, not the complete retrieval set. Do not equate cited-document coverage with raw retrieval recall. Lexical fact checks can miss translated synonyms, so multilingual failures require review.
 
-## Blockers and unexecuted work
+## Limits and outstanding validation
 
-- Docker/Podman, PostgreSQL tools, Redis and Ollama are absent. `apt-get update` failed with `setgroups`/`seteuid` permission errors. No existing database or service credentials were supplied. npm registry and GitHub access worked.
-- The 15 existing service-dependent tests skipped with their own explicit conditions. Real upload→queue→worker→embedding→TypeGraph indexing, persisted job SSE/replay, duplicate/version processing, retries/restart recovery, graph/multilingual retrieval and authenticated external API checks remain unexecuted.
-- No model download or actual local inference was feasible here. No OpenRouter key or real provider quota was used. 429 tests simulate upstream status metadata through the actual workflow.
-- The disposable Compose/Dockerfile configuration is provided but could not be built or run here. Model token usage and actual TTFT/latency need the live run. Native TypeGraph reranking remains opt-in; document diversity/threshold changes need live relevance calibration.
+- Docker/Podman and native PostgreSQL remain unavailable. Portable Redis/Ollama and PGlite/pgvector enabled real six-format ingestion and local inference, with the database-concurrency limits recorded in `LIVE_VALIDATION.md`. Docker configuration is supplied but was not executed.
+- Fifteen service-dependent tests skip in the broad unit command. Separately executed live checks must be counted individually, never as passing all skipped E2Es. Full native PostgreSQL stress, worker retry/restart recovery and all version-race scenarios remain incomplete.
+- No real OpenRouter quota or credentials were used. Synthetic upstream HTTP 429 exercises the provider-error path. Real inference uses local Qwen3 8B and existing Nomic embeddings.
+- Native TypeGraph reranking remains opt-in. Large evidence/history budgets need calibration against the server context window. Citation identity checks and lexical expected facts do not prove semantic entailment.
+- GitHub reads work, but branch creation returns HTTP 403 `Resource not accessible by integration`. No remote feature branch or PR has been created.
 - Request cancellation is process-local, as before. A disconnected transport continues backend persistence by design. No distributed cancellation platform was introduced.
 
 ## Reproduction

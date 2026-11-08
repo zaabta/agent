@@ -20,7 +20,7 @@ export async function isolatedAccount(prisma: PrismaClient, baseUrl: string, pre
     await prisma.membership.create({ data: { tenantId, userId: pending.user.id, role: 'TENANT_ADMIN' } });
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(credentials) });
     assert.equal(login.status, 200);
-    return await login.json() as { accessToken: string; user: { id: string }; tenant: { id: string; role: string } };
+    return { ...await login.json() as { accessToken: string; user: { id: string }; tenant: { id: string; role: string } }, refreshCookie: login.headers.get('set-cookie')?.split(';')[0] };
   } catch (error) {
     await prisma.user.deleteMany({ where: { id: pending.user.id } }).catch(() => undefined);
     throw error;

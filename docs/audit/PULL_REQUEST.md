@@ -1,18 +1,18 @@
-# Fix conversation history and add context-aware multi-document RAG
+# Improve conversation reliability and contextual multi-document RAG
 
-Earlier conversation messages were hidden because the history API used the LLM context limit. Workflow provider errors also lost their class identity during Mastra serialization, causing upstream 429s to become generic 500s. This change adds independent owned-history pagination, preserves safe provider metadata, passes bounded conversation history into planning, and retrieves bounded evidence across multiple focused queries.
+Conversation history used the LLM context limit as its UI response limit, and Mastra serialization hid provider-error identity. This change separates owned history/list pagination from model context, preserves sanitized 429 metadata, retains failed turns and earlier messages, and passes bounded conversation history into the workflow.
 
-Document questions avoid redundant structured-schema replanning. Multi-query search keeps TypeGraph authorization and active-version checks, fuses query-local ranks, deduplicates chunks and diversifies document evidence. Existing citation validation remains; workflow SSE now emits sources. Ingestion, embeddings, auth architecture and storage were preserved.
+Adaptive retrieval uses up to four focused TypeGraph hybrid queries, RRF fusion, chunk deduplication and document diversity with existing authorization/version filters. Document questions skip redundant structured-schema planning; actual analytics preserve column and aggregation intent. Qwen3 grounded execution uses the correct Ollama reasoning option, removes unused tool schemas, preserves answer language and overrides conflicting tool-oriented instructions. Authorized index metadata restores page/chunk provenance. Verified insufficient-evidence refusals remain valid refusals.
 
-Validation:
+Validation so far:
 
-- Baseline: TypeScript passed; 56 tests passed, 0 failed, 15 skipped.
-- After frozen pnpm 10.10.0 install: TypeScript and evaluation-script typechecks passed; Prisma schema validation passed; 62 tests passed, 0 failed, 15 skipped.
-- Actual Nest HTTP routes and Mastra workflows tested with in-memory Prisma-shaped persistence, test-token identity validation and mocked model methods: 429 history retention/retry, pagination/private ownership, multilingual follow-up context, incremental SSE/reset/sources/final persistence, cancellation and disconnect completion.
-- Synthetic Markdown/TXT/PDF/DOCX/CSV/XLSX fixtures parsed successfully.
-- Controlled original/updated workflow execution: document questions 4→3 model calls; injected complex plans 1→2 search queries and cited documents. These are mocked execution results, not live answer quality or production latency gains.
-- Live quality suite: 33 cases prepared, all 33 skipped before and after. Actual inference, TypeGraph indexing, workers and PostgreSQL durability remain unverified. Docker/PostgreSQL/Redis/Ollama are absent; apt installation failed on container permissions; no real provider credentials supplied.
+- Original main: 56 tests passed, 0 failed, 15 skipped.
+- Resumed suite: 74 passed, 0 failed, 15 skipped; source/audit TypeScript and Prisma validation passed.
+- Actual Nest HTTP/Mastra workflow regressions with mocked inference and in-memory persistence cover 429 retention/retry, pagination/ownership, multilingual context, SSE, cancellation and disconnect completion.
+- Real CPU Ollama Qwen3 8B, existing Nomic embeddings, Redis/BullMQ API/worker and disposable PGlite/pgvector processed six formats; earlier raw live attempts preserve both successes and failures. PGlite is not native PostgreSQL16 validation.
+- Controlled mocked original/improved workflows: 4→3 model calls for ordinary document questions; injected multi-query plans improve fixture document coverage. This is not a measured production speedup.
+- A fresh 33-case actual-inference run is pending; the prior final run was lost with the ephemeral environment. Saved exploratory results are partial. No complete original-main live quality comparison is available.
 
-Run `pnpm prisma:generate`, `pnpm typecheck`, `pnpm typecheck:audit`, `pnpm test`, and `pnpm exec prisma validate`. `pnpm eval:workflow` reproduces the controlled execution comparison. See `docs/audit/REPORT.md` for exact isolated-stack, corpus-seeding, live evaluation and baseline-comparison commands, configuration and limitations. No new runtime dependency or migration is required. `MASTRA_OBSERVABILITY=false` is an optional test-only switch; the default tracing behavior remains enabled.
+Run `pnpm install --frozen-lockfile`, `pnpm prisma:generate`, `pnpm typecheck`, `pnpm typecheck:audit`, `pnpm test`, and `pnpm exec prisma validate`. Use the isolated Compose commands and authenticated seed/evaluation commands in `docs/audit/REPORT.md` and `LIVE_VALIDATION.md`; optional `AGENT_E2E_REFRESH_COOKIE` supports tests exceeding access-token lifetime. No new runtime dependency or schema migration is required.
 
-This PR should stay draft until live ingestion and quality evaluation are completed. No merge or production deployment is requested.
+Remaining: native PostgreSQL stress/concurrency, full retry/restart and version-race coverage, context-window calibration, multilingual human review, and complete original-main quality comparison. No production deployment, data reset or merge. GitHub write access currently returns403, so this is a prepared PR description, not an opened PR.
