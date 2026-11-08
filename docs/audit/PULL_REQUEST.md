@@ -7,7 +7,7 @@ Adaptive retrieval uses up to four focused TypeGraph hybrid queries, RRF fusion,
 Validation so far:
 
 - Original main: 56 tests passed, 0 failed, 15 skipped.
-- Resumed suite: 80 passed, 0 failed, 15 skipped; source/audit TypeScript and Prisma validation passed.
+- Latest suite after pagination follow-up: 85 passed, 0 failed, 15 skipped / 100 total; source/audit TypeScript passed. Prisma validation passed in the preceding audit. Targeted pagination/reliability HTTP tests6/6 passed.
 - Actual Nest HTTP/Mastra workflow regressions with mocked inference and in-memory persistence cover 429 retention/retry, pagination/ownership, multilingual context, SSE, cancellation and disconnect completion.
 - Real CPU Ollama Qwen3 8B, existing Nomic embeddings, Redis/BullMQ API/worker and disposable PGlite/pgvector processed six formats; earlier raw live attempts preserve both successes and failures. PGlite is not native PostgreSQL16 validation.
 - Controlled mocked original/improved workflows: 4→3 model calls for ordinary document questions; injected multi-query plans improve fixture document coverage. This is not a measured production speedup.
@@ -16,3 +16,5 @@ Validation so far:
 Run `pnpm install --frozen-lockfile`, `pnpm prisma:generate`, `pnpm typecheck`, `pnpm typecheck:audit`, `pnpm test`, and `pnpm exec prisma validate`. Use the isolated Compose commands and authenticated seed/evaluation commands in `docs/audit/REPORT.md` and `LIVE_VALIDATION.md`; optional `AGENT_E2E_REFRESH_COOKIE` supports tests exceeding access-token lifetime. No new runtime dependency or schema migration is required.
 
 Remaining: native PostgreSQL stress/concurrency, full retry/restart and version-race coverage, context-window calibration, multilingual human review, and complete original-main quality comparison. No production deployment, data reset or merge. GitHub write access currently returns403, so this is a prepared PR description, not an opened PR.
+
+Catalog follow-up: document listing now supports validated `page`, `limit`, literal filename `search`, `status` and `fileType`, with tenant-filtered totals and stable creation-time/ID ordering. This intentionally changes the list response from an array to `{ documents, meta }`. Conversation/message cursor APIs add `meta {limit,count,hasMore,nextCursor,direction}` and preserve top-level aliases. The Arabic frontend contract is in `docs/PAGINATION_API_AR.md`. Message scope remains private; document scope remains the shared authorized workspace. No migration is required.

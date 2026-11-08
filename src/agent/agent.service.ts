@@ -386,7 +386,7 @@ export class AgentService implements OnModuleDestroy {
       distinct: ['conversationId'], select: { id: true, conversationId: true, role: true, content: true, status: true, stage: true, createdAt: true },
     }) : [];
     const latest = new Map(messages.map(item => [item.conversationId, item]));
-    return { hasMore, nextCursor, conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
+    return { hasMore, nextCursor, meta: { limit: pageSize, count: conversations.length, hasMore, nextCursor, direction: 'older' as const }, conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
   }
 
   async getConversation(conversationId: string, principal: AuthPrincipal, page: { limit?: number; cursor?: string } = {}) {
@@ -413,7 +413,7 @@ export class AgentService implements OnModuleDestroy {
     const hasMore = rows.length > limit;
     const messages = rows.slice(0, limit);
     const nextCursor = hasMore ? messages.at(-1)?.id : null;
-    return { ...conversation, hasMore, nextCursor, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
+    return { ...conversation, hasMore, nextCursor, meta: { limit, count: messages.length, hasMore, nextCursor, direction: 'older' as const }, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
   }
 
   async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {

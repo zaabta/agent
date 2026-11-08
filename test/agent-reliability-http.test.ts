@@ -94,8 +94,11 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.ok((await (await request('conversations')).json() as any).conversations.some((c: any) => c.id === id));
     const page = await (await request(`conversations/${id}?limit=5`)).json() as any;
     assert.equal(page.messages.length, 5); assert.equal(page.hasMore, true);
+    assert.deepEqual(page.meta, { limit: 5, count: 5, hasMore: true, nextCursor: page.nextCursor, direction: 'older' });
     const older = await (await request(`conversations/${id}?limit=5&cursor=${page.nextCursor}`)).json() as any;
     assert.equal(older.messages.length, 5);
+    assert.equal(older.meta.count, older.messages.length);
+    assert.equal(older.meta.nextCursor, older.nextCursor);
     assert.ok(older.messages.every((m: any) => !page.messages.some((n: any) => n.id === m.id)));
     const failedStream = await request('stream', { message: 'Rate limited stream', conversationId: id });
     const failedFrames = await failedStream.text();
@@ -154,8 +157,10 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     for (let index = 0; index < 53; index++) await request('conversations', {});
     const listPage = await (await request('conversations')).json() as any;
     assert.equal(listPage.conversations.length, 50); assert.equal(listPage.hasMore, true);
+    assert.deepEqual(listPage.meta, { limit: 50, count: 50, hasMore: true, nextCursor: listPage.nextCursor, direction: 'older' });
     const olderList = await (await request(`conversations?cursor=${listPage.nextCursor}`)).json() as any;
     assert.equal(olderList.hasMore, false);
+    assert.equal(olderList.meta.hasMore, false); assert.equal(olderList.meta.nextCursor, null);
     assert.equal(new Set([...listPage.conversations, ...olderList.conversations].map((c: any) => c.id)).size, 54);
     assert.ok(olderList.conversations.some((c: any) => c.id === id));
     const other = await fetch(`${base}/api/agent/conversations?cursor=${listPage.nextCursor}`, { headers: { authorization: 'Bearer test-other' } });

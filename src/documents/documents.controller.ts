@@ -6,7 +6,7 @@ import { extname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {} from 'multer';
 import type { Express } from 'express';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
@@ -15,6 +15,7 @@ import { config } from '../config.js';
 import { DocumentsService } from './documents.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
 import { SUPPORTED_EXTENSIONS } from './parser.js';
+import { DOCUMENT_LIST_STATUSES, DOCUMENT_LIST_TYPES, parseDocumentListQuery } from './document-list-query.js';
 
 const diskUpload = diskStorage({
   destination: (_request, _file, callback) => {
@@ -40,9 +41,15 @@ export class DocumentsController {
     @Inject(DocumentsService) private readonly documents: DocumentsService,
     @Inject(DocumentStorageService) private readonly storage: DocumentStorageService,
   ) {}
-  @Get() @ApiOperation({ summary: 'List documents and processing status for the authenticated tenant' })
+  @Get() @ApiOperation({ summary: 'Search and filter the tenant document catalog with numbered pagination', description: 'Returns { documents, meta }. Search matches filenames, not document contents; POST /search remains the TypeGraph content-search API.' })
+  @ApiQuery({ name: 'page', required: false, schema: { type: 'integer', minimum: 1, maximum: 1000000, default: 1 } })
+  @ApiQuery({ name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } })
+  @ApiQuery({ name: 'search', required: false, schema: { type: 'string', maxLength: 200 }, description: 'Case-insensitive literal filename substring' })
+  @ApiQuery({ name: 'status', required: false, enum: DOCUMENT_LIST_STATUSES })
+  @ApiQuery({ name: 'fileType', required: false, enum: DOCUMENT_LIST_TYPES })
+  @ApiResponse({ status: 200, description: 'documents plus meta: page, limit, count, total, totalPages, hasNextPage, hasPreviousPage and applied filters. Ordered newest first, with ID as the tie-breaker.' })
   @ApiResponse({ status: 401, description: 'Valid bearer JWT required; local dev key is optional when explicitly enabled.' })
-  list(@CurrentPrincipal() principal: AuthPrincipal) { return this.documents.list(principal.tenantId); }
+  list(@CurrentPrincipal() principal: AuthPrincipal, @Query() query: Record<string, unknown>) { return this.documents.list(principal.tenantId, parseDocumentListQuery(query)); }
   @Get(':id') @ApiOperation({ summary: 'Get one tenant document status' })
   get(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) { return this.documents.get(id, principal.tenantId); }
   @Get(':id/versions')

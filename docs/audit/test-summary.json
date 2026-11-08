@@ -59,5 +59,26 @@
     },
     "allFiveRerunAfterFinalGuard": false,
     "full33CaseRagBenchmarkCompleted": false
+  },
+  "paginationFollowup": {
+    "tests": 100,
+    "passed": 85,
+    "failed": 0,
+    "skipped": 15,
+    "typecheck": "passed",
+    "evaluationScriptsTypecheck": "passed",
+    "targetedHttpTests": {
+      "tests": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "commands": [
+      "npm run typecheck",
+      "npm run typecheck:audit",
+      "node --import tsx --test test/document-list-http.test.ts test/agent-reliability-http.test.ts",
+      "npm test",
+      "git diff --check"
+    ],
+    "scope": "Real Nest HTTP controller/guard/service, mocked session identity and in-memory Prisma. No live PostgreSQL collation/isolation proof. No inference rerun needed for list APIs."
   }
 }

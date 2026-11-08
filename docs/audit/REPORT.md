@@ -118,3 +118,9 @@ For `createViolation`/`updateEmployee`, a separate server action should validate
 ## Delivery status
 
 Two implementation/evaluation commits were prepared locally on `feat/agent-rag-quality-and-reliability`. Publishing was attempted: `git push` failed because the shell has no GitHub credentials, and the connected GitHub integration returned HTTP 403 `Resource not accessible by integration` for both Git-tree writes and branch creation. Consequently no remote branch or pull request was created. `PULL_REQUEST.md` contains the complete prepared PR description. The delivered mail-format patch preserves the commits and can be applied with `git am` on the requested branch, then pushed with an account/integration granted repository Contents write access. Do not merge automatically.
+
+## Catalog pagination and scroll metadata follow-up
+
+Added tenant-scoped filename search, status/type filters, numbered document pages and filtered totals. `GET /api/documents` intentionally changes from a bare array to `{ documents, meta }`; the frontend must read `response.documents`. Conversation and message cursor responses now include `meta` while retaining existing top-level cursor fields. Cursor direction is older; message batches remain chronological and are prepended on upward scroll. See `../PAGINATION_API_AR.md`. No schema migration or LLM/context change is required.
+
+Latest validation: **85 passed, 0 failed, 15 skipped / 100 total**, source and audit TypeScript passed; targeted HTTP tests6/6 passed. The storage/session substitutes do not establish live PostgreSQL LIKE collation or transaction isolation. Existing native-service and GitHub write-access limitations remain.

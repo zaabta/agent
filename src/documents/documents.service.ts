@@ -8,6 +8,7 @@ import { TypegraphService } from '../typegraph/typegraph.service.js';
 import { DocumentQueueService } from './document-queue.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
 import { SUPPORTED_EXTENSIONS } from './parser.js';
+import type { DocumentListQuery } from './document-list-query.js';
 import { safeDisplayName } from './display-name.js';
 
 const MIME_BY_EXTENSION: Record<string, string[]> = {
@@ -62,12 +63,22 @@ export class DocumentsService implements OnModuleInit {
     return { ...document, filename: safeDisplayName(document.filename), fileSize: document.fileSize == null ? null : Number(document.fileSize) };
   }
 
-  async list(tenantId = config.tenantId) {
-    const documents = await this.prisma.appDocument.findMany({
-      where: { tenantId }, orderBy: { createdAt: 'desc' }, take: 100,
+  async list(tenantId = config.tenantId, query: DocumentListQuery = { page: 1, limit: 20, search: '' }) {
+    const { page, limit, search, status, fileType } = query;
+    const where = { tenantId, ...(status ? { status } : {}), ...(fileType ? { fileType } : {}),
+      // Prisma contains uses SQL LIKE. Treat user input as a literal filename
+      // substring rather than accepting wildcard expressions.
+      ...(search ? { filename: { contains: search.replace(/[\\%_]/g, '\\$&'), mode: 'insensitive' as const } } : {}),
+    };
+    const [documents, total] = await this.prisma.$transaction([this.prisma.appDocument.findMany({
+      where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: (page - 1) * limit, take: limit,
       select: { id: true, filename: true, fileType: true, status: true, stage: true, progress: true, jobId: true, retryCount: true, failureCode: true, fileSize: true, activeVersionId: true, createdAt: true, updatedAt: true, completedAt: true },
-    });
-    return documents.map(document => this.safeDocument(document));
+    }), this.prisma.appDocument.count({ where })], { isolationLevel: 'RepeatableRead' });
+    const totalPages = Math.ceil(total / limit);
+    return { documents: documents.map(document => this.safeDocument(document)), meta: {
+      page, limit, count: documents.length, total, totalPages, hasNextPage: page < totalPages, hasPreviousPage: page > 1,
+      filters: { search, status: status ?? null, fileType: fileType ?? null },
+    } };
   }
 
   async get(id: string, tenantId = config.tenantId) {

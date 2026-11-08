@@ -105,6 +105,13 @@ On `done`, set the rendered assistant content to `done.answer` as the authoritat
 
 To start a conversation, POST `/api/agent/conversations`; pass its `id` as `conversationId` to `/ask` or `/stream`. GET `/api/agent/conversations` lists recent owned conversations and each latest message; GET `/api/agent/conversations/:id` returns the bounded message history. Each turn stores the user message and a pending assistant message before generation. Assistant messages include `status` (`processing`, `completed`, `interrupted`, or `failed`) and `stage` (`thinking`, `planning`, `searching`, `executing`, `composing`, `validating`, etc.). Disconnecting the SSE client does not cancel the turn; generation continues and persists its final answer. A process crash is reconciled to `interrupted` when its request timeout has elapsed. Tenant and owner scope come from server authentication, never from request content. While auth is the shared development key, all development requests share the configured owner scope.
 
+### Document catalog pagination and conversation scroll
+
+- `GET /api/documents?page=1&limit=20&search=Orion&status=ready&fileType=pdf` returns `{ documents, meta }`. This replaces the previous bare document array. Search is a literal case-insensitive filename substring; status/type filters and totals are tenant-scoped. `meta` includes page, limit, count, total, totalPages and next/previous-page flags.
+- `GET /api/agent/conversations?limit=50&cursor=<nextCursor>` returns owned conversations and `meta { limit, count, hasMore, nextCursor, direction: "older" }`.
+- `GET /api/agent/conversations/:id?limit=100&cursor=<nextCursor>` returns conversation fields, a chronological batch of messages and the same cursor metadata. Prepend older message batches when scrolling upward. Existing top-level `hasMore`/`nextCursor` remain available.
+- The frontend owns scroll events. Pagination does not send additional model context or add persistent memory. See the [Arabic API contract and integration notes](docs/PAGINATION_API_AR.md) for request/response examples, limits, reset rules and error behavior.
+
 ### Document versions
 
 The existing `POST /api/documents/upload` remains the first-version upload API and still returns `{ document, duplicate, version }`. Version uploads use `POST /api/documents/:id/versions` with multipart `file` and optional `reason` (up to 500 characters). Repeated content within the same logical document returns `duplicate: true` and the existing version.

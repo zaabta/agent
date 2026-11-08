@@ -5,7 +5,7 @@ import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../auth/roles.decorator.js';
 import { readTenantTrace } from '../mastra/observability.js';
 import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';
@@ -126,7 +126,9 @@ export class AgentController {
   }
 
   @Get('conversations')
-  @ApiOperation({ summary: 'List recent owned conversations with the latest message status' })
+  @ApiOperation({ summary: 'Cursor-based infinite scroll of owned conversations with latest-message status', description: 'Returns conversations and meta {limit,count,hasMore,nextCursor,direction:"older"}. Pass meta.nextCursor unchanged for the next batch. Existing top-level hasMore/nextCursor remain available.' })
+  @ApiQuery({ name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } })
+  @ApiQuery({ name: 'cursor', required: false, schema: { type: 'string', format: 'uuid' } })
   listConversations(@CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
     if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) throw new BadRequestException('INVALID_PAGE_LIMIT');
     if (cursor !== undefined && !isUuid(cursor)) throw new BadRequestException('INVALID_CONVERSATION_CURSOR');
@@ -134,6 +136,9 @@ export class AgentController {
   }
 
   @Get('conversations/:id')
+  @ApiOperation({ summary: 'Load recent messages or prepend older messages on upward scroll', description: 'Messages in each batch are chronological. The first request selects the newest batch. Pass meta.nextCursor to get older messages and prepend them. Returns conversation fields, messages and meta; model context limits are independent.' })
+  @ApiQuery({ name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 100 } })
+  @ApiQuery({ name: 'cursor', required: false, schema: { type: 'string', format: 'uuid' } })
   getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
     if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200)) throw new BadRequestException('INVALID_PAGE_LIMIT');
