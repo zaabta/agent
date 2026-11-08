@@ -1,6 +1,6 @@
 # Live Ollama / Qwen3 8B follow-up validation
 
-This supersedes the earlier first-pass environment blockers in `REPORT.md`. The follow-up obtained portable Redis and Ollama binaries, downloaded real models, and exercised the backend with real inference. The resumed live quality result will be in `quality-live-qwen3-8b-resumed.json`; check its presence and `complete` field before treating the run as finished. The earlier final run was not saved before the ephemeral environment ended, and is not counted.
+This supersedes the earlier first-pass environment blockers in `REPORT.md`. The follow-up obtained portable Redis and Ollama binaries, downloaded real models, and exercised the backend with real inference. The resumed 33-case end-to-end run did not get past setup/job polling on the test-only PGlite database. The earlier final run was not saved before the ephemeral environment ended and is not counted. Supplemental real-model runs use fixed retrieval evidence and are explicitly separate from end-to-end RAG validation.
 
 ## Actual test environment
 
@@ -79,7 +79,7 @@ Ollama ran with one parallel request and one loaded model to fit the 8 GiB test 
 
 ## Final evaluation status
 
-The earlier final 33-case run was lost when the ephemeral environment ended. Only the saved partial attempts count as durable evidence. A fresh resumed run is being prepared. No unsaved result is claimed.
+The earlier final 33-case run was lost when the ephemeral environment ended. Saved partial attempts remain available. The resumed end-to-end attempt failed during corpus setup/job polling and never completed the 33-case benchmark. No unsaved result is claimed.
 
 ## Resumed validation fixes
 
@@ -104,3 +104,15 @@ A supplemental `eval:ollama-fixtures` command runs the actual Mastra workflow an
 ```bash
 MASTRA_PROVIDER=ollama MASTRA_MODEL=qwen3:8b OLLAMA_THINK=false MASTRA_OBSERVABILITY=false RUN_LIVE_OLLAMA_FIXTURES=true pnpm eval:ollama-fixtures
 ```
+
+## Completed supplemental model run and observed failure
+
+`quality-live-ollama-controlled-evidence.json` completed five cases with real Qwen3 8B and the real Mastra workflow, using controlled four-excerpt retrieval instead of TypeGraph. Initial result: **4 passed, 1 failed**. English/Arabic/Turkish synthesis cited all four excerpts; Arabic follow-up resolved Orion and cited only the risk source. The missing-insurer answer correctly avoided inventing a name but incorrectly attached all four irrelevant sources and reported `success/valid`. This failure is retained unchanged.
+
+The verifier schema descriptions, grounding instructions and bounded citation-repair prompt now distinguish a supported requested fact (including an explicit negative fact) from a correct insufficient-evidence refusal. A refusal that information is not mentioned in the supplied excerpts requires `evidenceSufficient=false` and no evidence IDs. The server's earlier no-evidence finalization fix then preserves that refusal. A targeted native-model recheck of the failing case plus supported synthesis/follow-up is recorded separately; inspect its completion/pass fields.
+
+Human review found the initial supported facts consistent with the fixture. Arabic wording was awkward in places, and Turkish used the literal launch term `fırlatma`; language presence and reference identity are not a professional translation-quality score. A Turkish plan also emitted Turkish subqueries despite the English-query planning instruction. The `auto` retrieval-language setting requests a language from the model; it does not guarantee compliance, and this fixture run does not establish Nomic retrieval recall.
+
+Initial observed latencies: synthesis EN104273ms / AR80045ms / TR106656ms; Arabic follow-up43492ms; missing-insurer43792ms. Three model calls for supported cases, four for the initially failed refusal because of the bounded citation-repair call. No production speedup is claimed.
+
+GitHub main was rechecked and remains `3cc78e47cce4a0fc741c506f1543a224471ac0c0`. Connected branch creation returned403. A direct feature-branch push also failed because no Git credentials were available. No remote PR, merge or deployment occurred.

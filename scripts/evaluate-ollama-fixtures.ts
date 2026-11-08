@@ -13,16 +13,21 @@ const facts = [
   ['timeline.docx', 'Orion launch date is 2027-03-15.'],
 ];
 const hits = facts.map(([filename, content], i) => ({ content, score: 0.9, sourceRef: `${filename} (fixture excerpt)`, metadata: {}, citation: { documentId: `fixture-${i}`, filename, bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } }));
-const cases = [
+const allCases = [
   { id: 'synthesis-en', question: 'Compare Orion requirements, costs, risks and launch date across the documents.' },
   { id: 'synthesis-ar', question: 'قارن متطلبات وتكاليف ومخاطر وموعد إطلاق Orion عبر الملفات.' },
   { id: 'synthesis-tr', question: 'Belgeler arasında Orion gereksinim, maliyet, risk ve başlangıç tarihini karşılaştır.' },
   { id: 'followup-ar', question: 'وماذا عن مخاطره؟' },
   { id: 'missing-ar', question: 'ما اسم شركة التأمين لمشروع Orion؟' },
 ];
+const selectedIds = process.env.EVAL_FIXTURE_CASE_IDS?.split(',').filter(Boolean);
+if (selectedIds?.some(id => !allCases.some(item => item.id === id))) throw new Error('Unknown supplemental fixture case');
+const cases = selectedIds ? allCases.filter(item => selectedIds.includes(item.id)) : allCases;
 const results: any[] = [];
 await mkdir('docs/audit', { recursive: true });
-const path = 'docs/audit/quality-live-ollama-controlled-evidence.json';
+const label = process.env.EVAL_FIXTURE_LABEL ?? 'controlled-evidence';
+if (!/^[a-z0-9-]+$/i.test(label)) throw new Error('Invalid EVAL_FIXTURE_LABEL');
+const path = `docs/audit/quality-live-ollama-${label}.json`;
 const save = (complete: boolean) => writeFile(path, JSON.stringify({ mode: 'real local Ollama / real Mastra workflow / fixed retrieval fixture; NOT TypeGraph retrieval or HTTP/database E2E', model: process.env.MASTRA_MODEL, complete, totalCases: cases.length, humanReviewRequired: true, results }, null, 2) + '\n');
 await save(false);
 for (const item of cases) {
@@ -38,7 +43,7 @@ for (const item of cases) {
       onProgress: async stage => { stages.push({ ...stage, ms: Math.round(performance.now() - started) }); },
     });
     const run = await workflow.createRun();
-    const execution = await run.start({ inputData: { message: item.question, history: item.id === 'followup-ar' ? [{ role: 'user', content: cases[0]!.question }, { role: 'assistant', content: results[0]?.actualAnswer ?? 'Orion project [[requirements.md (fixture excerpt)]]' }] : [] } });
+    const execution = await run.start({ inputData: { message: item.question, history: item.id === 'followup-ar' ? [{ role: 'user', content: allCases[0]!.question }, { role: 'assistant', content: results.find(result => result.id === 'synthesis-en')?.actualAnswer ?? 'Orion project [[requirements.md (fixture excerpt)]]' }] : [] } });
     assert.equal(execution.status, 'success');
     if (execution.status !== 'success') throw new Error('WORKFLOW_EXECUTION_FAILED');
     const output = execution.result;

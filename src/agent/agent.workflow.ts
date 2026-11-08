@@ -285,7 +285,11 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         const evidence: Array<{ id: string; sourceRef: string; hit: any }> = [...evidenceByRef.values()].map((hit, index) => ({ id: `E${index + 1}`, sourceRef: hit.sourceRef, hit }));
         if (!evidence.length) return { answer: 'I could not find authorized document evidence with a verifiable source reference.', outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
         const evidenceIds = evidence.map(item => item.id) as [string, ...string[]];
-        const citationSchema = z.object({ answer: z.string(), evidenceSufficient: z.boolean(), evidenceIds: z.array(z.enum(evidenceIds)) });
+        const citationSchema = z.object({
+          answer: z.string(),
+          evidenceSufficient: z.boolean().describe('True only when excerpts explicitly establish the requested fact, including an explicitly stated negative fact. A refusal saying the requested information is not mentioned or available in the excerpts MUST be false, even when that refusal is correct.'),
+          evidenceIds: z.array(z.enum(evidenceIds)).describe('Only excerpts that positively establish the requested fact. An insufficient-evidence refusal MUST use an empty array; never cite unrelated excerpts to support missing information.'),
+        });
         const evidenceText = evidence.map(item => `${item.id}: ${item.hit.content}`).join('\n\n');
         try {
           const generateWithoutTools = (messages: any, options: any) => {
@@ -326,7 +330,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const grounded = await generateWithoutTools([{ role: 'user', content: validatePrompt }], generationOptions);
           let parsed = citationSchema.safeParse(grounded.object);
           if (parsed.success && parsed.data.evidenceSufficient && !parsed.data.evidenceIds.length) {
-            const repaired = await generateWithoutTools([{ role: 'user', content: `${validatePrompt}\n\nYour previous validation claimed the answer was sufficient but omitted evidenceIds. Recheck the proposed answer against the excerpts and return the short evidence label that supports it. If no excerpt supports the answer, change evidenceSufficient to false and state that the evidence is insufficient.` }], generationOptions);
+            const repaired = await generateWithoutTools([{ role: 'user', content: `${validatePrompt}\n\nYour previous validation claimed the answer was sufficient but omitted evidenceIds. Recheck the proposed answer against the excerpts. A correct refusal saying information is not mentioned or available in these excerpts MUST have evidenceSufficient=false and evidenceIds=[]; do not select unrelated labels merely to cite a refusal. Only return evidenceSufficient=true with labels when the excerpts explicitly establish the requested fact (including an explicitly stated negative fact).` }], generationOptions);
             parsed = citationSchema.safeParse(repaired.object);
           }
           await progress('validating', 'completed', 'Evidence check completed');

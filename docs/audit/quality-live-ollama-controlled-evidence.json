@@ -1,0 +1,691 @@
+{
+  "mode": "real local Ollama / real Mastra workflow / fixed retrieval fixture; NOT TypeGraph retrieval or HTTP/database E2E",
+  "model": "qwen3:8b",
+  "complete": true,
+  "totalCases": 5,
+  "humanReviewRequired": true,
+  "results": [
+    {
+      "id": "synthesis-en",
+      "question": "Compare Orion requirements, costs, risks and launch date across the documents.",
+      "actualAnswer": "Orion requires a safety review. The proposed budget is $150,000, which conflicts with the base budget of $120,000. The main delivery risk is supplier delay, and the launch date is March 15, 2027.\n\nSources: [[requirements.md (fixture excerpt)]] [[costs.txt (fixture excerpt)]] [[risks.pdf (fixture excerpt)]] [[timeline.docx (fixture excerpt)]]",
+      "pass": true,
+      "sources": [
+        {
+          "documentId": "fixture-0",
+          "filename": "requirements.md",
+          "sourceRef": "requirements.md (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-1",
+          "filename": "costs.txt",
+          "sourceRef": "costs.txt (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-2",
+          "filename": "risks.pdf",
+          "sourceRef": "risks.pdf (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-3",
+          "filename": "timeline.docx",
+          "sourceRef": "timeline.docx (fixture excerpt)",
+          "chunkIndex": 0
+        }
+      ],
+      "citationValidation": "valid",
+      "outcome": "success",
+      "timing": {
+        "planningMs": 46593,
+        "evidenceMs": 57659,
+        "finalizationMs": 0,
+        "toolExecutionMs": 25,
+        "retrievalMs": 25,
+        "typegraphRetrievalMs": 25,
+        "citationVerificationMs": 32478,
+        "llmCalls": 3,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": false,
+      "latencyMs": 104273,
+      "queries": [
+        "What are the requirements for Orion as described in the documents?",
+        "What are the costs associated with Orion according to the documents?",
+        "What are the risks related to Orion mentioned in the documents?",
+        "What is the launch date of Orion referenced in the documents?"
+      ],
+      "firstTextMs": 60683,
+      "deltaCount": 60,
+      "provisionalText": "Orion requires a safety review. The proposed budget is $150,000, which conflicts with the base budget of $120,000. The main delivery risk is supplier delay, and the launch date is March 15, 2027.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 15
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 46608
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 46614
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 46614
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 46614
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 46614
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 46621
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 46621
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 46621
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 46621
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 46622
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 71791
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 71791
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 104270
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 104270
+        }
+      ]
+    },
+    {
+      "id": "synthesis-ar",
+      "question": "قارن متطلبات وتكاليف ومخاطر وموعد إطلاق Orion عبر الملفات.",
+      "actualAnswer": "متطلبات Orion تشمل مراجعة السلامة. تكاليف Orion تختلف بين 120000 دولار كمقدمة تكلفة أساسية و150000 دولار كمقدمة ميزانية مقترحة، مما يدل على خلاف في التقديرات. تشمل مخاطر Orion خطر تأخير الموردين. موعد إطلاق Orion هو 15 مارس 2027.\n\nSources: [[requirements.md (fixture excerpt)]] [[costs.txt (fixture excerpt)]] [[risks.pdf (fixture excerpt)]] [[timeline.docx (fixture excerpt)]]",
+      "pass": true,
+      "sources": [
+        {
+          "documentId": "fixture-0",
+          "filename": "requirements.md",
+          "sourceRef": "requirements.md (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-1",
+          "filename": "costs.txt",
+          "sourceRef": "costs.txt (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-2",
+          "filename": "risks.pdf",
+          "sourceRef": "risks.pdf (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-3",
+          "filename": "timeline.docx",
+          "sourceRef": "timeline.docx (fixture excerpt)",
+          "chunkIndex": 0
+        }
+      ],
+      "citationValidation": "valid",
+      "outcome": "success",
+      "timing": {
+        "planningMs": 20819,
+        "evidenceMs": 59215,
+        "finalizationMs": 0,
+        "toolExecutionMs": 4,
+        "retrievalMs": 4,
+        "typegraphRetrievalMs": 4,
+        "citationVerificationMs": 34892,
+        "llmCalls": 3,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": true,
+      "latencyMs": 80045,
+      "queries": [
+        "What are the requirements for Orion across files?",
+        "What are the costs associated with Orion across files?",
+        "What are the risks related to Orion across files?",
+        "What is the release date of Orion across files?"
+      ],
+      "firstTextMs": 26829,
+      "deltaCount": 100,
+      "provisionalText": "متطلبات Orion تشمل مراجعة السلامة. تكاليف Orion تختلف بين 120000 دولار كمقدمة تكلفة أساسية و150000 دولار كمقدمة ميزانية مقترحة، مما يدل على خلاف في التقديرات. تشمل مخاطر Orion خطر تأخير الموردين. موعد إطلاق Orion هو 15 مارس 2027.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 9
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 20828
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 20831
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 20831
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 20831
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 20831
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 20833
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 20833
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 20833
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 20833
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 20833
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 45152
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 45152
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 80044
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 80044
+        }
+      ]
+    },
+    {
+      "id": "synthesis-tr",
+      "question": "Belgeler arasında Orion gereksinim, maliyet, risk ve başlangıç tarihini karşılaştır.",
+      "actualAnswer": "Orion gereksinim, maliyet, risk ve başlangıç tarihini karşılaştırmak için belgelerdeki bilgiler şu şekildedir:\n\n- **Gereksinim**: Orion, güvenlik incelemesi gerektirir.\n- **Maliyet**: Orion için önerilen bütçe 150000 USD'tür, bu, temel maliyet tahminiyle çakışmaktadır. Temel bütçe ise 120000 USD'dür.\n- **Risk**: Orion'un ana teslimat riski tedarikçi gecikmesidir.\n- **Başlangıç tarihi**: Orion'un fırlatma tarihi 2027-03-15'tir.\n\nSources: [[requirements.md (fixture excerpt)]] [[costs.txt (fixture excerpt)]] [[risks.pdf (fixture excerpt)]] [[timeline.docx (fixture excerpt)]]",
+      "pass": true,
+      "sources": [
+        {
+          "documentId": "fixture-0",
+          "filename": "requirements.md",
+          "sourceRef": "requirements.md (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-1",
+          "filename": "costs.txt",
+          "sourceRef": "costs.txt (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-2",
+          "filename": "risks.pdf",
+          "sourceRef": "risks.pdf (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-3",
+          "filename": "timeline.docx",
+          "sourceRef": "timeline.docx (fixture excerpt)",
+          "chunkIndex": 0
+        }
+      ],
+      "citationValidation": "valid",
+      "outcome": "success",
+      "timing": {
+        "planningMs": 19133,
+        "evidenceMs": 87520,
+        "finalizationMs": 0,
+        "toolExecutionMs": 1,
+        "retrievalMs": 1,
+        "typegraphRetrievalMs": 1,
+        "citationVerificationMs": 51252,
+        "llmCalls": 3,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": false,
+      "latencyMs": 106656,
+      "queries": [
+        "Orion projesi gereksinimleri nelerdir?",
+        "Orion projesi maliyeti nedir?",
+        "Orion projesi riskleri nelerdir?",
+        "Orion projesi başlangıç tarihi ne zaman?"
+      ],
+      "firstTextMs": 24535,
+      "deltaCount": 169,
+      "provisionalText": "Orion gereksinim, maliyet, risk ve başlangıç tarihini karşılaştırmak için belgelerdeki bilgiler şu şekildedir:\n\n- **Gereksinim**: Orion, güvenlik incelemesi gerektirir.\n- **Maliyet**: Orion için önerilen bütçe 150000 USD'tür, bu, temel maliyet tahminiyle çakışmaktadır. Temel bütçe ise 120000 USD'dür.\n- **Risk**: Orion'un ana teslimat riski tedarikçi gecikmesidir.\n- **Başlangıç tarihi**: Orion'un fırlatma tarihi 2027-03-15'tir.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 3
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 19135
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 19136
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 19136
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 19136
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 19136
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 19137
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 19137
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 19137
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 19137
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 19137
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 55404
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 55404
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 106656
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 106656
+        }
+      ]
+    },
+    {
+      "id": "followup-ar",
+      "question": "وماذا عن مخاطره؟",
+      "actualAnswer": "الخطر الرئيسي هو تأخير الموردين.\n\nSources: [[risks.pdf (fixture excerpt)]]",
+      "pass": true,
+      "sources": [
+        {
+          "documentId": "fixture-2",
+          "filename": "risks.pdf",
+          "sourceRef": "risks.pdf (fixture excerpt)",
+          "chunkIndex": 0
+        }
+      ],
+      "citationValidation": "valid",
+      "outcome": "success",
+      "timing": {
+        "planningMs": 14003,
+        "evidenceMs": 29485,
+        "finalizationMs": 0,
+        "toolExecutionMs": 1,
+        "retrievalMs": 1,
+        "typegraphRetrievalMs": 1,
+        "citationVerificationMs": 18256,
+        "llmCalls": 3,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": true,
+      "latencyMs": 43492,
+      "queries": [
+        "What are the main risks associated with Orion?"
+      ],
+      "firstTextMs": 22996,
+      "deltaCount": 14,
+      "provisionalText": "الخطر الرئيسي هو تأخير الموردين.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 3
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 14006
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 14007
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 14008
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 14008
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 25235
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 25235
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 43491
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 43491
+        }
+      ]
+    },
+    {
+      "id": "missing-ar",
+      "question": "ما اسم شركة التأمين لمشروع Orion؟",
+      "actualAnswer": "لا يوجد اسم لشركة التأمين لمشروع Orion في الأدلة المقدمة.\n\nSources: [[requirements.md (fixture excerpt)]] [[costs.txt (fixture excerpt)]] [[risks.pdf (fixture excerpt)]] [[timeline.docx (fixture excerpt)]]",
+      "pass": false,
+      "sources": [
+        {
+          "documentId": "fixture-0",
+          "filename": "requirements.md",
+          "sourceRef": "requirements.md (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-1",
+          "filename": "costs.txt",
+          "sourceRef": "costs.txt (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-2",
+          "filename": "risks.pdf",
+          "sourceRef": "risks.pdf (fixture excerpt)",
+          "chunkIndex": 0
+        },
+        {
+          "documentId": "fixture-3",
+          "filename": "timeline.docx",
+          "sourceRef": "timeline.docx (fixture excerpt)",
+          "chunkIndex": 0
+        }
+      ],
+      "citationValidation": "valid",
+      "outcome": "success",
+      "timing": {
+        "planningMs": 10200,
+        "evidenceMs": 33578,
+        "finalizationMs": 0,
+        "toolExecutionMs": 3,
+        "retrievalMs": 3,
+        "typegraphRetrievalMs": 3,
+        "citationVerificationMs": 24185,
+        "llmCalls": 4,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": true,
+      "latencyMs": 43792,
+      "queries": [
+        "What is the name of the insurance company for project Orion?"
+      ],
+      "firstTextMs": 15216,
+      "deltaCount": 19,
+      "provisionalText": "لا يوجد اسم لشركة التأمين لمشروع Orion في الأدلة المقدمة.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 13
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 10213
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 10214
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 10217
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 10217
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 19607
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 19607
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 43792
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 43792
+        }
+      ]
+    }
+  ]
+}
