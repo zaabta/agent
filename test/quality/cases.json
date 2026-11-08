@@ -287,7 +287,11 @@
       "violations.xlsx"
     ],
     "history": [],
-    "humanReviewRequired": false
+    "humanReviewRequired": false,
+    "expectedAnyTools": [
+      "structuredDataLookup",
+      "structuredRowLookup"
+    ]
   },
   {
     "id": "excel_lookup-ar",
@@ -301,7 +305,11 @@
       "violations.xlsx"
     ],
     "history": [],
-    "humanReviewRequired": true
+    "humanReviewRequired": true,
+    "expectedAnyTools": [
+      "structuredDataLookup",
+      "structuredRowLookup"
+    ]
   },
   {
     "id": "excel_lookup-tr",
@@ -315,7 +323,11 @@
       "violations.xlsx"
     ],
     "history": [],
-    "humanReviewRequired": true
+    "humanReviewRequired": true,
+    "expectedAnyTools": [
+      "structuredDataLookup",
+      "structuredRowLookup"
+    ]
   },
   {
     "id": "aggregation-en",
@@ -329,7 +341,10 @@
       "items.csv"
     ],
     "history": [],
-    "humanReviewRequired": false
+    "humanReviewRequired": false,
+    "expectedAnyTools": [
+      "structuredDataAnalytics"
+    ]
   },
   {
     "id": "aggregation-ar",
@@ -343,7 +358,10 @@
       "items.csv"
     ],
     "history": [],
-    "humanReviewRequired": true
+    "humanReviewRequired": true,
+    "expectedAnyTools": [
+      "structuredDataAnalytics"
+    ]
   },
   {
     "id": "aggregation-tr",
@@ -357,7 +375,10 @@
       "items.csv"
     ],
     "history": [],
-    "humanReviewRequired": true
+    "humanReviewRequired": true,
+    "expectedAnyTools": [
+      "structuredDataAnalytics"
+    ]
   },
   {
     "id": "missing-en",

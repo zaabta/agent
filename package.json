@@ -28,7 +28,8 @@
     "eval:quality": "node --import tsx scripts/evaluate-agent.ts",
     "eval:workflow": "node --import tsx scripts/compare-workflow.ts",
     "eval:seed": "node --import tsx scripts/seed-quality-corpus.ts",
-    "typecheck:audit": "tsc --project tsconfig.audit.json"
+    "typecheck:audit": "tsc --project tsconfig.audit.json",
+    "eval:live-audit": "node --import tsx scripts/live-audit.ts"
   },
   "dependencies": {
     "@mastra/core": "1.82.0",

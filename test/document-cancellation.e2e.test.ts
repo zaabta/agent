@@ -8,18 +8,20 @@ import { redisConnection } from '../src/documents/redis-connection.js';
 
 const baseUrl = process.env.DOCUMENT_E2E_URL || `http://127.0.0.1:${config.port}`;
 const apiKey = process.env.DEV_API_KEY;
-const enabled = process.env.RUN_DOCUMENT_E2E === 'true' && !!apiKey;
+const bearer = process.env.AGENT_E2E_BEARER;
+const authHeaders: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : { 'x-api-key': apiKey! };
+const enabled = process.env.RUN_DOCUMENT_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!(bearer || apiKey);
 
 async function upload(name: string, content: string) {
   const form = new FormData();
   form.append('file', new Blob([content], { type: 'text/plain' }), name);
-  const response = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: { 'x-api-key': apiKey! }, body: form });
+  const response = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: authHeaders, body: form });
   assert.equal(response.status, 202);
   return (await response.json() as { document: { id: string; jobId: string } }).document;
 }
 
 async function getJob(jobId: string) {
-  const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, { headers: { 'x-api-key': apiKey! } });
+  const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, { headers: authHeaders });
   assert.equal(response.status, 200);
   return response.json() as Promise<{ documentId: string; status: string; stage: string; progressDetails: { etaMs: number | null; overallPercent: number | null; stages: Array<{ stage: string; status: string }> } }>;
 }
@@ -36,7 +38,7 @@ async function until(jobId: string, predicate: (state: Awaited<ReturnType<typeof
 }
 
 test('real queued and active document cancellation cleans partial indexes and stays terminal', {
-  skip: !enabled ? 'Requires RUN_DOCUMENT_E2E=true, API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
+  skip: !enabled ? 'Requires RUN_DOCUMENT_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER (or an explicitly enabled DEV_API_KEY), API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
   timeout: 300000,
 }, async () => {
   const connection = redisConnection(config.redisUrl);
@@ -49,7 +51,7 @@ test('real queued and active document cancellation cleans partial indexes and st
     console.log('cancellation E2E: queue paused');
     const queued = await upload(`cancel-queued-${randomUUID()}.txt`, `Queued cancellation fixture ${randomUUID()}`);
     console.log('cancellation E2E: queued fixture uploaded');
-    const cancelledQueuedResponse = await fetch(`${baseUrl}/api/jobs/${queued.jobId}/cancel`, { method: 'POST', headers: { 'x-api-key': apiKey! } });
+    const cancelledQueuedResponse = await fetch(`${baseUrl}/api/jobs/${queued.jobId}/cancel`, { method: 'POST', headers: authHeaders });
     assert.equal(cancelledQueuedResponse.status, 201);
     assert.equal((await cancelledQueuedResponse.json() as { status: string }).status, 'cancelled');
     assert.equal((await getJob(queued.jobId)).status, 'cancelled');
@@ -77,13 +79,13 @@ test('real queued and active document cancellation cleans partial indexes and st
     console.log(`cancellation E2E: job entered ${before.stage}/${before.status}`);
     assert.equal(before.status, 'processing', `Expected active indexing before cancellation, got ${JSON.stringify(before)}`);
     const disconnect = new AbortController();
-    const progressResponse = await fetch(`${baseUrl}/api/jobs/${active.jobId}/events`, { headers: { 'x-api-key': apiKey! }, signal: disconnect.signal });
+    const progressResponse = await fetch(`${baseUrl}/api/jobs/${active.jobId}/events`, { headers: authHeaders, signal: disconnect.signal });
     assert.equal(progressResponse.status, 200);
     await progressResponse.body?.getReader().read();
     disconnect.abort();
     await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal((await getJob(active.jobId)).status, 'processing', 'closing the SSE stream must not cancel the job');
-    const cancelResponse = await fetch(`${baseUrl}/api/jobs/${active.jobId}/cancel`, { method: 'POST', headers: { 'x-api-key': apiKey! } });
+    const cancelResponse = await fetch(`${baseUrl}/api/jobs/${active.jobId}/cancel`, { method: 'POST', headers: authHeaders });
     assert.equal(cancelResponse.status, 201);
     const final = await until(active.jobId, state => ['cancelled', 'ready', 'failed'].includes(state.status));
     assert.equal(final.status, 'cancelled', `Cancellation lost race: ${JSON.stringify(final)}`);

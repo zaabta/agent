@@ -1,4 +1,9 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["scripts/evaluate-agent.ts", "scripts/compare-workflow.ts", "scripts/seed-quality-corpus.ts"]
+  "include": [
+    "scripts/evaluate-agent.ts",
+    "scripts/compare-workflow.ts",
+    "scripts/seed-quality-corpus.ts",
+    "scripts/live-audit.ts"
+  ]
 }
