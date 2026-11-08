@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["scripts/evaluate-agent.ts", "scripts/compare-workflow.ts", "scripts/seed-quality-corpus.ts"]
+}

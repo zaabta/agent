@@ -1,0 +1,26 @@
+{
+  "baselineCommit": "3cc78e47cce4a0fc741c506f1543a224471ac0c0",
+  "baseline": {
+    "typecheck": "passed",
+    "tests": 71,
+    "passed": 56,
+    "failed": 0,
+    "skipped": 15,
+    "command": "npm run typecheck && npm test"
+  },
+  "after": {
+    "typecheck": "passed",
+    "tests": 77,
+    "passed": 62,
+    "failed": 0,
+    "skipped": 15,
+    "command": "pnpm@10.10.0 install --frozen-lockfile; prisma:generate; typecheck; test",
+    "evaluationScriptsTypecheck": "passed",
+    "prismaValidate": "passed"
+  },
+  "limitations": [
+    "HTTP regression uses in-memory persistence and mocked models",
+    "Docker/PostgreSQL/Redis/Ollama missing; apt installation blocked",
+    "33 live quality cases skipped; see quality JSON files"
+  ]
+}

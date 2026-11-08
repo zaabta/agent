@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeProviderClientResponse, withProviderRetry } from '../src/agent/provider-errors.js';
+import { classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
 import { createSitePilotStorageExporter } from '../src/mastra/observability.js';
 
 test('provider errors map common upstream statuses to stable safe codes', () => {
@@ -98,4 +98,10 @@ test('observability exporter starts and degrades safely when storage initializat
   const unavailableMastra = { getStorage: () => ({ getStore: async () => { throw new Error('storage unavailable'); } }) };
   await assert.doesNotReject(exporter.init({ mastra: unavailableMastra as any }));
   await exporter.shutdown();
+});
+
+test('serialized Mastra provider failures retain only allowlisted retry metadata', () => {
+  const serialized = JSON.parse(JSON.stringify(new ProviderRequestFailure({ code: 'PROVIDER_RATE_LIMITED', retryable: true, httpStatus: 503, retryAfterMs: 90000 })));
+  assert.deepEqual(safeProviderFailure(serialized), { code: 'PROVIDER_RATE_LIMITED', retryable: true, httpStatus: 503, retryAfterMs: 60000 });
+  assert.equal(safeProviderFailure({ name: 'ProviderRequestFailure', safe: { code: 'INVENTED', message: 'secret' } }), undefined);
 });

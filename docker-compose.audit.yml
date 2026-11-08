@@ -1,0 +1,51 @@
+# Standalone disposable audit stack. Does not reuse the development compose volumes.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: audit
+      POSTGRES_PASSWORD: audit-test-only
+      POSTGRES_DB: sitepilot_audit
+    ports: ['127.0.0.1:55444:5432']
+    volumes: [audit_pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U audit -d sitepilot_audit']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports: ['127.0.0.1:56391:6379']
+    volumes: [audit_redis:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  ollama:
+    image: ollama/ollama:latest
+    ports: ['127.0.0.1:11435:11434']
+    volumes: [audit_models:/root/.ollama]
+  api: &backend
+    build:
+      context: .
+      dockerfile: Dockerfile.audit
+    env_file: .env.audit
+    environment:
+      DATABASE_URL: postgres://audit:audit-test-only@db:5432/sitepilot_audit
+      REDIS_URL: redis://redis:6379
+      OLLAMA_BASE_URL: http://ollama:11434
+    ports: ['127.0.0.1:3320:3220']
+    volumes: [audit_uploads:/app/.sitepilot-data/uploads]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  worker:
+    <<: *backend
+    command: ['pnpm', 'worker']
+    ports: []
+volumes:
+  audit_pg:
+  audit_redis:
+  audit_models:
+  audit_uploads:

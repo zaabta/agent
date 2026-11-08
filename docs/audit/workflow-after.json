@@ -1,0 +1,227 @@
+{
+  "mode": "controlled mocked-model execution; injected plans; no live inference or retrieval benchmark",
+  "results": [
+    {
+      "kind": "simple",
+      "question": "What is the Orion budget?",
+      "historySeen": true,
+      "queries": [
+        "Orion budget"
+      ],
+      "latencyMs": 18,
+      "result": {
+        "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
+        "sources": [
+          {
+            "documentId": "costs",
+            "filename": "costs.txt",
+            "sourceRef": "costs",
+            "chunkIndex": 0
+          }
+        ],
+        "toolsCalled": [
+          "documentSearch"
+        ],
+        "citationValidation": "valid",
+        "outcome": "success",
+        "requestId": "91cb512b-2279-4a70-87d1-495bf1783956",
+        "timing": {
+          "planningMs": 1,
+          "evidenceMs": 4,
+          "finalizationMs": 0,
+          "toolExecutionMs": 1,
+          "retrievalMs": 1,
+          "typegraphRetrievalMs": 1,
+          "citationVerificationMs": 0,
+          "llmCalls": 3,
+          "providerRetries": 0,
+          "providerErrors": 0
+        }
+      }
+    },
+    {
+      "kind": "complex",
+      "question": "Compare Orion costs and risks across documents",
+      "historySeen": true,
+      "queries": [
+        "Orion costs",
+        "Orion risks"
+      ],
+      "latencyMs": 3,
+      "result": {
+        "answer": "Controlled fixture answer.\n\nSources: [[costs]] [[risks]]",
+        "sources": [
+          {
+            "documentId": "costs",
+            "filename": "costs.txt",
+            "sourceRef": "costs",
+            "chunkIndex": 0
+          },
+          {
+            "documentId": "risks",
+            "filename": "risks.txt",
+            "sourceRef": "risks",
+            "chunkIndex": 0
+          }
+        ],
+        "toolsCalled": [
+          "documentSearch",
+          "documentSearch"
+        ],
+        "citationValidation": "valid",
+        "outcome": "success",
+        "requestId": "17938b6e-5925-4101-bcde-271b2fa5e67f",
+        "timing": {
+          "planningMs": 0,
+          "evidenceMs": 1,
+          "finalizationMs": 0,
+          "toolExecutionMs": 0,
+          "retrievalMs": 0,
+          "typegraphRetrievalMs": 0,
+          "citationVerificationMs": 0,
+          "llmCalls": 3,
+          "providerRetries": 0,
+          "providerErrors": 0
+        }
+      }
+    },
+    {
+      "kind": "followup",
+      "question": "قارن بينهما",
+      "historySeen": true,
+      "queries": [
+        "Orion costs",
+        "Orion risks"
+      ],
+      "latencyMs": 2,
+      "result": {
+        "answer": "Controlled fixture answer.\n\nSources: [[costs]] [[risks]]",
+        "sources": [
+          {
+            "documentId": "costs",
+            "filename": "costs.txt",
+            "sourceRef": "costs",
+            "chunkIndex": 0
+          },
+          {
+            "documentId": "risks",
+            "filename": "risks.txt",
+            "sourceRef": "risks",
+            "chunkIndex": 0
+          }
+        ],
+        "toolsCalled": [
+          "documentSearch",
+          "documentSearch"
+        ],
+        "citationValidation": "valid",
+        "outcome": "success",
+        "requestId": "ae3d5924-9530-462b-9b04-3fcbee207955",
+        "timing": {
+          "planningMs": 0,
+          "evidenceMs": 1,
+          "finalizationMs": 0,
+          "toolExecutionMs": 0,
+          "retrievalMs": 0,
+          "typegraphRetrievalMs": 0,
+          "citationVerificationMs": 0,
+          "llmCalls": 3,
+          "providerRetries": 0,
+          "providerErrors": 0
+        }
+      }
+    },
+    {
+      "kind": "followup",
+      "question": "İkisini karşılaştır",
+      "historySeen": true,
+      "queries": [
+        "Orion costs",
+        "Orion risks"
+      ],
+      "latencyMs": 2,
+      "result": {
+        "answer": "Controlled fixture answer.\n\nSources: [[costs]] [[risks]]",
+        "sources": [
+          {
+            "documentId": "costs",
+            "filename": "costs.txt",
+            "sourceRef": "costs",
+            "chunkIndex": 0
+          },
+          {
+            "documentId": "risks",
+            "filename": "risks.txt",
+            "sourceRef": "risks",
+            "chunkIndex": 0
+          }
+        ],
+        "toolsCalled": [
+          "documentSearch",
+          "documentSearch"
+        ],
+        "citationValidation": "valid",
+        "outcome": "success",
+        "requestId": "713f7ba0-43fe-4efa-a895-c1bcc6f6fb09",
+        "timing": {
+          "planningMs": 0,
+          "evidenceMs": 1,
+          "finalizationMs": 0,
+          "toolExecutionMs": 0,
+          "retrievalMs": 0,
+          "typegraphRetrievalMs": 0,
+          "citationVerificationMs": 0,
+          "llmCalls": 3,
+          "providerRetries": 0,
+          "providerErrors": 0
+        }
+      }
+    },
+    {
+      "kind": "followup",
+      "question": "Compare them",
+      "historySeen": true,
+      "queries": [
+        "Orion costs",
+        "Orion risks"
+      ],
+      "latencyMs": 2,
+      "result": {
+        "answer": "Controlled fixture answer.\n\nSources: [[costs]] [[risks]]",
+        "sources": [
+          {
+            "documentId": "costs",
+            "filename": "costs.txt",
+            "sourceRef": "costs",
+            "chunkIndex": 0
+          },
+          {
+            "documentId": "risks",
+            "filename": "risks.txt",
+            "sourceRef": "risks",
+            "chunkIndex": 0
+          }
+        ],
+        "toolsCalled": [
+          "documentSearch",
+          "documentSearch"
+        ],
+        "citationValidation": "valid",
+        "outcome": "success",
+        "requestId": "adb6e218-eca4-4037-9149-c40b8378bce3",
+        "timing": {
+          "planningMs": 0,
+          "evidenceMs": 1,
+          "finalizationMs": 0,
+          "toolExecutionMs": 0,
+          "retrievalMs": 0,
+          "typegraphRetrievalMs": 0,
+          "citationVerificationMs": 0,
+          "llmCalls": 3,
+          "providerRetries": 0,
+          "providerErrors": 0
+        }
+      }
+    }
+  ]
+}
