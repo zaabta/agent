@@ -1,4 +1,5 @@
 import { workflowGroundingInstructions } from './grounding-instructions.js';
+import { isInsufficientEvidenceReply } from './insufficient-evidence.js';
 import { localGenerationOptions } from '../mastra/generation-options.js';
 import { boundedConversationContext, retrievalQueries, mergeRetrievalEvidence, isEvidenceFollowUp } from './retrieval-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -329,12 +330,20 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const generationOptions = { maxSteps: 1, toolChoice: 'none' as const, structuredOutput: { schema: citationSchema, errorStrategy: 'fallback' as const, fallbackValue: { answer: '', evidenceSufficient: false, evidenceIds: [] } }, abortSignal, tracingOptions };
           const grounded = await generateWithoutTools([{ role: 'user', content: validatePrompt }], generationOptions);
           let parsed = citationSchema.safeParse(grounded.object);
-          if (parsed.success && parsed.data.evidenceSufficient && !parsed.data.evidenceIds.length) {
+          if (parsed.success && parsed.data.evidenceSufficient && !parsed.data.evidenceIds.length && !isInsufficientEvidenceReply(parsed.data.answer)) {
             const repaired = await generateWithoutTools([{ role: 'user', content: `${validatePrompt}\n\nYour previous validation claimed the answer was sufficient but omitted evidenceIds. Recheck the proposed answer against the excerpts. A correct refusal saying information is not mentioned or available in these excerpts MUST have evidenceSufficient=false and evidenceIds=[]; do not select unrelated labels merely to cite a refusal. Only return evidenceSufficient=true with labels when the excerpts explicitly establish the requested fact (including an explicitly stated negative fact).` }], generationOptions);
             parsed = citationSchema.safeParse(repaired.object);
           }
           await progress('validating', 'completed', 'Evidence check completed');
-          if (!parsed.success || !parsed.data.answer.trim()) return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
+          if (!parsed.success || !parsed.data.answer.trim()) {
+            // An invalid verifier object must not turn a clear, source-free
+            // draft refusal into a misleading citation error in another language.
+            if (isInsufficientEvidenceReply(draft)) return { answer: draft.trim(), outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
+            return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
+          }
+          // Small models can label a correct short refusal as a supported fact
+          // and select every unrelated excerpt. Never attach those sources.
+          if (isInsufficientEvidenceReply(parsed.data.answer)) return { answer: parsed.data.answer, outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
           if (!parsed.data.evidenceSufficient) {
             if (parsed.data.evidenceIds.length) return { answer: 'The retrieved excerpts did not sufficiently support a factual answer.', outcome: 'failure' as const, citationFailure: 'unsupported' as const };
             return { answer: parsed.data.answer, outcome: 'empty' as const, citationFailure: 'no-evidence' as const };

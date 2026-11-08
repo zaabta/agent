@@ -86,7 +86,7 @@ The earlier final 33-case run was lost when the ephemeral environment ended. Sav
 - A verified `evidenceSufficient=false` response with no evidence IDs now remains a `no-evidence` refusal even when retrieval returned irrelevant candidate passages. Unknown or invalid references still fail validation. A real Mastra workflow regression verifies the Arabic refusal and empty source list.
 - The long-running quality and upload harness can use `AGENT_E2E_REFRESH_COOKIE` (the test login cookie pair, passed privately via environment) to rotate an expired bearer token through the existing `/api/auth/refresh` API and retry once. No credential is written to reports. This fixes the harness, not the application authentication design. Without the cookie a 401 remains a visible failure.
 - The live SSE reader preserves UTF-8 decoder state across byte chunks. Quality records include available timing/usage fields and require Arabic text for Arabic cases; Turkish language and semantic entailment still require human review.
-- Resumed broad checks: 76 passed, 0 failed, 15 skipped (91 total); source and audit-script typechecks and Prisma validation passed.
+- Resumed broad checks: 80 passed, 0 failed, 15 skipped (95 total); source and audit-script typechecks and Prisma validation passed.
 
 - Conversation inserts share a transaction timestamp. Descending message queries now order tied assistant/user roles before UUID, preserving user-before-assistant order when the bounded page is reversed. A regression deliberately uses UUID order opposed to dialogue order. Message pagination uses the same stable ordering.
 - The audit Compose stack sets `API_HOST=0.0.0.0` inside its container; the application default remains loopback. This corrects an unreachable published container port. Docker itself is still untested here. In this managed environment the `tsx` CLI could not open its IPC pipe; `node --import tsx src/scripts/deploy-typegraph.ts` executed the same TypeGraph deployment successfully.
@@ -116,3 +116,20 @@ Human review found the initial supported facts consistent with the fixture. Arab
 Initial observed latencies: synthesis EN104273ms / AR80045ms / TR106656ms; Arabic follow-up43492ms; missing-insurer43792ms. Three model calls for supported cases, four for the initially failed refusal because of the bounded citation-repair call. No production speedup is claimed.
 
 GitHub main was rechecked and remains `3cc78e47cce4a0fc741c506f1543a224471ac0c0`. Connected branch creation returned403. A direct feature-branch push also failed because no Git credentials were available. No remote PR, merge or deployment occurred.
+
+## Final resumed result
+
+- Final broad command: **80 passed, 0 failed, 15 skipped / 95 total**; application and audit TypeScript checks and Prisma schema validation passed. No skipped service-dependent test is counted as passed.
+- The prompt-only recheck completed2/3 and still attached irrelevant sources to the refusal. The first narrow guard recheck completed0/1 because another refusal wording led to an invalid verifier result and a generic English fallback. Both failures are retained in their own raw JSON files.
+- The final guard recognizes only short explicit excerpt-insufficiency statements in AR/TR/EN. It rejects mixed answers, extra sentences, citations, numeric claims and connectors; explicit negative facts continue through ordinary citation verification. If the verifier returns an invalid/empty object, a clearly recognized source-free draft refusal can be retained. Verification is still run; it is not skipped to save latency.
+- `quality-live-ollama-refusal-predicate-recheck.json`: the originally failing Arabic insurer case **passed1/1** with real Qwen3, `outcome=empty`, `citationValidation=no-evidence`, an Arabic refusal and `sources=[]`. Latency78086ms; three model calls. This is a targeted recheck, not a fresh5/5 or33/33 claim.
+- Raw initial5-case results, prompt-only3-case results, failed narrow-guard1-case results and final1-case recheck are all preserved; `live-ollama-summary.json` maps them. There is still no controlled original-main live quality comparison or final full TypeGraph RAG benchmark.
+- Redis AOF is configured only in the new disposable Compose stack. That stack was not executed because Docker is unavailable. Automatic recovery is limited to missing **queued version** jobs on duplicate upload; already-processing orphan recovery remains unsolved for production.
+
+Reproduce the targeted local-model check after configuring Ollama:
+
+```bash
+MASTRA_PROVIDER=ollama MASTRA_MODEL=qwen3:8b OLLAMA_THINK=false MASTRA_OBSERVABILITY=false RUN_LIVE_OLLAMA_FIXTURES=true EVAL_FIXTURE_LABEL=refusal-predicate-recheck EVAL_FIXTURE_CASE_IDS=missing-ar pnpm eval:ollama-fixtures
+```
+
+These native-model checks establish observed generation/planning behavior against fixed excerpts. They do not establish retrieval recall, professional translation quality, complete citation entailment or production readiness. Large-context calibration, native PostgreSQL stress/restart tests and the full33-case end-to-end benchmark remain required.

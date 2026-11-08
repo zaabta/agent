@@ -1,0 +1,130 @@
+{
+  "mode": "Actual local inference with controlled evidence. No real TypeGraph search or database/API durability in these supplemental runs.",
+  "originalMainLiveBaseline": false,
+  "full33CaseE2ECompleted": false,
+  "completeFiveCaseRerunAfterFinalGuard": false,
+  "runs": [
+    {
+      "file": "quality-live-ollama-controlled-evidence.json",
+      "complete": true,
+      "passed": 4,
+      "failed": 1,
+      "cases": [
+        {
+          "id": "synthesis-en",
+          "pass": true,
+          "latencyMs": 104273,
+          "firstTextMs": 60683,
+          "deltaCount": 60,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "synthesis-ar",
+          "pass": true,
+          "latencyMs": 80045,
+          "firstTextMs": 26829,
+          "deltaCount": 100,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "synthesis-tr",
+          "pass": true,
+          "latencyMs": 106656,
+          "firstTextMs": 24535,
+          "deltaCount": 169,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "followup-ar",
+          "pass": true,
+          "latencyMs": 43492,
+          "firstTextMs": 22996,
+          "deltaCount": 14,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "missing-ar",
+          "pass": false,
+          "latencyMs": 43792,
+          "firstTextMs": 15216,
+          "deltaCount": 19,
+          "llmCalls": 4,
+          "citationValidation": "valid"
+        }
+      ]
+    },
+    {
+      "file": "quality-live-ollama-insufficiency-recheck.json",
+      "complete": true,
+      "passed": 2,
+      "failed": 1,
+      "cases": [
+        {
+          "id": "synthesis-en",
+          "pass": true,
+          "latencyMs": 106519,
+          "firstTextMs": 63033,
+          "deltaCount": 68,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "followup-ar",
+          "pass": true,
+          "latencyMs": 46960,
+          "firstTextMs": 24118,
+          "deltaCount": 18,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        },
+        {
+          "id": "missing-ar",
+          "pass": false,
+          "latencyMs": 32581,
+          "firstTextMs": 14757,
+          "deltaCount": 20,
+          "llmCalls": 3,
+          "citationValidation": "valid"
+        }
+      ]
+    },
+    {
+      "file": "quality-live-ollama-refusal-guard-recheck.json",
+      "complete": true,
+      "passed": 0,
+      "failed": 1,
+      "cases": [
+        {
+          "id": "missing-ar",
+          "pass": false,
+          "latencyMs": 90009,
+          "firstTextMs": 58547,
+          "deltaCount": 19,
+          "llmCalls": 4,
+          "citationValidation": "fallback"
+        }
+      ]
+    },
+    {
+      "file": "quality-live-ollama-refusal-predicate-recheck.json",
+      "complete": true,
+      "passed": 1,
+      "failed": 0,
+      "cases": [
+        {
+          "id": "missing-ar",
+          "pass": true,
+          "latencyMs": 78086,
+          "firstTextMs": 56137,
+          "deltaCount": 17,
+          "llmCalls": 3,
+          "citationValidation": "no-evidence"
+        }
+      ]
+    }
+  ]
+}
