@@ -231,3 +231,24 @@ test('document inventory excludes superseded and unversioned stale index rows', 
 
   assert.deepEqual(response.documents.map((document: any) => document.name), ['current.pdf']);
 });
+
+test('authorized indexed provenance restores PDF pages and logical chunk identity after SDK projection', async () => {
+  const id = 'provenance-document', version = 'provenance-version';
+  const indexId = `${id}::${version}::g1::logical-chunk-7`;
+  const metadata = { documentId: id, documentVersionId: version, indexGeneration: 1, pageNumber: 7, chunkIndex: 4, chunkCount: 9, chunkId: 'logical-chunk-7', contentHash: 'source-hash' };
+  const listed = { id: indexId, name: 'source.pdf', metadata };
+  const prisma: any = {
+    appDocument: { findMany: async () => [{ id, tenantId: tenant, activeVersionId: version, filename: 'source.pdf', checksum: 'checksum' }] },
+    appDocumentVersion: { findMany: async () => [{ id: version, documentId: id, tenantId: tenant, chunkingStrategy: 'structure-aware', activeIndexGeneration: 1 }] },
+  };
+  const service = new TypegraphService({ measure: async (operation: any) => ({ result: await operation(), embeddingMs: 0 }) } as any, prisma);
+  (service as any).clientFor = async () => ({ document: { list: async () => [listed] }, search: async () => ({ results: { chunks: [{ ...result(indexId, id, 'Known PDF fact'), document: { id: indexId, name: 'source.pdf', bucketId: 'documents' } }] } }) });
+  try {
+    const response = await service.searchDocuments('Known PDF fact', 5, tenant);
+    assert.equal(response.hits[0]?.sourceRef, 'source.pdf (page 7)');
+    assert.equal(response.hits[0]?.citation.chunkIndex, 4);
+    assert.equal(response.hits[0]?.citation.chunkCount, 9);
+    assert.equal(response.hits[0]?.citation.chunkId, 'logical-chunk-7');
+    assert.equal(response.hits[0]?.citation.contentHash, 'source-hash');
+  } finally { await service.onModuleDestroy(); }
+});

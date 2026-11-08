@@ -157,7 +157,8 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     const client = await this.clientFor(tenantId);
     const candidateLimit = Math.min(Math.max(limit * 8, 16), 64);
     const activeScopes = await this.activeVersionScopes(tenantId);
-    const candidateDocumentIds = await this.activeTypegraphDocumentIds(client, userId, activeScopes, query);
+    const indexedMetadata = new Map<string, Record<string, unknown>>();
+    const candidateDocumentIds = await this.activeTypegraphDocumentIds(client, userId, activeScopes, query, indexedMetadata);
     if (!candidateDocumentIds.length) {
       return { query, hits: [], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: Math.round(performance.now() - startedAt) } };
     }
@@ -190,7 +191,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       query,
       // Keep retrieval inside TypeGraph, then discard weak native-ranked hits so
       // unrelated high-level matches cannot be offered as factual evidence.
-      hits: (await this.activeVersionHits(response.results.chunks, tenantId, new Set(candidateDocumentIds)))
+      hits: (await this.activeVersionHits(response.results.chunks, tenantId, new Set(candidateDocumentIds), indexedMetadata))
         .map(hit => this.toSearchHit(hit))
         .filter(hit => hit.score >= minScore)
         .slice(0, Math.min(Math.max(limit, 1), 8)),
@@ -257,7 +258,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
-  private async activeTypegraphDocumentIds(client: typegraphInstance, userId: string | undefined, active: Awaited<ReturnType<TypegraphService['activeVersionScopes']>>, query?: string) {
+  private async activeTypegraphDocumentIds(client: typegraphInstance, userId: string | undefined, active: Awaited<ReturnType<TypegraphService['activeVersionScopes']>>, query?: string, indexedMetadata?: Map<string, Record<string, unknown>>) {
     const ids: string[] = [];
     const filenameMatches: string[] = [];
     const normalizedQuery = query?.normalize('NFC').toLocaleLowerCase();
@@ -281,6 +282,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
             && originalFilename === scope.filename;
         }
         if (isActive) {
+          indexedMetadata?.set(document.id, document.metadata);
           ids.push(document.id);
           const names = [document.name, document.metadata.originalFilename].filter((name): name is string => typeof name === 'string');
           if (normalizedQuery && names.some(name => {
@@ -308,7 +310,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     return filenameMatches.length ? [...new Set(filenameMatches)] : ids;
   }
 
-  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string, authorizedIndexIds: Set<string>) {
+  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string, authorizedIndexIds: Set<string>, indexedMetadata = new Map<string, Record<string, unknown>>()) {
     const active = await this.activeVersionScopes(tenantId);
     return chunks.flatMap(hit => {
       // Keep a second check against the IDs authorized before TypeGraph
@@ -322,11 +324,11 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       if (!state || !state.versionId) return [];
       if (versionId) {
         return state.versionId === versionId && generation === state.activeGeneration
-          ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: versionId, indexGeneration: generation } }]
+          ? [{ ...hit, metadata: { ...hit.metadata, ...indexedMetadata.get(hit.document.id), documentId: id, documentVersionId: versionId, indexGeneration: generation } }]
           : [];
       }
       return state.legacy && hit.document.id === id
-        ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: state.versionId, indexGeneration: state.activeGeneration } }]
+        ? [{ ...hit, metadata: { ...hit.metadata, ...indexedMetadata.get(hit.document.id), documentId: id, documentVersionId: state.versionId, indexGeneration: state.activeGeneration } }]
         : [];
     });
   }
@@ -351,7 +353,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
 
   private toSearchHit(hit: QueryChunkResult): DocumentSearchHit {
     const filename = repairFilenameEncoding(hit.document.name);
-    const chunkIndex = hit.chunk.index;
+    const chunkIndex = Number.isInteger(hit.metadata.chunkIndex) && Number(hit.metadata.chunkIndex) >= 0 ? Number(hit.metadata.chunkIndex) : hit.chunk.index;
     const location = this.sourceLocation(hit.content, hit.metadata);
     const sourceRef = `${filename} (${location || `chunk ${chunkIndex + 1}`})`;
     return {
