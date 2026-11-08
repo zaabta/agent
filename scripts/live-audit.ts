@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { qualityDocuments } from '../test/fixtures/quality-documents.js';
+import { auditSession } from '../test/helpers/audit-session.js';
 
 // Uses existing services and a real authenticated session. No mock providers,
 // account provisioning, deletes, or production deployment are performed here.
@@ -8,6 +9,7 @@ if (process.env.CONFIRM_ISOLATED_E2E !== 'true') throw new Error('Set CONFIRM_IS
 const base = process.env.AGENT_E2E_URL;
 const bearer = process.env.AGENT_E2E_BEARER;
 if (!base || !bearer) throw new Error('Set AGENT_E2E_URL and AGENT_E2E_BEARER');
+const request = auditSession(base, bearer, process.env.AGENT_E2E_REFRESH_COOKIE);
 const label = process.env.EVAL_LABEL ?? 'live-audit';
 if (!/^[a-z0-9-]+$/i.test(label)) throw new Error('Invalid EVAL_LABEL');
 const output = `docs/audit/${label}.json`;
@@ -16,7 +18,7 @@ const headers = { authorization: `Bearer ${bearer}`, 'content-type': 'applicatio
 await mkdir('docs/audit', { recursive: true });
 async function save() { await writeFile(output, JSON.stringify(report, null, 2) + '\n'); }
 async function api(path: string, body?: unknown) {
-  const response: Response = await fetch(`${base}${path}`, { headers, ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }), signal: AbortSignal.timeout(300_000) });
+  const response: Response = await request(path, { headers, ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }), signal: AbortSignal.timeout(300_000) });
   const value = await response.json() as any;
   if (!response.ok) throw new Error(`HTTP ${response.status} at ${path}: ${value.code ?? value.message ?? 'request failed'}`);
   return value;
@@ -26,7 +28,7 @@ try {
     const started = performance.now();
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(fixture.buffer)], { type: 'application/octet-stream' }), fixture.filename);
-    const response: Response = await fetch(`${base}/api/documents/upload`, { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: form, signal: AbortSignal.timeout(30_000) });
+    const response: Response = await request('/api/documents/upload', { method: 'POST', body: form, signal: AbortSignal.timeout(30_000) });
     assert.equal(response.status, 202);
     const uploaded = await response.json() as any;
     const deadline = Date.now() + 300_000;
@@ -56,7 +58,7 @@ try {
     console.log(JSON.stringify({ question, outcome: result.outcome, citationValidation: result.citationValidation }));
   }
   const started = performance.now();
-  const response: Response = await fetch(`${base}/api/agent/stream`, { method: 'POST', headers, body: JSON.stringify({ message: 'متى إطلاق مشروع Orion؟' }), signal: AbortSignal.timeout(300_000) });
+  const response: Response = await request('/api/agent/stream', { method: 'POST', headers, body: JSON.stringify({ message: 'متى إطلاق مشروع Orion؟' }), signal: AbortSignal.timeout(300_000) });
   assert.equal(response.status, 200); assert.ok(response.body);
   let pending = '', firstTextMs: number | null = null;
   const frames: Array<{ name: string; data: any }> = [];

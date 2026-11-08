@@ -607,7 +607,10 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       const citations = [...inputData.answer.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1]);
       const hasSemanticHits = inputData.toolResults.some(item => item.name === 'documentSearch' && (item.result as any)?.hits?.length);
       const invalid = citations.some(ref => !sources.some(source => source.sourceRef === ref));
-      if (hasSemanticHits && (invalid || sources.length > 0 && citations.length === 0)) {
+      // Retrieved candidates can be irrelevant. A verified refusal needs no
+      // citation, while every claimed source still has to match authorized evidence.
+      const verifiedInsufficient = inputData.outcome === 'empty' && inputData.citationFailure === 'no-evidence' && citations.length === 0;
+      if (hasSemanticHits && (invalid || !verifiedInsufficient && sources.length > 0 && citations.length === 0)) {
         const citationFailure = citations.length === 0 ? 'missing' : citations.some(ref => sources.some(source => source.sourceRef.normalize('NFC').trim().replace(/\s+/g, ' ') === ref.normalize('NFC').trim().replace(/\s+/g, ' '))) ? 'normalization' : 'unknown';
         traceFailure(requestId, principal.tenantId, { stage: 'citation-validation', code: citationFailure, sourceRefs: sources.map(source => source.sourceRef), citationCount: citations.length, tools: inputData.toolNames });
         return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', sources: [], toolsCalled: inputData.toolNames, citationValidation: 'fallback' as const, outcome: 'failure' as const, requestId,
@@ -627,7 +630,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       });
       const finalizationMs = Math.round(performance.now() - startedAt);
       return { answer: inputData.answer, sources: attached, toolsCalled: inputData.toolNames,
-        citationValidation: sources.length === 0 && evidenceExpected && inputData.outcome === 'empty' ? 'no-evidence' as const : 'valid' as const,
+        citationValidation: evidenceExpected && inputData.outcome === 'empty' && (verifiedInsufficient || sources.length === 0) ? 'no-evidence' as const : 'valid' as const,
         outcome: inputData.outcome, requestId,
         timing: { planningMs: stepDurations.planningMs ?? 0, evidenceMs: stepDurations.evidenceMs ?? 0, finalizationMs, toolExecutionMs, retrievalMs, typegraphRetrievalMs, citationVerificationMs, llmCalls, providerRetries, providerErrors } };
     },

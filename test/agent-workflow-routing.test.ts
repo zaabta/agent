@@ -3,7 +3,7 @@ import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'followup', 'same-source-chunks'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'followup', 'same-source-chunks', 'irrelevant-evidence'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -17,12 +17,13 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'foll
       if (this.id.startsWith('sitepilot-planner')) {
         if (prompt.startsWith('Decide whether')) return { object: scenario === 'narrative' ? { mode: 'retrieve', retrievalQueries: ['project budget', 'project risks'] } : { mode: 'structured' } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
-        if (scenario === 'same-source-chunks') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
+        if (scenario === 'same-source-chunks' || scenario === 'irrelevant-evidence') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
         if (scenario === 'followup') return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'وماذا عن المخاطر؟' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
       }
       if (scenario === 'followup') assert.ok(prompt.includes('ORIGINAL user message (answer in this language): وماذا عن المخاطر؟'));
       const ids = [...prompt.matchAll(/(?:^|\n)(E\d+):/g)].map((m: any) => m[1]);
+      if (scenario === 'irrelevant-evidence') return { object: { answer: 'لا تتوفر أدلة كافية في الملفات للإجابة.', evidenceSufficient: false, evidenceIds: [] } } as any;
       return { object: { answer: 'Supported fixture answer', evidenceSufficient: true, evidenceIds: scenario === 'same-source-chunks' ? [...ids, ids[0]] : ids } } as any;
     });
     const stream = mock.method(Agent.prototype, 'stream', async (messages: any) => {
@@ -49,6 +50,13 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'foll
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
+      else if (scenario === 'irrelevant-evidence') {
+        assert.ok(calls.length > 0);
+        assert.equal(result.result.outcome, 'empty');
+        assert.equal(result.result.citationValidation, 'no-evidence');
+        assert.deepEqual(result.result.sources, []);
+        assert.equal(result.result.answer, 'لا تتوفر أدلة كافية في الملفات للإجابة.');
+      }
       else if (scenario === 'aggregate-unique') { assert.match(result.result.answer, /300/); assert.deepEqual(calls, []); }
       else { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.citationValidation, 'valid'); if (scenario === 'narrative') assert.equal(result.result.sources.length, 2); if (scenario === 'same-source-chunks') assert.equal(result.result.sources.length, 1); }
     } finally {

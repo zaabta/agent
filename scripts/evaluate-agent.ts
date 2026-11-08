@@ -1,8 +1,10 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { auditSession } from '../test/helpers/audit-session.js';
 const cases = JSON.parse(await readFile(new URL('../test/quality/cases.json', import.meta.url), 'utf8'));
 const base = process.env.AGENT_E2E_URL;
 const token = process.env.AGENT_E2E_BEARER;
 const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+const request = base && token ? auditSession(base, token, process.env.AGENT_E2E_REFRESH_COOKIE) : undefined;
 const label = process.env.EVAL_LABEL ?? 'after';
 if (!/^[a-z0-9-]+$/i.test(label)) throw new Error('Invalid EVAL_LABEL');
 let previousResults: any[] = [];
@@ -21,7 +23,7 @@ for (const item of cases) {
   if (base && token) {
     try {
       const ask = async (message: string, conversationId?: string) => {
-        const response = await fetch(`${base}/api/agent/ask`, { method: 'POST', headers, body: JSON.stringify({ message, conversationId }), signal: AbortSignal.timeout(240000) });
+        const response = await request!('/api/agent/ask', { method: 'POST', headers, body: JSON.stringify({ message, conversationId }), signal: AbortSignal.timeout(240000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return await response.json() as any;
       };
