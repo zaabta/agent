@@ -362,16 +362,22 @@ export class AgentService implements OnModuleDestroy {
     return conversation;
   }
 
-  async listConversations(principal: AuthPrincipal, limit = 50) {
-    const conversations = await this.prisma.conversation.findMany({
+  async listConversations(principal: AuthPrincipal, limit = 50, cursor?: string) {
+    const pageSize = Math.max(1, Math.min(100, Math.trunc(limit)));
+    if (cursor && !await this.prisma.conversation.findFirst({ where: { id: cursor, ownerId: principal.userId, deletedAt: null }, select: { id: true } })) throw new NotFoundException('CONVERSATION_CURSOR_NOT_FOUND');
+    const rows = await this.prisma.conversation.findMany({
       // Conversations are private to a user identity, not partitioned by the
       // company document workspace. This also preserves histories created
       // before an account was added to the canonical company workspace.
       where: { ownerId: principal.userId, deletedAt: null },
-      orderBy: { updatedAt: 'desc' },
-      take: Math.max(1, Math.min(100, Math.trunc(limit))),
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: pageSize + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: { id: true, title: true, createdAt: true, updatedAt: true },
     });
+    const hasMore = rows.length > pageSize;
+    const conversations = rows.slice(0, pageSize);
+    const nextCursor = hasMore ? conversations.at(-1)?.id : null;
     const ids = conversations.map(item => item.id);
     await this.reconcileStaleTurns(ids);
     const messages = ids.length ? await this.prisma.message.findMany({
@@ -379,10 +385,10 @@ export class AgentService implements OnModuleDestroy {
       distinct: ['conversationId'], select: { id: true, conversationId: true, role: true, content: true, status: true, stage: true, createdAt: true },
     }) : [];
     const latest = new Map(messages.map(item => [item.conversationId, item]));
-    return { conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
+    return { hasMore, nextCursor, conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
   }
 
-  async getConversation(conversationId: string, principal: AuthPrincipal) {
+  async getConversation(conversationId: string, principal: AuthPrincipal, page: { limit?: number; cursor?: string } = {}) {
     const conversation = await this.prisma.conversation.findFirst({
       where: {
         id: conversationId,
@@ -398,8 +404,15 @@ export class AgentService implements OnModuleDestroy {
     });
     if (!conversation) throw new NotFoundException('CONVERSATION_NOT_FOUND');
     await this.reconcileStaleTurns([conversationId]);
-    const messages = await this.prisma.message.findMany({ where: { conversationId }, orderBy: { createdAt: 'desc' }, take: config.conversationHistoryMessages });
-    return { ...conversation, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
+    const limit = Math.min(200, Math.max(1, Math.trunc(page.limit ?? 100)));
+    // UI pagination is independent of the model context budget. Validate cursor
+    // ownership before using Prisma's unique cursor.
+    if (page.cursor && !await this.prisma.message.findFirst({ where: { id: page.cursor, conversationId }, select: { id: true } })) throw new NotFoundException('MESSAGE_CURSOR_NOT_FOUND');
+    const rows = await this.prisma.message.findMany({ where: { conversationId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: limit + 1, ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}) });
+    const hasMore = rows.length > limit;
+    const messages = rows.slice(0, limit);
+    const nextCursor = hasMore ? messages.at(-1)?.id : null;
+    return { ...conversation, hasMore, nextCursor, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
   }
 
   async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {
@@ -561,16 +574,16 @@ export class AgentService implements OnModuleDestroy {
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     try {
       const run = await workflow.createRun();
-      const execution = await run.start({ inputData: { message } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1) } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
+      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: Record<string, number> };
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
       return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
-        timing: { totalMs: Math.round(performance.now() - startedAt), workflow: true } };
+        timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
     } catch (error) {
       const provider = safeProviderFailure(error);
       recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'workflow-execution', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: 'failure' });
@@ -1111,7 +1124,7 @@ export class AgentService implements OnModuleDestroy {
       abort = () => { void run.cancel().catch(() => undefined); };
       if (abortSignal.aborted) abort();
       else abortSignal.addEventListener('abort', abort, { once: true });
-      const execution = await run.start({ inputData: { message } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1) } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
@@ -1123,6 +1136,7 @@ export class AgentService implements OnModuleDestroy {
       // or append server-verified citations, so replace it atomically with the
       // persisted answer to prevent duplicate or unverified text in the client.
       if (streamedAnswer) await write('text-reset', { reason: 'citation-verification' });
+      await write('sources', { sources: final.sources });
       await write('text-delta', { text: final.answer, verification: 'verified' });
       await write('stage', { stage: 'completed', status: 'completed', message: 'Answer is ready' });
       const timing = {
@@ -1173,8 +1187,8 @@ export class AgentService implements OnModuleDestroy {
     if (!conversation) throw new NotFoundException('CONVERSATION_NOT_FOUND');
 
     const history = await this.prisma.message.findMany({
-      where: { conversationId: conversation.id },
-      orderBy: { createdAt: 'desc' },
+      where: { conversationId: conversation.id, OR: [{ role: 'user' }, { role: 'assistant', status: 'completed' }] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: config.conversationHistoryMessages,
       select: { role: true, content: true },
     });

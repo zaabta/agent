@@ -138,6 +138,19 @@ export async function withProviderRetry<T>(
 
 export function safeProviderFailure(value: unknown): SafeProviderFailure | undefined {
   if (value instanceof ProviderRequestFailure) return value.safe;
+  // Mastra workflow execution serializes errors, removing their prototype.
+  // Restore only our allowlisted public metadata, never provider response text.
+  for (const error of errorChain(value)) {
+    const safe = record(error.safe);
+    if (error.name !== 'ProviderRequestFailure' || !safe) continue;
+    const statuses: Record<string, number> = { PROVIDER_RATE_LIMITED: 429, PROVIDER_AUTH_FAILED: 401, PROVIDER_CREDITS_EXHAUSTED: 402, PROVIDER_UNAVAILABLE: 503, PROVIDER_TIMEOUT: 504 };
+    const status = statuses[String(safe.code)];
+    if (!status) continue;
+    const restored = classifyProviderError({ statusCode: status });
+    if (!restored) continue;
+    const retry = safe.retryAfterMs;
+    return { ...restored, ...(typeof retry === 'number' && Number.isFinite(retry) && retry >= 0 ? { retryAfterMs: Math.min(60000, Math.round(retry)) } : {}) };
+  }
   return classifyProviderError(value);
 }
 

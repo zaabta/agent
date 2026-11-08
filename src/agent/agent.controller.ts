@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpException, Inject, NotFoundException, Param, Patch, Post, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpException, Inject, NotFoundException, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
@@ -127,14 +127,18 @@ export class AgentController {
 
   @Get('conversations')
   @ApiOperation({ summary: 'List recent owned conversations with the latest message status' })
-  listConversations(@CurrentPrincipal() principal: AuthPrincipal) {
-    return this.agent.listConversations(principal);
+  listConversations(@CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
+    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) throw new BadRequestException('INVALID_PAGE_LIMIT');
+    if (cursor !== undefined && !isUuid(cursor)) throw new BadRequestException('INVALID_CONVERSATION_CURSOR');
+    return this.agent.listConversations(principal, limit ? Number(limit) : 50, cursor);
   }
 
   @Get('conversations/:id')
-  getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) {
+  getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
-    return this.agent.getConversation(id, principal);
+    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200)) throw new BadRequestException('INVALID_PAGE_LIMIT');
+    if (cursor !== undefined && !isUuid(cursor)) throw new BadRequestException('INVALID_MESSAGE_CURSOR');
+    return this.agent.getConversation(id, principal, { ...(limit ? { limit: Number(limit) } : {}), ...(cursor ? { cursor } : {}) });
   }
 
   @Patch('conversations/:id')
