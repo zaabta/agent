@@ -18,6 +18,7 @@
     "test:e2e:auth": "node --import tsx --test test/auth-tenant.e2e.test.ts",
     "test:e2e:typegraph": "node --import tsx --test test/typegraph-multilingual.e2e.test.ts",
     "test:e2e:typegraph:graph": "node --import tsx --test test/typegraph-graph.e2e.test.ts",
+    "backfill:legacy-versions": "node --import tsx scripts/backfill-legacy-document-versions.ts",
     "prisma:generate": "prisma generate",
     "prisma:generate:safe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prisma-generate-safe.ps1",
     "prisma:migrate": "prisma migrate dev",

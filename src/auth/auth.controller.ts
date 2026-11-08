@@ -12,14 +12,12 @@ import { Roles } from './roles.decorator.js';
 export class AuthController {
   constructor(@Inject(AuthService) private readonly auth: AuthService) {}
 
-  @Post('register') @HttpCode(201) @ApiOperation({ summary: 'Create a user and first tenant workspace' })
+  @Post('register') @HttpCode(201) @ApiOperation({ summary: 'Register an account pending company workspace approval' })
   @ApiBody({ schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string', format: 'email' }, password: { type: 'string', minLength: 12, maxLength: 256 }, displayName: { type: 'string', maxLength: 120 } } } })
-  @ApiResponse({ status: 201, description: 'Returns an access JWT and sets an HttpOnly refresh cookie.' })
+  @ApiResponse({ status: 201, description: 'Creates a pending account; a company workspace admin must add it before login is allowed.' })
   @ApiResponse({ status: 409, description: 'Email already registered or password policy failed.' })
-  async register(@Body() body: { email?: string; password?: string; displayName?: string }, @Res({ passthrough: true }) response: Response) {
-    const tokens = await this.auth.register({ email: body.email ?? '', password: body.password ?? '', displayName: body.displayName });
-    response.setHeader('Set-Cookie', this.auth.refreshCookie(tokens.refreshToken));
-    return this.publicTokens(tokens);
+  async register(@Body() body: { email?: string; password?: string; displayName?: string }) {
+    return this.auth.register({ email: body.email ?? '', password: body.password ?? '', displayName: body.displayName });
   }
 
   @Post('login') @HttpCode(200) @ApiOperation({ summary: 'Authenticate with email and password' })

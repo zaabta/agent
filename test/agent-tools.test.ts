@@ -24,7 +24,8 @@ test('Mastra exposes tenant-bound retrieval, inventory, exact lookup, and analyt
     assert.ok(tool.inputSchema);
     assert.ok(tool.outputSchema);
   }
-  await (tools as any).documentSearch.execute({ query: 'project leader', topK: 8 });
+  const abortSignal = new AbortController().signal;
+  await (tools as any).documentSearch.execute({ query: 'project leader', topK: 8 }, { abortSignal });
   const listed = await (tools as any).listDocuments.execute({});
   assert.deepEqual(listed, { documents: [], durationMs: 0 });
   await (tools as any).structuredDataLookup.execute({ value: 'CASE-17' });
@@ -32,7 +33,7 @@ test('Mastra exposes tenant-bound retrieval, inventory, exact lookup, and analyt
   await (tools as any).datasetDiscovery.execute({});
   await (tools as any).structuredRowLookup.execute({ filters: [{ columnName: 'Region', operator: 'EQ', value: 'West' }], limit: 5 });
   assert.deepEqual(calls.map(call => call.kind), ['search', 'list', 'structured', 'analytics', 'discovery', 'rows']);
-  assert.deepEqual(calls[0]!.args, ['project leader', 8, 'tenant-test', 'user-test']);
+  assert.deepEqual(calls[0]!.args, ['project leader', 8, 'tenant-test', 'user-test', abortSignal]);
   assert.deepEqual(calls[1]!.args, ['tenant-test', 'user-test']);
   assert.deepEqual(calls[2]!.args, ['CASE-17', 'tenant-test']);
   assert.deepEqual(calls[3]!.args, ['GROUP_BY', 'Violation Type', 'tenant-test', { documentId: undefined, sheetName: undefined, filters: undefined }]);

@@ -11,11 +11,18 @@ const model = process.env.MASTRA_MODEL ||
   (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
 const modelFallback = process.env.MASTRA_FALLBACK_MODEL?.trim() || undefined;
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
+const explicitCompanyWorkspaceId = process.env.COMPANY_WORKSPACE_ID?.trim();
+const companyWorkspaceId = explicitCompanyWorkspaceId
+  ? (explicitCompanyWorkspaceId.startsWith('replace-with-') ? undefined : explicitCompanyWorkspaceId)
+  : (process.env.NODE_ENV !== 'production' ? process.env.DEV_TENANT_ID?.trim() : undefined);
 
 export const config = {
   port: Number(process.env.PORT || 3220),
   databaseUrl: process.env.DATABASE_URL || 'postgres://sitepilot:sitepilot@localhost:5444/sitepilot',
-  tenantId: process.env.DEV_TENANT_ID || 'demo-workspace',
+  // Company knowledge uses one existing canonical workspace. DEV_TENANT_ID
+  // remains a backwards-compatible local fallback only.
+  companyWorkspaceId,
+  tenantId: companyWorkspaceId || process.env.DEV_TENANT_ID || 'demo-workspace',
   ollamaUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
   embedModel: process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text',
   embedDimensions: Number(process.env.OLLAMA_EMBED_DIMENSIONS || 768),

@@ -69,6 +69,19 @@ test('timeouts retry only to the configured bound and retain a safe timeout code
   assert.equal(calls, 2);
 });
 
+test('provider backoff exits immediately when an active run is cancelled', async () => {
+  const controller = new AbortController();
+  let resolveSleepStarted!: () => void;
+  const sleepStarted = new Promise<void>(resolve => { resolveSleepStarted = resolve; });
+  const request = withProviderRetry(async () => { throw { statusCode: 503 }; }, {
+    signal: controller.signal,
+    sleep: async () => { resolveSleepStarted(); return new Promise<void>(() => undefined); },
+  });
+  await sleepStarted;
+  controller.abort(new Error('AGENT_RUN_CANCELLED'));
+  await assert.rejects(request, /AGENT_RUN_CANCELLED/);
+});
+
 test('model fallback is opt-in and cannot cross provider or Local AI Only boundaries', () => {
   assert.equal(modelWithExplicitFallback('openrouter/google/a', undefined, 'openrouter'), 'openrouter/google/a');
   assert.deepEqual(modelWithExplicitFallback('openrouter/google/a', 'openrouter/google/b', 'openrouter'), [

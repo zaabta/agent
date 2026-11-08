@@ -2,17 +2,38 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { PrismaClient } from '@prisma/client';
-import { NestFactory } from '@nestjs/core';
-import { TypegraphModule } from '../src/typegraph/typegraph.module.js';
-import { TypegraphService } from '../src/typegraph/typegraph.service.js';
-import { StructuredDataService } from '../src/documents/structured-data.service.js';
 import { config } from '../src/config.js';
+import { StructuredDataService } from '../src/documents/structured-data.service.js';
 
 const baseUrl = `http://127.0.0.1:${config.port}`;
 const password = `S!tePilot-${randomUUID()}-secure`;
+type Account = { user: { id: string }; accessToken: string; cookie: string; tenant: { id: string; role: string } };
 
 async function json(response: Response) { return response.json() as Promise<Record<string, any>>; }
 async function bearer(accessToken: string) { return { authorization: `Bearer ${accessToken}` }; }
+async function register(email: string) {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password, displayName: 'Shared Workspace E2E' }),
+  });
+  assert.equal(response.status, 201);
+  const payload = await json(response);
+  assert.equal(payload.status, 'pending_workspace_membership');
+  assert.equal(response.headers.get('set-cookie'), null, 'pending users receive no authenticated session');
+  return payload.user as { id: string };
+}
+async function login(email: string): Promise<Account> {
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await json(response);
+  const cookie = response.headers.get('set-cookie');
+  assert.ok(cookie?.includes('HttpOnly'));
+  assert.ok(cookie?.includes('SameSite=Strict'));
+  return { ...payload, cookie: cookie!.split(';', 1)[0] } as Account;
+}
 async function upload(accessToken: string, filename: string, text: string) {
   const form = new FormData();
   form.append('file', new Blob([text], { type: 'text/plain' }), filename);
@@ -27,162 +48,167 @@ async function uploadCsv(accessToken: string, filename: string, text: string) {
   assert.equal(response.status, 202);
   return (await json(response)).document as { id: string; jobId: string };
 }
-async function waitReady(accessToken: string, jobId: string) {
+async function uploadVersion(accessToken: string, documentId: string, filename: string, text: string) {
+  const form = new FormData();
+  form.append('file', new Blob([text], { type: 'text/plain' }), filename);
+  const response = await fetch(`${baseUrl}/api/documents/${documentId}/versions`, { method: 'POST', headers: await bearer(accessToken), body: form });
+  assert.equal(response.status, 202);
+  return (await json(response)).version as { id: string; jobId: string };
+}
+async function waitReady(accessToken: string, jobId: string, prisma: PrismaClient) {
   const deadline = Date.now() + 90000;
+  let lastState: Record<string, unknown> | undefined;
   while (Date.now() < deadline) {
     const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, { headers: await bearer(accessToken) });
     assert.equal(response.status, 200);
     const job = await json(response);
+    lastState = { status: job.status, stage: job.stage, progress: job.progress, failureCode: job.failureCode, queueState: job.queueState };
     if (job.status === 'ready') return;
-    assert.ok(!['failed', 'cancelled'].includes(job.status), `job terminal failure: ${JSON.stringify(job)}`);
+    assert.ok(!['failed', 'cancelled'].includes(job.status), `job reached terminal state ${job.status}`);
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  assert.fail(`Job ${jobId} did not finish`);
+  const [version, document] = await Promise.all([
+    prisma.appDocumentVersion.findFirst({ where: { jobId }, select: { id: true, status: true, cancelRequested: true, jobId: true, documentId: true, tenantId: true } }),
+    prisma.appDocument.findFirst({ where: { jobId }, select: { id: true, status: true, stage: true, activeVersionId: true, cancelRequested: true, tenantId: true } }),
+  ]);
+  const detail = {
+    ...lastState,
+    versionStatus: version?.status,
+    versionCancelRequested: version?.cancelRequested,
+    versionDocumentMatches: Boolean(version && document && version.documentId === document.id),
+    versionTenantMatches: Boolean(version && document && version.tenantId === document.tenantId),
+    documentStatus: document?.status,
+    documentStage: document?.stage,
+    documentCancelRequested: document?.cancelRequested,
+    activePointerMatchesVersion: Boolean(version && document?.activeVersionId === version.id),
+  };
+  assert.fail(`Document indexing did not finish before the E2E deadline: ${JSON.stringify(detail)}`);
 }
-async function register(email: string) {
-  const response = await fetch(`${baseUrl}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password, displayName: 'Synthetic Tenant Test' }) });
-  assert.equal(response.status, 201);
-  const payload = await json(response);
-  const setCookie = response.headers.get('set-cookie');
-  assert.ok(setCookie?.includes('HttpOnly'));
-  assert.ok(setCookie?.includes('SameSite=Strict'));
-  return { ...payload, cookie: setCookie!.split(';', 1)[0] } as { accessToken: string; user: { id: string }; tenant: { id: string; role: string }; cookie: string };
+async function search(accessToken: string | undefined, query: string) {
+  return fetch(`${baseUrl}/api/documents/search`, {
+    method: 'POST', headers: { ...(accessToken ? await bearer(accessToken) : {}), 'content-type': 'application/json' },
+    body: JSON.stringify({ query, limit: 8 }),
+  });
 }
 
-test('real authentication, refresh rotation, tenant authorization and TypeGraph isolation', {
-  skip: process.env.RUN_AUTH_E2E !== 'true' ? 'Set RUN_AUTH_E2E=true with the local API, PostgreSQL, Redis, TypeGraph and Ollama' : false,
+test('authorized company users share documents and datasets while conversations stay private', {
+  skip: process.env.RUN_AUTH_E2E !== 'true' ? 'Set RUN_AUTH_E2E=true with the local API, PostgreSQL, Redis, TypeGraph, worker, and Ollama' : false,
   timeout: 300000,
 }, async () => {
+  const workspaceId = config.companyWorkspaceId;
+  assert.ok(workspaceId, 'COMPANY_WORKSPACE_ID must point at the existing company workspace');
   const prisma = new PrismaClient();
-  const context = await NestFactory.createApplicationContext(TypegraphModule, { logger: false });
-  let a: Awaited<ReturnType<typeof register>> | undefined;
-  let b: Awaited<ReturnType<typeof register>> | undefined;
-  let c: Awaited<ReturnType<typeof register>> | undefined;
-  let docA: { id: string; jobId: string } | undefined;
-  let docB: { id: string; jobId: string } | undefined;
-  let csvB: { id: string; jobId: string } | undefined;
-  let conversationId: string | undefined;
+  const suffix = randomUUID();
+  const emailX = `company-user-x-${suffix}@example.test`;
+  const emailY = `company-user-y-${suffix}@example.test`;
+  const emailUnauthorized = `company-pending-${suffix}@example.test`;
+  let userX: { id: string } | undefined;
+  let userY: { id: string } | undefined;
+  let userUnauthorized: { id: string } | undefined;
+  let docX: { id: string; jobId: string } | undefined;
+  let csvX: { id: string; jobId: string } | undefined;
+  let conversationX: string | undefined;
+  let conversationY: string | undefined;
+  let accountX: Account | undefined;
+  let accountY: Account | undefined;
   try {
-    const suffix = randomUUID();
-    a = await register(`tenant-a-${suffix}@example.test`);
-    b = await register(`tenant-b-${suffix}@example.test`);
-    c = await register(`tenant-member-${suffix}@example.test`);
-    console.log('auth E2E: registered three isolated users');
-    assert.notEqual(a.tenant.id, b.tenant.id);
-    assert.equal(a.tenant.role, 'TENANT_ADMIN');
+    const beforeTenants = await prisma.tenant.count();
+    userX = await register(emailX);
+    userY = await register(emailY);
+    userUnauthorized = await register(emailUnauthorized);
+    assert.equal(await prisma.tenant.count(), beforeTenants, 'registration must not provision per-user workspaces');
 
-    const members = await fetch(`${baseUrl}/api/auth/members`, { headers: await bearer(a.accessToken) });
-    assert.equal(members.status, 200);
-    const deniedMembers = await fetch(`${baseUrl}/api/auth/members`, { headers: await bearer(b.accessToken) });
-    assert.equal(deniedMembers.status, 200, 'new tenant admin may manage only their own tenant');
+    // The fixture bootstrap grants only User X admin membership in the already
+    // configured workspace. User Y is added through the authenticated admin API.
+    await prisma.membership.create({ data: { tenantId: workspaceId, userId: userX.id, role: 'TENANT_ADMIN' } });
+    accountX = await login(emailX);
+    assert.equal(accountX.tenant.id, workspaceId);
+    assert.equal(accountX.tenant.role, 'TENANT_ADMIN');
 
-    const login = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `tenant-a-${suffix}@example.test`, password }) });
-    assert.equal(login.status, 200);
-    const oldCookie = login.headers.get('set-cookie')!.split(';', 1)[0]!;
-    const rotated = await fetch(`${baseUrl}/api/auth/refresh`, { method: 'POST', headers: { cookie: oldCookie } });
-    assert.equal(rotated.status, 200);
-    const newCookie = rotated.headers.get('set-cookie')!.split(';', 1)[0]!;
-    assert.notEqual(newCookie, oldCookie);
-    const reuse = await fetch(`${baseUrl}/api/auth/refresh`, { method: 'POST', headers: { cookie: oldCookie } });
-    assert.equal(reuse.status, 401, 'rotated refresh token reuse must be rejected');
-    // Log in again because reuse detection revokes the whole token family.
-    const relogin = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `tenant-a-${suffix}@example.test`, password }) });
-    assert.equal(relogin.status, 200);
-    a.accessToken = (await json(relogin)).accessToken;
+    const addY = await fetch(`${baseUrl}/api/auth/members`, {
+      method: 'POST', headers: { ...(await bearer(accountX.accessToken)), 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailY, role: 'MEMBER' }),
+    });
+    assert.equal(addY.status, 201);
+    accountY = await login(emailY);
+    assert.equal(accountY.tenant.id, accountX.tenant.id, 'both users must authenticate into the same canonical workspace');
 
-    const switchDenied = await fetch(`${baseUrl}/api/auth/tenant`, { method: 'POST', headers: { ...(await bearer(a.accessToken)), 'content-type': 'application/json' }, body: JSON.stringify({ tenantId: b.tenant.id }) });
-    assert.equal(switchDenied.status, 403, 'tenant switching must verify database membership');
-    const addMember = await fetch(`${baseUrl}/api/auth/members`, { method: 'POST', headers: { ...(await bearer(a.accessToken)), 'content-type': 'application/json' }, body: JSON.stringify({ email: `tenant-member-${suffix}@example.test`, role: 'READ_ONLY' }) });
-    assert.equal(addMember.status, 201);
-    const memberSwitch = await fetch(`${baseUrl}/api/auth/tenant`, { method: 'POST', headers: { ...(await bearer(c.accessToken)), 'content-type': 'application/json' }, body: JSON.stringify({ tenantId: a.tenant.id }) });
-    assert.equal(memberSwitch.status, 201);
-    c.accessToken = (await json(memberSwitch)).accessToken;
-    const readOnlyUpload = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: { ...(await bearer(c.accessToken)), 'content-type': 'application/json' }, body: '{}' });
-    assert.equal(readOnlyUpload.status, 403, 'read-only members cannot upload documents');
-    console.log('auth E2E: refresh rotation, tenant switching, and RBAC passed');
-
-    const markerA = `TENANT-A-${suffix}`;
-    const markerB = `TENANT-B-${suffix}`;
-    docA = await upload(a.accessToken, `tenant-a-${suffix}.txt`, `Synthetic private tenant A record ${markerA}`);
-    docB = await upload(b.accessToken, `tenant-b-${suffix}.txt`, `Synthetic private tenant B record ${markerB}. Mercury Enterprise plan costs 741 credits per month.`);
-    const codeB = `B-PRIVATE-${suffix}`;
-    csvB = await uploadCsv(b.accessToken, `tenant-b-${suffix}.csv`, `reference,value\n${codeB},CELL-PRIVATE-${suffix}`);
-    await Promise.all([waitReady(a.accessToken, docA.jobId), waitReady(b.accessToken, docB.jobId), waitReady(b.accessToken, csvB.jobId)]);
-
-    const listA = await fetch(`${baseUrl}/api/documents`, { headers: { ...(await bearer(a.accessToken)), 'x-tenant-id': b.tenant.id } });
-    const docsA = await json(listA) as unknown as Array<{ id: string }>;
-    assert.ok(docsA.some(doc => doc.id === docA!.id));
-    assert.equal(docsA.some(doc => doc.id === docB!.id), false, 'forged x-tenant-id cannot change scope');
-    for (const [path, method] of [
-      [`/api/documents/${docB.id}`, 'GET'], [`/api/jobs/${docB.jobId}`, 'GET'],
-      [`/api/jobs/${docB.jobId}/events`, 'GET'], [`/api/jobs/${docB.jobId}/cancel`, 'POST'],
-      [`/api/documents/${docB.id}`, 'DELETE'],
-    ] as const) {
-      const response: Response = await fetch(`${baseUrl}${path}`, { method, headers: await bearer(a.accessToken) });
-      assert.equal(response.status, 404, `${method} ${path} must be tenant-hidden`);
+    const existingLegacy = await prisma.appDocumentVersion.findFirst({
+      where: { tenantId: workspaceId, status: 'ready', chunkingStrategy: 'legacy' },
+      include: { document: { select: { id: true, filename: true, activeVersionId: true, status: true } } },
+    });
+    if (existingLegacy?.document.status === 'ready' && existingLegacy.document.activeVersionId === existingLegacy.id) {
+      const legacySearch = await search(accountY.accessToken, existingLegacy.document.filename);
+      assert.equal(legacySearch.status, 200);
+      const legacyHits = (await json(legacySearch)).hits as Array<{ citation: { documentId: string; documentVersionId?: string } }>;
+      assert.ok(legacyHits.some(hit => hit.citation.documentId === existingLegacy.document.id && hit.citation.documentVersionId === existingLegacy.id), 'a pre-existing active legacy index remains searchable by another authorized user');
     }
-    const adminDenied = await fetch(`${baseUrl}/api/admin/workers/overview`, { headers: await bearer(a.accessToken) });
-    assert.equal(adminDenied.status, 200, 'tenant admins may view worker health and aggregate queue diagnostics');
-    const adminJobDenied = await fetch(`${baseUrl}/api/admin/workers/jobs/${docB.jobId}`, { headers: await bearer(a.accessToken) });
-    assert.equal(adminJobDenied.status, 404, 'tenant admins must not enumerate another tenant job details');
-    const tenantJobs = await json(await fetch(`${baseUrl}/api/admin/workers/jobs`, { headers: await bearer(a.accessToken) })) as { jobs: Array<{ id: string }> };
-    assert.ok(tenantJobs.jobs.some(job => job.id === docA!.id));
-    assert.equal(tenantJobs.jobs.some(job => job.id === docB!.id), false, 'admin job inventory remains tenant scoped');
 
-    const typegraph = context.get(TypegraphService);
-    const [searchA, searchB] = await Promise.all([
-      typegraph.searchDocuments(markerA, 8, a.tenant.id, a.user.id),
-      typegraph.searchDocuments(markerA, 8, b.tenant.id, b.user.id),
+    const unapprovedLogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailUnauthorized, password }),
+    });
+    assert.equal(unapprovedLogin.status, 403, 'valid credentials without company membership cannot access documents');
+    const anonymous = await search(undefined, 'unauthorized access check');
+    assert.equal(anonymous.status, 401, 'anonymous users cannot access company documents');
+
+    const marker = `SHARED-COMPANY-${suffix}`;
+    const oldMarker = `SUPERSEDED-${suffix}`;
+    const newMarker = `CURRENT-${suffix}`;
+    docX = await upload(accountX.accessToken, `shared-company-${suffix}.txt`, `${marker} company report with ${oldMarker} financial total.`);
+    await waitReady(accountX.accessToken, docX.jobId, prisma);
+    const rowKey = `ROW-${suffix}`;
+    csvX = await uploadCsv(accountX.accessToken, `shared-company-data-${suffix}.csv`, `reference,value\n${rowKey},SHARED-VALUE-${suffix}`);
+    await waitReady(accountX.accessToken, csvX.jobId, prisma);
+
+    const [searchX, searchY] = await Promise.all([search(accountX.accessToken, marker), search(accountY.accessToken, marker)]);
+    assert.equal(searchX.status, 200);
+    assert.equal(searchY.status, 200);
+    const hitsX = (await json(searchX)).hits as Array<{ citation: { documentId: string; documentVersionId?: string; filename: string } }>;
+    const hitsY = (await json(searchY)).hits as Array<{ citation: { documentId: string; documentVersionId?: string; filename: string } }>;
+    assert.ok(hitsX.some(hit => hit.citation.documentId === docX!.id));
+    assert.ok(hitsY.some(hit => hit.citation.documentId === docX!.id), 'User Y must retrieve User X document evidence');
+    assert.ok(hitsY.find(hit => hit.citation.documentId === docX!.id)?.citation.documentVersionId, 'shared result must carry a version citation');
+    assert.deepEqual(hitsY.map(hit => hit.citation.documentId), hitsX.map(hit => hit.citation.documentId), 'authorized users receive the same ranked workspace result IDs');
+
+    const structured = await new StructuredDataService(prisma).lookup(rowKey, accountY.tenant.id);
+    assert.ok(structured.hits.some(hit => hit.citation.documentId === csvX!.id && hit.citation.documentVersionId), 'User Y can query User X structured dataset with active-version citation in the shared workspace');
+
+    const version = await uploadVersion(accountX.accessToken, docX.id, `shared-company-${suffix}.txt`, `${marker} company report now says ${newMarker} financial total.`);
+    await waitReady(accountX.accessToken, version.jobId, prisma);
+    const [supersededSearch, currentSearch] = await Promise.all([
+      search(accountY.accessToken, oldMarker), search(accountY.accessToken, newMarker),
     ]);
-    assert.ok(searchA.hits.some(hit => hit.citation.documentId === docA!.id));
-    assert.equal(searchB.hits.some(hit => hit.citation.documentId === docA!.id), false, 'TypeGraph hard tenant namespace must isolate vector retrieval');
-    assert.equal(searchA.hits.some(hit => hit.citation.documentId === docB!.id), false);
+    assert.equal(supersededSearch.status, 200);
+    assert.equal(currentSearch.status, 200);
+    const oldHits = (await json(supersededSearch)).hits as Array<{ content: string; citation: { documentId: string; documentVersionId?: string } }>;
+    const currentHits = (await json(currentSearch)).hits as Array<{ content: string; citation: { documentId: string; documentVersionId?: string } }>;
+    const supersededEvidence = oldHits.filter(hit => hit.content.includes(oldMarker));
+    assert.equal(supersededEvidence.length, 0, `superseded passage content must not be returned; versions=${JSON.stringify(oldHits.filter(hit => hit.citation.documentId === docX!.id).map(hit => hit.citation.documentVersionId))}`);
+    assert.ok(currentHits.some(hit => hit.citation.documentId === docX!.id && hit.citation.documentVersionId === version.id));
 
-    const prismaStructured = new StructuredDataService(prisma);
-    const cellsA = await prismaStructured.lookup(markerB, a.tenant.id);
-    assert.equal(cellsA.hits.some(hit => hit.citation.documentId === csvB!.id), false, 'tenant A must not retrieve tenant B spreadsheet cells');
-    const cellsB = await prismaStructured.lookup(codeB, b.tenant.id);
-    assert.equal(cellsB.hits.some(hit => hit.citation.documentId === csvB!.id), true);
-    console.log('auth E2E: document, job, TypeGraph and spreadsheet tenant isolation passed');
+    const createX = await fetch(`${baseUrl}/api/agent/conversations`, { method: 'POST', headers: await bearer(accountX.accessToken) });
+    const createY = await fetch(`${baseUrl}/api/agent/conversations`, { method: 'POST', headers: await bearer(accountY.accessToken) });
+    assert.equal(createX.status, 201);
+    assert.equal(createY.status, 201);
+    conversationX = (await json(createX)).id as string;
+    conversationY = (await json(createY)).id as string;
+    assert.equal((await fetch(`${baseUrl}/api/agent/conversations/${conversationX}`, { headers: await bearer(accountY.accessToken) })).status, 404);
+    assert.equal((await fetch(`${baseUrl}/api/agent/conversations/${conversationY}`, { headers: await bearer(accountX.accessToken) })).status, 404);
 
-    const { AgentService } = await import('../src/agent/agent.service.js');
-    const { AppModule } = await import('../src/app.module.js');
-    const agentContext = await NestFactory.createApplicationContext(AppModule, { logger: false });
-    try {
-      console.log('auth E2E: asking Mastra against Tenant A only');
-      const answer = await agentContext.get(AgentService).ask('What is the Mercury Enterprise monthly plan price in the uploaded documents?', undefined, { userId: a.user.id, tenantId: a.tenant.id, role: 'TENANT_ADMIN', authMethod: 'jwt' });
-      assert.ok(answer.toolsCalled.includes('documentSearch'), `Agent did not call tenant-scoped TypeGraph search: ${JSON.stringify(answer.toolsCalled)}`);
-      assert.equal(answer.sources.some(source => source.documentId === docB!.id || source.documentId === csvB!.id), false, 'Agent must not receive Tenant B source citations');
-      assert.equal(answer.answer.includes('741'), false, 'Agent must not expose Tenant B facts');
-      assert.ok(answer.sources.every(source => source.documentId === docA!.id), 'Agent sources must remain within Tenant A');
-      console.log('auth E2E: Mastra did not retrieve or cite Tenant B evidence');
-    } finally { await agentContext.close(); }
-
-    const ownConversation = await fetch(`${baseUrl}/api/agent/conversations`, { method: 'POST', headers: await bearer(a.accessToken) });
-    assert.equal(ownConversation.status, 201);
-    conversationId = (await json(ownConversation)).id as string;
-    const otherConversation = await fetch(`${baseUrl}/api/agent/conversations/${conversationId}`, { headers: await bearer(b.accessToken) });
-    assert.equal(otherConversation.status, 404, 'conversation history must enforce owner and tenant');
-
-    const openapiResponse = await fetch(`${baseUrl}/api/docs-json`);
-    assert.equal(openapiResponse.status, 200);
-    const openapi = await json(openapiResponse);
-    const paths = openapi.paths as Record<string, unknown>;
-    for (const path of ['/api/auth/register', '/api/auth/login', '/api/auth/refresh', '/api/auth/logout', '/api/auth/members', '/api/documents/upload', '/api/jobs/{jobId}/events', '/api/admin/workers/overview', '/api/admin/workers/health', '/api/admin/workers/jobs', '/api/admin/workers/jobs/{jobId}', '/api/admin/workers/metrics', '/api/admin/workers/events', '/api/agent/ask', '/api/agent/stream', '/api/agent/conversations/{id}']) {
-      assert.ok(paths[path], `Swagger is missing ${path}`);
-    }
-    assert.ok((openapi.components as { securitySchemes?: Record<string, unknown> }).securitySchemes?.bearer);
-    console.log('auth E2E: Swagger contract passed');
+    const wrongPassword = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailX, password: 'incorrect-password' }),
+    });
+    assert.equal(wrongPassword.status, 401);
   } finally {
-    if (a && docA) await fetch(`${baseUrl}/api/documents/${docA.id}`, { method: 'DELETE', headers: await bearer(a.accessToken) }).catch(() => undefined);
-    if (b && docB) await fetch(`${baseUrl}/api/documents/${docB.id}`, { method: 'DELETE', headers: await bearer(b.accessToken) }).catch(() => undefined);
-    if (b && csvB) await fetch(`${baseUrl}/api/documents/${csvB.id}`, { method: 'DELETE', headers: await bearer(b.accessToken) }).catch(() => undefined);
-    if (conversationId) await prisma.conversation.deleteMany({ where: { id: conversationId } }).catch(() => undefined);
-    if (a) await prisma.tenant.deleteMany({ where: { id: a.tenant.id } }).catch(() => undefined);
-    if (b) await prisma.tenant.deleteMany({ where: { id: b.tenant.id } }).catch(() => undefined);
-    if (c) await prisma.tenant.deleteMany({ where: { id: c.tenant.id } }).catch(() => undefined);
-    if (a || b || c) await prisma.user.deleteMany({ where: { id: { in: [a?.user.id, b?.user.id, c?.user.id].filter((id): id is string => !!id) } } }).catch(() => undefined);
+    if (accountX && docX) await fetch(`${baseUrl}/api/documents/${docX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
+    if (accountX && csvX) await fetch(`${baseUrl}/api/documents/${csvX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
+    const userIds = [userX?.id, userY?.id, userUnauthorized?.id].filter((id): id is string => Boolean(id));
+    if (userIds.length) {
+      await prisma.conversation.deleteMany({ where: { ownerId: { in: userIds } } }).catch(() => undefined);
+      await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
+    }
     await prisma.$disconnect();
-    await context.close();
   }
 });

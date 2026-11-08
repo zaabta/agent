@@ -27,15 +27,15 @@ Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilo
 
 ## API
 
-All routes require the development `x-api-key` except `/health`.
+Protected routes require a valid bearer JWT. The development `x-api-key` is accepted only when `ENABLE_DEV_API_KEY_AUTH=true` outside production; it is disabled by default.
 
 ```bash
 curl -X POST http://127.0.0.1:3220/api/agent/ask \
-  -H 'x-api-key: YOUR_DEV_API_KEY' -H 'content-type: application/json' \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H 'content-type: application/json' \
   -d '{"message":"What are the document requirements?"}'
 
 curl -N -X POST http://127.0.0.1:3220/api/agent/stream \
-  -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H 'content-type: application/json' \
   -d '{"message":"What are the document requirements?"}'
 ```
 
@@ -46,7 +46,7 @@ Provider retries are bounded to two retries for transient planning and grounded-
 ```js
 const response = await fetch('/api/agent/stream', {
   method: 'POST',
-  headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
   body: JSON.stringify({ message, conversationId }),
   signal: abortController.signal,
 });
@@ -59,22 +59,49 @@ while (true) {
 }
 ```
 
+Client reducer guidance: append provisional `text-delta` values to a draft buffer; clear that buffer on every `text-reset`; replace visible text with a verified delta; always replace it with `done.answer` on `done`. On `error` or `cancelled`, clear the draft when requested and stop treating the turn as active. Retain the `runId` from `status`; the cancel button should POST the cancel route with the same bearer token. Do not treat `AbortController.abort()` on the stream request as cancellation of backend work.
+
 ### SSE event contract
 
 Frames use standard `event: <name>` and `data: <JSON>` lines.
 
-- `status`: `{status:"started",conversationId,turnId}`. Workflow mode also includes `orchestration:"workflow"`.
+Example safe frames (IDs and answer text are illustrative):
+
+```text
+event: status
+data: {"status":"started","runId":"<opaque-uuid>","conversationId":"<owned-conversation-uuid>"}
+
+event: tool-start
+data: {"toolName":"documentSearch"}
+
+event: text-delta
+data: {"text":"Draft fragment","verification":"provisional"}
+
+event: text-reset
+data: {"reason":"citation-verification"}
+
+event: text-delta
+data: {"text":"Citation-verified answer","verification":"verified"}
+
+event: done
+data: {"answer":"Citation-verified answer","sources":[],"citationValidation":"valid","discardProvisional":false}
+```
+
+- `status`: `{status:"started",runId,conversationId,turnId}`. `runId` is opaque and is used by the authenticated cancel endpoint. Workflow mode also includes `orchestration:"workflow"`.
 - `stage`: `{stage,status,message,toolName?}` reports workflow progress. Current stage IDs are `planning`, `discovering`, `searching`, `executing`, `composing`, `validating`, and `completed`; `status` is `in_progress` or `completed`. `toolName` is present when a backend tool is running.
 - `step-start`, `step-finish`: safe step index and elapsed/token usage values; prompts and model IDs are omitted.
 - `tool-start`: allowlisted `toolName`; arguments are omitted.
 - `sources`: citations produced by TypeGraph retrieval.
 - `tool-finish`: allowlisted tool name, duration and source count; raw tool output is omitted.
-- `text-delta`: `{text,verification:"provisional"}` for streamed workflow answers. Reasoning chunks are suppressed. Clients should replace provisional text with the final `done.answer`; if `done.discardProvisional` is true, discard the streamed draft entirely. Non-generative workflow answers are sent as one `verification:"verified"` delta.
-- `text-reset`: `{reason:"provider-retry"}` tells the client to clear partial provisional text before a bounded provider retry.
+- `text-delta`: workflow answer-generation chunks arrive as `{text,verification:"provisional"}`. Hidden reasoning chunks are suppressed. Workflow mode then sends one `{text,verification:"verified"}` delta after citation validation. Legacy mode may send only provisional chunks; in either mode `done.answer` is authoritative.
+- `text-reset`: `{reason:"provider-retry"}` clears partial provisional text before a bounded retry; `{reason:"citation-verification"}` clears the completed draft before the verified answer is sent. Keep provisional text in a separate buffer and never append the verified answer to it.
 - `done`: final answer, TypeGraph source references, tool names, citation validation state and request telemetry.
 - `error`: safe error code only; no provider error body or credentials. Terminal errors set `discardProvisional:true`.
+- `cancelled`: `{runId,status:"cancelled",executionSettled:true,providerStopConfirmed:false,ackLatencyMs}` means the local Mastra execution settled after its abort signal. It does not assert that a remote provider stopped computation.
 
-If citation validation fails or retrieval returns no evidence, the final answer is replaced with a safe fallback and `done.discardProvisional` is true. Because already delivered deltas cannot be retracted, provisional text must not be stored or shown as verified; the final `done` answer is authoritative. Citation validation checks that markers refer to retrieved chunks; it is not an independent fact-checker.
+The initial `status` event includes an opaque `runId`. An authenticated owner can call `POST /api/agent/runs/:runId/cancel`. The route is idempotent and returns `status:"cancelling"` until the local execution settles, `cancelled` when it settles, `finishing` if the verified answer is already being persisted, or the existing terminal state. A foreign or unknown run returns the same `404` response. The in-memory registry is bounded to 48 concurrent runs per API process and 2 per user; terminal records expire after two minutes. Cancellation propagates `AbortSignal` to Mastra, model streams, and TypeGraph search where SDK APIs support it. The provider may continue remote computation after the client abort; this API does not claim otherwise.
+
+On `done`, set the rendered assistant content to `done.answer` as the authoritative value (replace, do not append). If `done.discardProvisional` is true, discard any provisional content. On `error`, discard provisional text when `discardProvisional` is true and render the safe error code. On `cancelled`, clear provisional content and render a cancelled/interrupted state, not a completed answer. Preserve text exactly as delivered so Arabic/RTL and Markdown are not corrupted; render Markdown only after applying the event protocol. A network disconnect or browser fetch abort does not cancel generation; use the cancel endpoint while connected or reload the persisted conversation after a disconnect. API restart drops process-local run IDs. Graceful shutdown aborts active execution and waits at most 1.5 seconds for local calls to settle; there is no cross-process cancellation recovery. If multiple API replicas are introduced, route cancellation to the originating replica or add authenticated Redis Pub/Sub coordination keyed by opaque run ID and owner identity. Citation validation checks that markers refer to retrieved chunks; it is not an independent fact-checker.
 
 To start a conversation, POST `/api/agent/conversations`; pass its `id` as `conversationId` to `/ask` or `/stream`. GET `/api/agent/conversations` lists recent owned conversations and each latest message; GET `/api/agent/conversations/:id` returns the bounded message history. Each turn stores the user message and a pending assistant message before generation. Assistant messages include `status` (`processing`, `completed`, `interrupted`, or `failed`) and `stage` (`thinking`, `planning`, `searching`, `executing`, `composing`, `validating`, etc.). Disconnecting the SSE client does not cancel the turn; generation continues and persists its final answer. A process crash is reconciled to `interrupted` when its request timeout has elapsed. Tenant and owner scope come from server authentication, never from request content. While auth is the shared development key, all development requests share the configured owner scope.
 

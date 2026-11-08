@@ -22,8 +22,8 @@ export function createSitePilotAgent(
       topK: z.number().int().min(1).max(8).optional(),
     }),
     outputSchema: z.object({ query: z.string(), hits: z.array(z.unknown()), timing: z.object({ embeddingMs: z.number(), retrievalMs: z.number(), searchMs: z.number() }) }),
-    execute: async ({ query, topK }) =>
-      typegraph.searchDocuments(query, topK ?? 5, tenantId, userId),
+    execute: async ({ query, topK }, { abortSignal }) =>
+      typegraph.searchDocuments(query, topK ?? 5, tenantId, userId, abortSignal),
   });
 
   const listDocuments = createTool({

@@ -35,20 +35,19 @@ export class AuthService implements OnModuleDestroy {
     this.validatePassword(input.password);
     const existing = await this.prisma.user.findUnique({ where: { email }, select: { id: true } });
     if (existing) throw new ConflictException('ACCOUNT_EXISTS');
-    const tenantId = randomUUID();
     const passwordHash = await this.hashPassword(input.password);
     let user;
     try { user = await this.prisma.$transaction(async tx => {
       const created = await tx.user.create({ data: { email, passwordHash, displayName: input.displayName?.trim().slice(0, 120) || null } });
-      await tx.tenant.create({ data: { id: tenantId, name: `${input.displayName?.trim().slice(0, 100) || email.split('@')[0]}'s workspace` } });
-      await tx.membership.create({ data: { tenantId, userId: created.id, role: 'TENANT_ADMIN' } });
-      await tx.auditLog.create({ data: { tenantId, userId: created.id, action: 'auth.register' } });
+      // Registration creates an identity only. A company workspace admin must
+      // explicitly grant shared document access through addMember.
+      await tx.auditLog.create({ data: { tenantId: null, userId: created.id, action: 'auth.registration_pending' } });
       return created;
     }); } catch (error) {
       if ((error as { code?: string }).code === 'P2002') throw new ConflictException('ACCOUNT_EXISTS');
       throw error;
     }
-    return this.issueTokens(user.id, tenantId, 'TENANT_ADMIN');
+    return { status: 'pending_workspace_membership', user: { id: user.id, emailDisplay: displayEmail(user.email) } };
   }
 
   async login(input: { email: string; password: string }, ip: string | undefined) {
@@ -59,8 +58,9 @@ export class AuthService implements OnModuleDestroy {
       await this.audit(null, user?.id ?? null, 'auth.login_failed', ip);
       throw new UnauthorizedException('INVALID_CREDENTIALS');
     }
-    const membership = user.memberships[0];
-    if (!membership) throw new ForbiddenException('TENANT_MEMBERSHIP_REQUIRED');
+    const workspaceId = this.companyWorkspaceId();
+    const membership = user.memberships.find(item => item.tenantId === workspaceId);
+    if (!membership) throw new ForbiddenException('COMPANY_WORKSPACE_ACCESS_REQUIRED');
     await this.audit(membership.tenantId, user.id, 'auth.login', ip);
     await this.redis.del(`sitepilot:auth:login:email:${createHash('sha256').update(email).digest('hex')}`).catch(() => undefined);
     return this.issueTokens(user.id, membership.tenantId, membership.role);
@@ -77,10 +77,12 @@ export class AuthService implements OnModuleDestroy {
       }
       throw new UnauthorizedException('REFRESH_TOKEN_INVALID');
     }
-    const membership = await this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: session.tenantId, userId: session.userId } } });
-    if (!membership) throw new UnauthorizedException('TENANT_MEMBERSHIP_REQUIRED');
+    const workspaceId = this.companyWorkspaceId();
+    if (session.tenantId !== workspaceId) throw new UnauthorizedException('REFRESH_TOKEN_INVALID');
+    const membership = await this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: workspaceId, userId: session.userId } } });
+    if (!membership) throw new UnauthorizedException('REFRESH_TOKEN_INVALID');
     await this.prisma.refreshSession.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
-    return this.issueTokens(session.userId, session.tenantId, membership.role, session.familyId);
+    return this.issueTokens(session.userId, workspaceId, membership.role, session.familyId);
   }
 
   async logout(token: string | undefined, ip?: string) {
@@ -92,6 +94,7 @@ export class AuthService implements OnModuleDestroy {
   }
 
   async switchTenant(principal: AuthPrincipal, tenantId: string) {
+    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
     const membership = await this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId, userId: principal.userId } }, include: { tenant: true } });
     if (!membership) throw new ForbiddenException('TENANT_ACCESS_DENIED');
     await this.audit(tenantId, principal.userId, 'auth.tenant_switched');
@@ -101,21 +104,24 @@ export class AuthService implements OnModuleDestroy {
   async validateAccessToken(token: string): Promise<AuthPrincipal> {
     let claims: Claims;
     try { claims = this.verifyJwt(token); } catch { throw new UnauthorizedException('ACCESS_TOKEN_INVALID'); }
+    const workspaceId = this.companyWorkspaceId();
     const [user, membership, session] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: claims.sub }, select: { disabledAt: true } }),
-      this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: claims.tid, userId: claims.sub } }, select: { role: true } }),
+      this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: workspaceId, userId: claims.sub } }, select: { role: true } }),
       this.prisma.refreshSession.findUnique({ where: { id: claims.sid }, select: { userId: true, tenantId: true, revokedAt: true, expiresAt: true } }),
     ]);
-    if (!user || user.disabledAt || !membership || !session || session.revokedAt || session.expiresAt <= new Date() || session.userId !== claims.sub || session.tenantId !== claims.tid) throw new UnauthorizedException('ACCESS_TOKEN_REVOKED');
-    return { userId: claims.sub, tenantId: claims.tid, role: membership.role, authMethod: 'jwt' };
+    if (!user || user.disabledAt || !membership || !session || claims.tid !== workspaceId || session.revokedAt || session.expiresAt <= new Date() || session.userId !== claims.sub || session.tenantId !== workspaceId || session.tenantId !== claims.tid) throw new UnauthorizedException('ACCESS_TOKEN_REVOKED');
+    return { userId: claims.sub, tenantId: workspaceId, role: membership.role, authMethod: 'jwt' };
   }
 
   async listMembers(tenantId: string) {
+    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
     const members = await this.prisma.membership.findMany({ where: { tenantId }, orderBy: { createdAt: 'asc' }, select: { role: true, createdAt: true, user: { select: { id: true, email: true, displayName: true, disabledAt: true } } } });
     return members.map(member => ({ ...member, user: { ...member.user, emailDisplay: displayEmail(member.user.email) } }));
   }
 
   async addMember(tenantId: string, emailInput: string, role: TenantRole, actorId: string) {
+    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
     if (role === 'SUPER_ADMIN') throw new ForbiddenException('SUPER_ADMIN_ASSIGNMENT_REQUIRES_PLATFORM_ADMIN');
     const email = this.normalizeEmail(emailInput);
     const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true, displayName: true } });
@@ -130,6 +136,7 @@ export class AuthService implements OnModuleDestroy {
   }
 
   async changeMemberRole(tenantId: string, userId: string, role: TenantRole, actorId: string) {
+    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
     if (role === 'SUPER_ADMIN') throw new ForbiddenException('SUPER_ADMIN_ASSIGNMENT_REQUIRES_PLATFORM_ADMIN');
     const updated = await this.prisma.membership.updateMany({ where: { tenantId, userId }, data: { role } });
     if (!updated.count) throw new NotFoundException('TENANT_MEMBER_NOT_FOUND');
@@ -144,6 +151,12 @@ export class AuthService implements OnModuleDestroy {
     return `${REFRESH_COOKIE}=; HttpOnly; Path=/api/auth; SameSite=Strict; Max-Age=0${production ? '; Secure' : ''}`;
   }
   refreshCookieName() { return REFRESH_COOKIE; }
+
+  private companyWorkspaceId() {
+    const workspaceId = config.companyWorkspaceId;
+    if (!workspaceId || workspaceId.length > 200) throw new ServiceUnavailableException('COMPANY_WORKSPACE_NOT_CONFIGURED');
+    return workspaceId;
+  }
 
   private async issueTokens(userId: string, tenantId: string, role: TenantRole, familyId: string = randomUUID()) {
     const now = Math.floor(Date.now() / 1000);

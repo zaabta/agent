@@ -9,6 +9,7 @@ import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiSecurity, ApiTags
 import { Roles } from '../auth/roles.decorator.js';
 import { readTenantTrace } from '../mastra/observability.js';
 import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';
+import { AgentRunCancelledError, AgentRunCapacityError } from './active-run-registry.js';
 
 interface AgentBody {
   message?: string;
@@ -40,7 +41,7 @@ export class AgentController {
 
   @Post('stream')
   @ApiOperation({ summary: 'Stream native Mastra Agent events as SSE from a POST request' })
-  @ApiResponse({ status: 200, description: 'SSE events: status, stage, tool-start, tool-finish, text-delta, text-reset, sources, step-start, step-finish, error, done.' })
+  @ApiResponse({ status: 200, description: 'SSE events: status (includes runId), stage, tool-start, tool-finish, text-delta, text-reset, sources, step-start, step-finish, cancelled, error, done.' })
   async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
     const { message, conversationId } = this.validateBody(body, false);
     const controller = new AbortController();
@@ -84,13 +85,23 @@ export class AgentController {
       await this.agent.stream(message, conversationId, controller.signal, write, principal);
       if (!response.destroyed && !response.writableEnded) response.end();
     } catch (error) {
+      if (error instanceof AgentRunCancelledError) {
+        if (!response.destroyed && !response.writableEnded) {
+          await write('cancelled', { runId: error.runId, status: 'cancelled', executionSettled: true, providerStopConfirmed: false, ackLatencyMs: error.ackLatencyMs }, true);
+          response.end();
+        }
+        return;
+      }
       if (!response.destroyed && !response.writableEnded && !controller.signal.reason?.message?.includes('CLIENT_DISCONNECTED')) {
         const provider = safeProviderFailure(error);
         const modelFailure = error instanceof Error && error.message === 'MODEL_STREAM_FAILED';
+        const capacity = error instanceof AgentRunCapacityError ? error : undefined;
         await write('error', {
-          code: timedOut ? 'REQUEST_TIMEOUT' : provider?.code ?? (modelFailure ? 'MODEL_ERROR' : 'AGENT_REQUEST_FAILED'),
-          recoverable: provider?.retryable ?? false,
+          code: timedOut ? 'REQUEST_TIMEOUT' : capacity?.code ?? provider?.code ?? (modelFailure ? 'MODEL_ERROR' : 'AGENT_REQUEST_FAILED'),
+          message: timedOut ? 'The request timed out.' : capacity?.message ?? 'The agent request could not be completed.',
+          recoverable: provider?.retryable ?? Boolean(capacity),
           ...(provider ? { retryable: provider.retryable } : {}),
+          ...(capacity ? { retryable: true, retryAfterMs: 1000 } : {}),
           ...(provider?.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}),
           discardProvisional: true,
         }, true);
@@ -99,6 +110,14 @@ export class AgentController {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  @Post('runs/:runId/cancel')
+  @ApiOperation({ summary: 'Request cancellation of an active agent execution owned by the authenticated user' })
+  @ApiResponse({ status: 200, description: 'Cancellation request result; executionSettled describes local execution only and providerStopConfirmed remains false because remote model shutdown is not observable.' })
+  cancelRun(@Param('runId') runId: string, @CurrentPrincipal() principal: AuthPrincipal) {
+    if (!isUuid(runId)) throw new NotFoundException('AGENT_RUN_NOT_FOUND');
+    return this.agent.cancelRun(runId, principal);
   }
 
   @Post('conversations')

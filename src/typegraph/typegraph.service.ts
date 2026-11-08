@@ -190,7 +190,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       query,
       // Keep retrieval inside TypeGraph, then discard weak native-ranked hits so
       // unrelated high-level matches cannot be offered as factual evidence.
-      hits: (await this.activeVersionHits(response.results.chunks, tenantId))
+      hits: (await this.activeVersionHits(response.results.chunks, tenantId, new Set(candidateDocumentIds)))
         .map(hit => this.toSearchHit(hit))
         .filter(hit => hit.score >= minScore)
         .slice(0, Math.min(Math.max(limit, 1), 8)),
@@ -204,20 +204,55 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
 
   private async activeVersionScopes(tenantId: string) {
     const docs = await this.prisma.appDocument.findMany({
-      where: { tenantId, status: 'ready', activeVersionId: { not: null } },
-      select: { id: true, activeVersionId: true },
+      where: { tenantId, status: 'ready' },
+      select: { id: true, tenantId: true, filename: true, checksum: true, status: true, stage: true, progress: true, completedAt: true, jobId: true, activeVersionId: true, cancelRequested: true, deleteRequested: true },
     });
     const activeVersionIds = docs.flatMap(doc => doc.activeVersionId ? [doc.activeVersionId] : []);
-    const versions = activeVersionIds.length ? await this.prisma.appDocumentVersion.findMany({
+    const activeVersions = activeVersionIds.length ? await this.prisma.appDocumentVersion.findMany({
       where: { id: { in: activeVersionIds }, tenantId },
-      select: { id: true, chunkingStrategy: true, activeIndexGeneration: true },
+      select: { id: true, documentId: true, tenantId: true, filename: true, checksum: true, versionNumber: true, status: true, jobId: true, chunkingStrategy: true, indexGeneration: true, activeIndexGeneration: true },
     }) : [];
+    // Some deployments upgraded the schema but retained a completed, ready
+    // legacy document whose activeVersionId was never populated. Consider
+    // only its matching v1 row; TypeGraph must also prove tenant, filename,
+    // and checksum identity before the row becomes searchable.
+    const recoverableDocs = docs.filter(doc => !doc.activeVersionId
+      && Boolean(doc.checksum)
+      && doc.stage === 'completed'
+      && doc.progress === 100
+      && Boolean(doc.completedAt)
+      && !doc.cancelRequested
+      && !doc.deleteRequested
+      && Boolean(doc.jobId));
+    const recoverableVersions = recoverableDocs.length ? await this.prisma.appDocumentVersion.findMany({
+      where: {
+        tenantId,
+        documentId: { in: recoverableDocs.map(doc => doc.id) },
+        versionNumber: 1,
+        checksum: { in: [...new Set(recoverableDocs.map(doc => doc.checksum).filter((checksum): checksum is string => Boolean(checksum)))] },
+      },
+      select: { id: true, documentId: true, tenantId: true, filename: true, checksum: true, versionNumber: true, status: true, jobId: true, chunkingStrategy: true, indexGeneration: true, activeIndexGeneration: true },
+    }) : [];
+    const versions = [...activeVersions, ...recoverableVersions];
     return new Map(docs.map(doc => {
-      const version = versions.find(item => item.id === doc.activeVersionId);
+      const version = doc.activeVersionId
+        ? versions.find(item => item.id === doc.activeVersionId)
+        : recoverableVersions.find(item => item.documentId === doc.id
+          && item.tenantId === doc.tenantId
+          && item.versionNumber === 1
+          && item.filename === doc.filename
+          && item.checksum === doc.checksum
+          && item.jobId === doc.jobId
+          && ['queued', 'ready'].includes(item.status)
+          && (item.chunkingStrategy === null || item.chunkingStrategy === 'legacy'));
+      const recoveredLegacy = !doc.activeVersionId && Boolean(version);
       return [doc.id, {
-        versionId: doc.activeVersionId,
-        activeGeneration: version?.activeIndexGeneration,
-        legacy: Boolean(version && version.chunkingStrategy === 'legacy'),
+        versionId: doc.activeVersionId ?? (recoveredLegacy ? version?.id ?? null : null),
+        activeGeneration: version?.activeIndexGeneration ?? (recoveredLegacy ? version?.indexGeneration ?? 1 : null),
+        legacy: Boolean(version && (version.chunkingStrategy === 'legacy' || recoveredLegacy)),
+        tenantId: doc.tenantId,
+        filename: doc.filename,
+        checksum: doc.checksum,
       }] as const;
     }));
   }
@@ -232,12 +267,18 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         const logicalId = typeof document.metadata.documentId === 'string' ? document.metadata.documentId : document.id.split('::')[0]!;
         const scope = active.get(logicalId);
         if (!scope || !scope.versionId) continue;
+        if (typeof document.metadata.tenantId === 'string' && document.metadata.tenantId !== scope.tenantId) continue;
         const indexedVersionId = document.metadata.documentVersionId;
         let isActive = false;
         if (typeof indexedVersionId === 'string') {
           isActive = indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration;
         } else {
-          isActive = scope.legacy;
+          const originalFilename = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
+          isActive = scope.legacy
+            && document.id === logicalId
+            && document.metadata.tenantId === scope.tenantId
+            && document.metadata.checksum === scope.checksum
+            && originalFilename === scope.filename;
         }
         if (isActive) {
           ids.push(document.id);
@@ -267,18 +308,45 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     return filenameMatches.length ? [...new Set(filenameMatches)] : ids;
   }
 
-  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string) {
+  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string, authorizedIndexIds: Set<string>) {
     const active = await this.activeVersionScopes(tenantId);
     return chunks.flatMap(hit => {
-      const id = typeof hit.metadata.documentId === 'string' ? hit.metadata.documentId : hit.document.id.split('::')[0]!;
+      // Keep a second check against the IDs authorized before TypeGraph
+      // ranking. SDK 0.6 returns custom metadata on list(), but search hits
+      // project only basic metadata; version identity lives in the ID.
+      if (!authorizedIndexIds.has(hit.document.id)) return [];
+      const identity = this.indexIdentity(hit.document.id, hit.metadata);
+      if (!identity) return [];
+      const { id, versionId, generation } = identity;
       const state = active.get(id);
       if (!state || !state.versionId) return [];
-      const versionId = hit.metadata.documentVersionId;
-      if (typeof versionId === 'string') {
-        return state.versionId === versionId && Number(hit.metadata.indexGeneration ?? 1) === state.activeGeneration ? [hit] : [];
+      if (versionId) {
+        return state.versionId === versionId && generation === state.activeGeneration
+          ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: versionId, indexGeneration: generation } }]
+          : [];
       }
-      return state.legacy ? [{ ...hit, metadata: { ...hit.metadata, documentVersionId: state.versionId } }] : [];
+      return state.legacy && hit.document.id === id
+        ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: state.versionId, indexGeneration: state.activeGeneration } }]
+        : [];
     });
+  }
+
+  private indexIdentity(indexId: string, metadata: Record<string, unknown>) {
+    const parts = indexId.split('::');
+    const idFromIndex = parts[0];
+    const idFromMetadata = typeof metadata.documentId === 'string' ? metadata.documentId : undefined;
+    if (!idFromIndex || (idFromMetadata && idFromMetadata !== idFromIndex)) return undefined;
+    const versionFromIndex = parts.length >= 4 && /^g\d+$/.test(parts[2]!) ? parts[1] : undefined;
+    const generationFromIndex = versionFromIndex ? Number(parts[2]!.slice(1)) : undefined;
+    const versionFromMetadata = typeof metadata.documentVersionId === 'string' ? metadata.documentVersionId : undefined;
+    const generationFromMetadata = Number.isInteger(metadata.indexGeneration) ? Number(metadata.indexGeneration) : undefined;
+    if (versionFromIndex && versionFromMetadata && versionFromIndex !== versionFromMetadata) return undefined;
+    if (generationFromIndex !== undefined && generationFromMetadata !== undefined && generationFromIndex !== generationFromMetadata) return undefined;
+    return {
+      id: idFromMetadata ?? idFromIndex,
+      versionId: versionFromMetadata ?? versionFromIndex,
+      generation: generationFromMetadata ?? generationFromIndex,
+    };
   }
 
   private toSearchHit(hit: QueryChunkResult): DocumentSearchHit {

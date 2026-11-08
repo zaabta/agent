@@ -50,6 +50,7 @@ const finalSchema = z.object({
   citationValidation: z.enum(['valid', 'no-evidence', 'fallback']),
   outcome: z.enum(['success', 'empty', 'clarification', 'failure']),
   requestId: z.string(),
+  timing: z.object({ planningMs: z.number(), evidenceMs: z.number(), finalizationMs: z.number(), toolExecutionMs: z.number(), retrievalMs: z.number(), typegraphRetrievalMs: z.number(), citationVerificationMs: z.number(), llmCalls: z.number(), providerRetries: z.number(), providerErrors: z.number() }),
 });
 type Plan = z.infer<typeof planSchema>;
 type PublicTool = { inputSchema?: { parse: (input: unknown) => unknown }; execute: (input: any, context: any) => Promise<unknown> };
@@ -132,6 +133,13 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
   const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId, 0);
   const requestId = randomUUID();
   const stepDurations: Record<string, number> = {};
+  let llmCalls = 0;
+  let providerRetries = 0;
+  let providerErrors = 0;
+  let retrievalMs = 0;
+  let typegraphRetrievalMs = 0;
+  let toolExecutionMs = 0;
+  let citationVerificationMs = 0;
   const planner = new Agent({
     id: `sitepilot-planner-${requestId}`,
     name: 'SitePilot constrained planner',
@@ -149,7 +157,10 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
   });
   const retryPlanner = new Proxy(planner, {
     get(target, property, receiver) {
-      if (property === 'generate') return (...args: any[]) => withProviderRetry(() => (target.generate as any)(...args), { signal: abortSignal });
+      if (property === 'generate') return (...args: any[]) => withProviderRetry(() => {
+        llmCalls++;
+        return (target.generate as any)(...args);
+      }, { signal: abortSignal, onRetry: async () => { providerRetries++; } });
       return Reflect.get(target, property, receiver);
     },
   });
@@ -199,8 +210,15 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         const stage = key === 'documentSearch' ? 'searching' : key === 'datasetDiscovery' ? 'discovering' : 'executing';
         await progress(stage, 'in_progress', key === 'documentSearch' ? 'Searching authorized documents' : key === 'datasetDiscovery' ? 'Checking available workspace data' : 'Running a workspace lookup', key);
         try {
+          if (abortSignal?.aborted) throw abortSignal.reason ?? new Error('AGENT_RUN_CANCELLED');
           const input = tool.inputSchema?.parse(args) ?? args;
+          const toolStartedAt = performance.now();
           const result = await tool.execute(input, { abortSignal });
+          if (abortSignal?.aborted) throw abortSignal.reason ?? new Error('AGENT_RUN_CANCELLED');
+          const toolDurationMs = Math.round(performance.now() - toolStartedAt);
+          toolExecutionMs += toolDurationMs;
+          if (key === 'documentSearch') typegraphRetrievalMs += toolDurationMs;
+          if (key === 'documentSearch' || key.startsWith('structured')) retrievalMs += toolDurationMs;
           toolResults.push({ name: key, result });
           toolNames.push(key);
           await progress(stage, 'completed', key === 'documentSearch' ? 'Document search completed' : key === 'datasetDiscovery' ? 'Workspace data is ready' : 'Workspace lookup completed', key);
@@ -226,6 +244,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
               if (sufficientlyRanked(retry.hits ?? []).length) output = retry;
             }
           } catch {
+            if (abortSignal?.aborted) throw abortSignal.reason ?? new Error('AGENT_RUN_CANCELLED');
             // Keep the original authorized retrieval result when query rewriting fails.
           }
         }
@@ -241,14 +260,18 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         const citationSchema = z.object({ answer: z.string(), evidenceSufficient: z.boolean(), evidenceIds: z.array(z.enum(evidenceIds)) });
         const evidenceText = evidence.map(item => `${item.id}: ${item.hit.content}`).join('\n\n');
         try {
-          const generateWithoutTools = (messages: any, options: any) => withProviderRetry(
-            () => agent.generate(messages, { ...options, maxRetries: 0 }),
-            { signal: abortSignal },
-          );
+          const generateWithoutTools = (messages: any, options: any) => {
+            const validationStartedAt = performance.now();
+            return withProviderRetry(
+              () => { llmCalls++; return agent.generate(messages, { ...options, maxRetries: 0 }); },
+              { signal: abortSignal, onRetry: async () => { providerRetries++; } },
+            ).finally(() => { citationVerificationMs += Math.round(performance.now() - validationStartedAt); });
+          };
           await progress('composing', 'in_progress', 'Writing an answer from the retrieved evidence');
           const prompt = `Answer in the user's language using only facts supported by the supplied excerpts. Do not include citations or evidence labels; the server will attach verified citations after validation. If the excerpts do not answer the question, briefly say so without adding unsupported facts.\nQuestion: ${inputData.message}\nEvidence:\n${evidenceText}`;
           const tracingOptions = { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } };
           const draft = await withProviderRetry(async () => {
+            llmCalls++;
             const answerStream = await agent.stream([{ role: 'user', content: prompt }], { maxSteps: 1, toolChoice: 'none', abortSignal, tracingOptions });
             let streamedDraft = '';
             for await (const chunk of answerStream.fullStream) {
@@ -263,6 +286,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           }, {
             signal: abortSignal,
             onRetry: async () => {
+              providerRetries++;
               await callbacks.onTextReset?.();
               await progress('composing', 'in_progress', 'Retrying the answer generation');
             },
@@ -291,6 +315,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           if (sourceRefs.length !== parsed.data.evidenceIds.length) return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'unknown' as const };
           return { answer: `${parsed.data.answer.trim()}\n\nSources: ${sourceRefs.map(ref => `[[${ref}]]`).join(' ')}`, outcome: 'success' as const, citationFailure: undefined };
         } catch (error) {
+          if (abortSignal?.aborted) throw abortSignal.reason ?? error;
           if (safeProviderFailure(error)) throw error;
           return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
         }
@@ -505,7 +530,8 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           }
         }
       } catch (error) {
-        if (safeProviderFailure(error)) throw error;
+        if (abortSignal?.aborted) throw abortSignal.reason ?? error;
+        if (safeProviderFailure(error)) { providerErrors++; throw error; }
         answer = 'The authorized evidence operation failed before a result could be validated.';
         outcome = 'failure';
         traceFailure(requestId, principal.tenantId, { step: 'evidence', code: error instanceof Error ? error.name : 'UNKNOWN', operation: plan.operation, tools: toolNames });
@@ -529,7 +555,8 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       if (hasSemanticHits && (invalid || sources.length > 0 && citations.length === 0)) {
         const citationFailure = citations.length === 0 ? 'missing' : citations.some(ref => sources.some(source => source.sourceRef.normalize('NFC').trim().replace(/\s+/g, ' ') === ref.normalize('NFC').trim().replace(/\s+/g, ' '))) ? 'normalization' : 'unknown';
         traceFailure(requestId, principal.tenantId, { stage: 'citation-validation', code: citationFailure, sourceRefs: sources.map(source => source.sourceRef), citationCount: citations.length, tools: inputData.toolNames });
-        return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', sources: [], toolsCalled: inputData.toolNames, citationValidation: 'fallback' as const, outcome: 'failure' as const, requestId };
+        return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', sources: [], toolsCalled: inputData.toolNames, citationValidation: 'fallback' as const, outcome: 'failure' as const, requestId,
+          timing: { planningMs: stepDurations.planningMs ?? 0, evidenceMs: stepDurations.evidenceMs ?? 0, finalizationMs: Math.round(performance.now() - startedAt), toolExecutionMs, retrievalMs, typegraphRetrievalMs, citationVerificationMs, llmCalls, providerRetries, providerErrors } };
       }
       const structured = inputData.toolResults.some(item => ['structuredDataAnalytics', 'structuredRowLookup'].includes(item.name));
       const attached = structured ? sources : sources.filter(source => citations.includes(source.sourceRef));
@@ -543,9 +570,11 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
         step: 'finalization',
         stepDurations: { ...stepDurations, finalizationMs: Math.round(performance.now() - startedAt) },
       });
+      const finalizationMs = Math.round(performance.now() - startedAt);
       return { answer: inputData.answer, sources: attached, toolsCalled: inputData.toolNames,
         citationValidation: sources.length === 0 && evidenceExpected && inputData.outcome === 'empty' ? 'no-evidence' as const : 'valid' as const,
-        outcome: inputData.outcome, requestId };
+        outcome: inputData.outcome, requestId,
+        timing: { planningMs: stepDurations.planningMs ?? 0, evidenceMs: stepDurations.evidenceMs ?? 0, finalizationMs, toolExecutionMs, retrievalMs, typegraphRetrievalMs, citationVerificationMs, llmCalls, providerRetries, providerErrors } };
     },
   });
   const workflow = createWorkflow({ id: `sitepilot-answer-${requestId}`, description: 'Plan a tenant authorized evidence operation, execute existing tools, and validate its evidence before responding.', inputSchema, outputSchema: finalSchema })

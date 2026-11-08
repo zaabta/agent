@@ -108,7 +108,30 @@ export async function withProviderRetry<T>(
       const jittered = Math.round(exponential * (0.5 + Math.max(0, Math.min(1, random()))));
       const delay = safe.retryAfterMs === undefined ? jittered : Math.max(jittered, safe.retryAfterMs);
       await options.onRetry?.(safe);
-      await sleep(Math.min(delay, 60_000));
+      const boundedDelay = Math.min(delay, 60_000);
+      if (!options.signal) await sleep(boundedDelay);
+      else if (options.sleep) {
+        if (options.signal.aborted) throw options.signal.reason ?? new Error('REQUEST_ABORTED');
+        let onAbort: (() => void) | undefined;
+        try {
+          await Promise.race([
+            sleep(boundedDelay),
+            new Promise<never>((_, reject) => {
+              onAbort = () => reject(options.signal!.reason ?? new Error('REQUEST_ABORTED'));
+              options.signal!.addEventListener('abort', onAbort, { once: true });
+            }),
+          ]);
+        } finally {
+          if (onAbort) options.signal.removeEventListener('abort', onAbort);
+        }
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          if (options.signal!.aborted) { reject(options.signal!.reason ?? new Error('REQUEST_ABORTED')); return; }
+          const timer = setTimeout(() => { options.signal!.removeEventListener('abort', onAbort); resolve(); }, boundedDelay);
+          const onAbort = () => { clearTimeout(timer); options.signal!.removeEventListener('abort', onAbort); reject(options.signal!.reason ?? new Error('REQUEST_ABORTED')); };
+          options.signal!.addEventListener('abort', onAbort, { once: true });
+        });
+      }
     }
   }
 }

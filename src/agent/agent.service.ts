@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { TypegraphService } from '../typegraph/typegraph.service.js';
@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { createAgentWorkflow } from './agent.workflow.js';
 import { recordWorkflowDiagnostic } from '../mastra/observability.js';
 import { safeProviderFailure } from './provider-errors.js';
+import { ActiveAgentRunRegistry, AgentRunCancelledError } from './active-run-registry.js';
 
 export interface VerifiedSource {
   documentId: string;
@@ -164,9 +165,10 @@ function withStructuredEvidence(prompt: AgentMessage[], question: string, result
 }
 
 @Injectable()
-export class AgentService {
+export class AgentService implements OnModuleDestroy {
   private readonly typegraph: TypegraphService;
   private readonly structuredData: StructuredDataService;
+  private readonly activeRuns = new ActiveAgentRunRegistry();
   constructor(
     @Inject(TypegraphService) typegraph: TypegraphService,
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -174,6 +176,10 @@ export class AgentService {
   ) {
     this.typegraph = typegraph;
     this.structuredData = structuredData;
+  }
+
+  async onModuleDestroy() {
+    await this.activeRuns.shutdown();
   }
 
   private trace(event: string, detail: Record<string, unknown>) {
@@ -358,7 +364,10 @@ export class AgentService {
 
   async listConversations(principal: AuthPrincipal, limit = 50) {
     const conversations = await this.prisma.conversation.findMany({
-      where: { tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      // Conversations are private to a user identity, not partitioned by the
+      // company document workspace. This also preserves histories created
+      // before an account was added to the canonical company workspace.
+      where: { ownerId: principal.userId, deletedAt: null },
       orderBy: { updatedAt: 'desc' },
       take: Math.max(1, Math.min(100, Math.trunc(limit))),
       select: { id: true, title: true, createdAt: true, updatedAt: true },
@@ -377,7 +386,6 @@ export class AgentService {
     const conversation = await this.prisma.conversation.findFirst({
       where: {
         id: conversationId,
-        tenantId: principal.tenantId,
         ownerId: principal.userId,
         deletedAt: null,
       },
@@ -396,7 +404,7 @@ export class AgentService {
 
   async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {
     const result = await this.prisma.conversation.updateMany({
-      where: { id: conversationId, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      where: { id: conversationId, ownerId: principal.userId, deletedAt: null },
       data: { title, updatedAt: new Date() },
     });
     if (!result.count) throw new NotFoundException('CONVERSATION_NOT_FOUND');
@@ -406,7 +414,7 @@ export class AgentService {
   async deleteConversation(conversationId: string, principal: AuthPrincipal) {
     const deletedAt = new Date();
     const result = await this.prisma.conversation.updateMany({
-      where: { id: conversationId, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+      where: { id: conversationId, ownerId: principal.userId, deletedAt: null },
       data: { deletedAt, updatedAt: deletedAt },
     });
     if (!result.count) throw new NotFoundException('CONVERSATION_NOT_FOUND');
@@ -590,10 +598,52 @@ export class AgentService {
     write: EventWriter,
     principal: AuthPrincipal,
   ): Promise<AgentStreamResult> {
-    if (config.agentOrchestration === 'workflow') return this.streamWorkflow(message, conversationId, abortSignal, write, principal);
+    const run = this.activeRuns.create(principal);
+    const runSignal = AbortSignal.any([abortSignal, run.controller.signal]);
+    const runWriter: EventWriter = (event, data) => write(event, event === 'status' ? { ...data, runId: run.runId } : data);
+    try {
+      const result = config.agentOrchestration === 'workflow'
+        ? await this.streamWorkflow(message, conversationId, runSignal, runWriter, principal, run.runId)
+        : await this.streamLegacy(message, conversationId, runSignal, runWriter, principal, run.runId);
+      this.activeRuns.finish(run.runId, 'completed');
+      return result;
+    } catch (error) {
+      if (run.cancelRequested) {
+        this.activeRuns.finish(run.runId, 'cancelled');
+        throw new AgentRunCancelledError(run.runId, Math.max(0, Date.now() - (run.cancelRequestedAtMs ?? Date.now())));
+      }
+      this.activeRuns.finish(run.runId, 'failed');
+      throw error;
+    }
+  }
+
+  async cancelRun(runId: string, principal: AuthPrincipal) {
+    const requestStartedAt = Date.now();
+    const run = this.activeRuns.getOwned(runId, principal);
+    if (!run || !run.conversationId) throw new NotFoundException('AGENT_RUN_NOT_FOUND');
+    // Recheck private conversation ownership in persistent state. The API guard
+    // has already revalidated the JWT, workspace membership, and user status.
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: run.conversationId, ownerId: principal.userId },
+      select: { id: true },
+    });
+    if (!conversation) throw new NotFoundException('AGENT_RUN_NOT_FOUND');
+    const result = await this.activeRuns.cancel(run);
+    return { ...result, ackLatencyMs: Math.max(result.ackLatencyMs, Date.now() - requestStartedAt) };
+  }
+
+  private async streamLegacy(
+    message: string,
+    conversationId: string | undefined,
+    abortSignal: AbortSignal,
+    write: EventWriter,
+    principal: AuthPrincipal,
+    runId: string,
+  ): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
+    this.activeRuns.bindConversation(runId, turn.conversationId);
     let currentStage = 'thinking';
     const emit: EventWriter = async (event, data) => {
       const nextStage = event === 'tool-start'
@@ -613,6 +663,7 @@ export class AgentService {
       const listing = await this.typegraph.listDocuments(principal.tenantId, principal.userId);
       const documents = listing.documents as Array<{ id?: string; name?: string }>;
       const answer = documents.length ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}` : 'There are no indexed documents in your workspace.';
+      this.activeRuns.beginFinalization(runId, abortSignal);
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer);
       await emit('tool-finish', { toolName: 'listDocuments', durationMs: listing.durationMs, sourceCount: 0 });
       await emit('text-delta', { text: answer, verification: 'verified' });
@@ -986,6 +1037,7 @@ export class AgentService {
       result.sources = [];
       result.citationValidation = 'no-evidence';
     }
+    this.activeRuns.beginFinalization(runId, abortSignal);
     await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer);
 
     const totalMs = Math.round(performance.now() - startedAt);
@@ -1023,25 +1075,32 @@ export class AgentService {
     }
   }
 
-  private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal): Promise<AgentStreamResult> {
+  private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal, runId: string): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
+    this.activeRuns.bindConversation(runId, turn.conversationId);
     await write('status', { status: 'started', orchestration: 'workflow', conversationId: turn.conversationId, turnId: turn.assistantMessageId });
+    const timeToFirstStatusMs = Math.round(performance.now() - startedAt);
     let streamedAnswer = false;
-    let provisionalAnswer = '';
+    let timeToFirstTextMs: number | null = null;
     const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal, {
       onProgress: async progress => {
         await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, progress.stage);
         await write('stage', { ...progress });
+        if (progress.status === 'in_progress' && progress.toolName) {
+          // Tool names are public identifiers; tool arguments/results stay server-side.
+          await write('tool-start', { toolName: progress.toolName });
+        } else if (progress.status === 'completed' && progress.toolName) {
+          await write('tool-finish', { toolName: progress.toolName, status: 'completed' });
+        }
       },
       onTextDelta: async text => {
+        if (timeToFirstTextMs === null) timeToFirstTextMs = Math.round(performance.now() - startedAt);
         streamedAnswer = true;
-        provisionalAnswer += text;
         await write('text-delta', { text, verification: 'provisional' });
       },
       onTextReset: async () => {
         streamedAnswer = false;
-        provisionalAnswer = '';
         await write('text-reset', { reason: 'provider-retry' });
       },
     });
@@ -1050,21 +1109,42 @@ export class AgentService {
     try {
       const run = await workflow.createRun();
       abort = () => { void run.cancel().catch(() => undefined); };
-      abortSignal.addEventListener('abort', abort, { once: true });
+      if (abortSignal.aborted) abort();
+      else abortSignal.addEventListener('abort', abort, { once: true });
       const execution = await run.start({ inputData: { message } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string };
+      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; providerRetries: number; providerErrors: number } };
+      this.activeRuns.beginFinalization(runId, abortSignal);
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
-      for (const toolName of final.toolsCalled) await write('tool-finish', { toolName, status: 'validated' });
-      if (!streamedAnswer) await write('text-delta', { text: final.answer, verification: 'verified' });
+      // The streamed model draft is provisional. Citation validation may rewrite it
+      // or append server-verified citations, so replace it atomically with the
+      // persisted answer to prevent duplicate or unverified text in the client.
+      if (streamedAnswer) await write('text-reset', { reason: 'citation-verification' });
+      await write('text-delta', { text: final.answer, verification: 'verified' });
       await write('stage', { stage: 'completed', status: 'completed', message: 'Answer is ready' });
-      const timing = { totalMs: Math.round(performance.now() - startedAt), llmCalls: null, orchestration: 1 };
+      const timing = {
+        timeToFirstStatusMs,
+        timeToFirstTextMs,
+        totalMs: Math.round(performance.now() - startedAt),
+        llmCalls: final.timing.llmCalls,
+        plannerMs: final.timing.planningMs,
+        toolExecutionMs: final.timing.toolExecutionMs,
+        retrievalMs: final.timing.retrievalMs,
+        typegraphRetrievalMs: final.timing.typegraphRetrievalMs,
+        citationVerificationMs: final.timing.citationVerificationMs,
+        evidenceMs: final.timing.evidenceMs,
+        finalizationMs: final.timing.finalizationMs,
+        providerRetries: final.timing.providerRetries,
+        providerErrors: final.timing.providerErrors,
+        tokensPerSecond: null,
+        orchestration: 1,
+      };
       const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, timing };
-      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: streamedAnswer && provisionalAnswer !== final.answer, finishObserved: true, telemetry: timing });
+      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
       return result;
     } catch (error) {
       const provider = safeProviderFailure(error);
@@ -1081,7 +1161,6 @@ export class AgentService {
       ? await this.prisma.conversation.findFirst({
           where: {
             id: conversationId,
-            tenantId: principal.tenantId,
             ownerId: principal.userId,
             deletedAt: null,
           },

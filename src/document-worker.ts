@@ -1,6 +1,11 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { DocumentWorkerModule } from './documents/document-worker.module.js';
+import { config } from './config.js';
+
+if (!config.companyWorkspaceId) {
+  throw new Error('COMPANY_WORKSPACE_ID must identify the existing shared company workspace');
+}
 
 NestFactory.createApplicationContext(DocumentWorkerModule, { logger: ['error', 'warn', 'log'] })
   .then(context => {

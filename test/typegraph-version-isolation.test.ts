@@ -36,20 +36,20 @@ test('TypeGraph search filters active versions before ranking and fails closed o
     indexedDocument(`${documentId}::${versionTwo}::g1::chunk`, documentId, 'stale generation', { documentVersionId: versionTwo, indexGeneration: 1 }),
     indexedDocument(`${documentId}::${versionTwo}::g2::chunk`, documentId, 'F-4 2600 x 4400 mm', { documentVersionId: versionTwo, indexGeneration: 2 }),
     indexedDocument(documentId, documentId, 'unversioned but superseded'),
-    indexedDocument(legacyDocumentId, legacyDocumentId, 'legacy active content'),
+    indexedDocument(legacyDocumentId, legacyDocumentId, 'legacy active content', { tenantId: tenant, checksum: 'legacy-checksum', originalFilename: 'legacy.txt' }),
     indexedDocument('doc-other-tenant::other-version::g1::chunk', 'doc-other-tenant', 'another tenant secret', { documentVersionId: 'other-version', indexGeneration: 1 }),
   ];
   const prisma: any = {
     appDocument: {
       findMany: async ({ where }: any) => where.tenantId === tenant ? [
-        { id: documentId, activeVersionId: versionTwo },
-        { id: legacyDocumentId, activeVersionId: legacyVersion },
+        { id: documentId, activeVersionId: versionTwo, tenantId: tenant, filename: 'current.txt', checksum: 'current-checksum' },
+        { id: legacyDocumentId, activeVersionId: legacyVersion, tenantId: tenant, filename: 'legacy.txt', checksum: 'legacy-checksum' },
       ] : [],
     },
     appDocumentVersion: {
       findMany: async ({ where }: any) => [
-        { id: versionTwo, chunkingStrategy: 'structure-aware', activeIndexGeneration: 2 },
-        { id: legacyVersion, chunkingStrategy: 'legacy', activeIndexGeneration: null },
+        { id: versionTwo, documentId, tenantId: tenant, filename: 'current.txt', checksum: 'current-checksum', chunkingStrategy: 'structure-aware', activeIndexGeneration: 2 },
+        { id: legacyVersion, documentId: legacyDocumentId, tenantId: tenant, filename: 'legacy.txt', checksum: 'legacy-checksum', chunkingStrategy: 'legacy', activeIndexGeneration: null },
       ].filter(version => where.id.in.includes(version.id) && where.tenantId === tenant),
     },
   };
@@ -81,6 +81,105 @@ test('TypeGraph search filters active versions before ranking and fails closed o
   assert.deepEqual(response.hits.map(hit => hit.citation.documentVersionId), [versionTwo, legacyVersion]);
   assert.deepEqual(response.hits.map(hit => hit.content), ['F-4 2600 x 4400 mm', 'legacy active content']);
   assert.ok(response.hits.every(hit => hit.citation.documentId !== 'doc-other-tenant'));
+});
+
+test('completed legacy data recovers only when the unversioned index proves tenant, filename, and checksum identity', async () => {
+  const legacyId = 'doc-vcfo-legacy';
+  const recoveredVersionId = 'version-vcfo-legacy';
+  const filename = 'VCFO-AI.xlsx';
+  const checksum = 'same-content-checksum';
+  const doc = { id: legacyId, tenantId: tenant, filename, checksum, status: 'ready', stage: 'completed', progress: 100, completedAt: new Date(), jobId: 'completed-job', activeVersionId: null, cancelRequested: false, deleteRequested: false };
+  const version = { id: recoveredVersionId, documentId: legacyId, tenantId: tenant, versionNumber: 1, filename, checksum, status: 'queued', jobId: doc.jobId, chunkingStrategy: null, indexGeneration: 1, activeIndexGeneration: null };
+  let searchCalled = false;
+  const client: any = {
+    document: { list: async () => [{ id: legacyId, name: filename, metadata: { documentId: legacyId, tenantId: tenant, checksum, originalFilename: filename } }] },
+    search: async (_query: string, options: Record<string, any>) => {
+      searchCalled = true;
+      assert.deepEqual(options.documentFilter.documentIds, [legacyId]);
+      // TypeGraph SDK search hits do not include custom document metadata.
+      return { results: { chunks: [{ ...result(legacyId, legacyId, 'VCFO AI finance overview'), metadata: { name: filename, updatedAt: new Date() } }] } };
+    },
+  };
+  const prisma: any = {
+    appDocument: { findMany: async () => [doc] },
+    appDocumentVersion: { findMany: async ({ where }: any) => where.versionNumber === 1 ? [version] : [] },
+  };
+  const service = new TypegraphService({ measure: async (operation: () => Promise<unknown>) => ({ result: await operation(), embeddingMs: 0 }) } as any, prisma);
+  (service as any).clientFor = async () => client;
+
+  const response = await service.searchDocuments('VCFO AI', 8, tenant);
+
+  assert.equal(searchCalled, true);
+  assert.equal(response.hits.length, 1);
+  assert.equal(response.hits[0]?.content, 'VCFO AI finance overview');
+  assert.equal(response.hits[0]?.citation.documentVersionId, recoveredVersionId);
+});
+
+test('legacy index entries with a wrong tenant or checksum are excluded before search', async () => {
+  const legacyId = 'doc-legacy-guard';
+  const versionId = 'version-legacy-guard';
+  const doc = { id: legacyId, tenantId: tenant, filename: 'guarded.txt', checksum: 'current-checksum', status: 'ready', activeVersionId: versionId };
+  const version = { id: versionId, documentId: legacyId, tenantId: tenant, filename: doc.filename, checksum: doc.checksum, versionNumber: 1, chunkingStrategy: 'legacy', activeIndexGeneration: null };
+  const prisma: any = {
+    appDocument: { findMany: async () => [doc] },
+    appDocumentVersion: { findMany: async () => [version] },
+  };
+  const client: any = {
+    document: { list: async () => [
+      { id: legacyId, name: doc.filename, metadata: { documentId: legacyId, tenantId: 'tenant-other', checksum: 'old-checksum', originalFilename: doc.filename } },
+    ] },
+    search: async () => { assert.fail('Search must not run without an authorized legacy index candidate'); },
+  };
+  const service = new TypegraphService({ measure: async (operation: () => Promise<unknown>) => ({ result: await operation(), embeddingMs: 0 }) } as any, prisma);
+  (service as any).clientFor = async () => client;
+
+  const response = await service.searchDocuments('guarded file', 8, tenant);
+
+  assert.deepEqual(response.hits, []);
+  assert.equal(response.timing.embeddingMs, 0);
+});
+
+test('version identity survives SDK metadata projection and publication restore switches the authorized ID set', async () => {
+  const versionOneId = 'version-one';
+  const versionTwoId = 'version-two';
+  let activeVersionId = versionTwoId;
+  let activeGeneration = 2;
+  const doc = { id: documentId, tenantId: tenant, filename: 'conflicting-values.pdf', checksum: 'current-checksum', status: 'ready', activeVersionId };
+  const versions = [
+    { id: versionOneId, documentId, tenantId: tenant, filename: 'conflicting-values.pdf', checksum: 'v1-checksum', versionNumber: 1, chunkingStrategy: 'structure-aware', indexGeneration: 1, activeIndexGeneration: 1 },
+    { id: versionTwoId, documentId, tenantId: tenant, filename: 'conflicting-values.pdf', checksum: 'v2-checksum', versionNumber: 2, chunkingStrategy: 'structure-aware', indexGeneration: 1, activeIndexGeneration: 2 },
+  ];
+  const indexRows = versions.map(version => ({
+    id: `${documentId}::${version.id}::g${version.activeIndexGeneration}::chunk`,
+    name: 'conflicting-values.pdf',
+    metadata: { documentId, documentVersionId: version.id, indexGeneration: version.activeIndexGeneration, tenantId: tenant },
+  }));
+  const prisma: any = {
+    appDocument: { findMany: async () => [{ ...doc, activeVersionId }] },
+    appDocumentVersion: { findMany: async ({ where }: any) => versions.filter(version => where.id.in.includes(version.id)) },
+  };
+  const client: any = {
+    document: { list: async () => indexRows },
+    search: async () => ({ results: { chunks: indexRows.map((row, index) => {
+      const hit: any = result(row.id, documentId, index === 0 ? 'Version 1 content' : 'Version 2 content');
+      hit.metadata = { name: row.name, updatedAt: new Date() };
+      return hit;
+    }) } }),
+  };
+  const service = new TypegraphService({ measure: async (operation: () => Promise<unknown>) => ({ result: await operation(), embeddingMs: 0 }) } as any, prisma);
+  (service as any).clientFor = async () => client;
+
+  const publishedV2 = await service.searchDocuments('F-4 value', 8, tenant);
+  assert.deepEqual(publishedV2.hits.map(hit => hit.content), ['Version 2 content']);
+  assert.deepEqual(publishedV2.hits.map(hit => hit.citation.documentVersionId), [versionTwoId]);
+
+  activeVersionId = versionOneId;
+  activeGeneration = 1;
+  doc.activeVersionId = versionOneId;
+  versions[0]!.activeIndexGeneration = activeGeneration;
+  const restoredV1 = await service.searchDocuments('F-4 value', 8, tenant);
+  assert.deepEqual(restoredV1.hits.map(hit => hit.content), ['Version 1 content']);
+  assert.deepEqual(restoredV1.hits.map(hit => hit.citation.documentVersionId), [versionOneId]);
 });
 
 test('an exact filename in a content question narrows retrieval to that active document', async () => {
