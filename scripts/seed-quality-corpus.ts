@@ -12,6 +12,7 @@ const uploads: any[] = [];
 await mkdir('docs/audit', { recursive: true });
 for (const document of await qualityDocuments()) {
   const started = performance.now();
+  console.log(JSON.stringify({ filename: document.filename, stage: 'uploading' }));
   const form = new FormData();
   form.append('file', new Blob([new Uint8Array(document.buffer)]), document.filename);
   const response = await request('/api/documents/upload', { method: 'POST', body: form, signal: AbortSignal.timeout(30000) });

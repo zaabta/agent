@@ -99,6 +99,18 @@ export class DocumentsService implements OnModuleInit {
     };
   }
 
+  private async recoverQueuedUpload(documentId: string, tenantId: string, userId?: string, versionId?: string) {
+    // SQL commit and Redis enqueue are separate. Re-uploading the same file can
+    // safely restore an absent queued job using BullMQ's existing stable job ID.
+    // Never restart processing, completed, failed or cancelled versions here.
+    const version = await this.prisma.appDocumentVersion.findFirst({
+      where: { documentId, tenantId, ...(versionId ? { id: versionId } : {}), status: 'queued', cancelRequested: false, document: { cancelRequested: false, deleteRequested: false } },
+      orderBy: { versionNumber: 'desc' },
+    });
+    if (!version?.jobId || !version.storageKey || !version.checksum || await this.queue.queue.getJob(version.jobId)) return;
+    await this.queue.enqueue({ documentId, versionId: version.id, tenantId, userId, storageKey: version.storageKey, filename: version.filename, checksum: version.checksum, fileSize: Number(version.fileSize) }, version.jobId);
+  }
+
   async upload(file: { filename: string; originalName: string; mimetype: string; size: number; path: string }, tenantId = config.tenantId, userId?: string, existingDocumentId?: string, replacementReason?: string): Promise<{ document: Awaited<ReturnType<DocumentsService['get']>>; duplicate: boolean; version?: unknown }> {
     const uploadReceivedAt = new Date();
     const validationStartedAt = new Date();
@@ -130,17 +142,20 @@ export class DocumentsService implements OnModuleInit {
     const duplicateVersion = existingDocumentId ? await this.prisma.appDocumentVersion.findFirst({ where: { documentId: existingDocumentId, checksum } }) : null;
     if (duplicateVersion) {
       await this.storage.cleanup(file.filename);
+      await this.recoverQueuedUpload(existingDocumentId!, tenantId, userId, duplicateVersion.id);
       return { document: await this.get(existingDocumentId!, tenantId), duplicate: true, version: this.safeVersion(duplicateVersion) };
     }
     const existing = existingDocumentId ? null : await this.prisma.appDocument.findFirst({ where: { tenantId, checksum } });
     if (existing) {
       await this.storage.cleanup(file.filename);
+      await this.recoverQueuedUpload(existing.id, tenantId, userId);
       return { document: await this.get(existing.id, tenantId), duplicate: true };
     }
     if (!existingDocumentId) {
       const existingVersion = await this.prisma.appDocumentVersion.findFirst({ where: { tenantId, checksum } });
       if (existingVersion) {
         await this.storage.cleanup(file.filename);
+        await this.recoverQueuedUpload(existingVersion.documentId, tenantId, userId, existingVersion.id);
         return { document: await this.get(existingVersion.documentId, tenantId), duplicate: true, version: this.safeVersion(existingVersion) };
       }
     }

@@ -4,6 +4,7 @@
     "scripts/evaluate-agent.ts",
     "scripts/compare-workflow.ts",
     "scripts/seed-quality-corpus.ts",
-    "scripts/live-audit.ts"
+    "scripts/live-audit.ts",
+    "scripts/evaluate-ollama-fixtures.ts"
   ]
 }

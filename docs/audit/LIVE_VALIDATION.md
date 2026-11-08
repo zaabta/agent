@@ -86,7 +86,21 @@ The earlier final 33-case run was lost when the ephemeral environment ended. Onl
 - A verified `evidenceSufficient=false` response with no evidence IDs now remains a `no-evidence` refusal even when retrieval returned irrelevant candidate passages. Unknown or invalid references still fail validation. A real Mastra workflow regression verifies the Arabic refusal and empty source list.
 - The long-running quality and upload harness can use `AGENT_E2E_REFRESH_COOKIE` (the test login cookie pair, passed privately via environment) to rotate an expired bearer token through the existing `/api/auth/refresh` API and retry once. No credential is written to reports. This fixes the harness, not the application authentication design. Without the cookie a 401 remains a visible failure.
 - The live SSE reader preserves UTF-8 decoder state across byte chunks. Quality records include available timing/usage fields and require Arabic text for Arabic cases; Turkish language and semantic entailment still require human review.
-- Resumed broad checks: 75 passed, 0 failed, 15 skipped (90 total); source and audit-script typechecks and Prisma validation passed.
+- Resumed broad checks: 76 passed, 0 failed, 15 skipped (91 total); source and audit-script typechecks and Prisma validation passed.
 
 - Conversation inserts share a transaction timestamp. Descending message queries now order tied assistant/user roles before UUID, preserving user-before-assistant order when the bounded page is reversed. A regression deliberately uses UUID order opposed to dialogue order. Message pagination uses the same stable ordering.
 - The audit Compose stack sets `API_HOST=0.0.0.0` inside its container; the application default remains loopback. This corrects an unreachable published container port. Docker itself is still untested here. In this managed environment the `tsx` CLI could not open its IPC pipe; `node --import tsx src/scripts/deploy-typegraph.ts` executed the same TypeGraph deployment successfully.
+
+## Redis-loss reproduction during resumed setup
+
+The disposable Redis process initially ran without persistence while the test PGlite database retained job rows. After stopping all prior workers, a stored document version was `processing` but its Redis job was `missing` (`orphaned-queue-before-recovery.json`). Repeated upload returned the same unfinished job. This is a PostgreSQL/Redis consistency gap, not evidence of lost document bytes or conversation data.
+
+Duplicate upload now restores a missing **queued** version job using its original stable BullMQ identity and retained storage metadata. It retains authorization and cancellation/deletion checks and does not automatically restart processing, completed, cancelled or failed versions. A regression covers missing/existing jobs, tenant mismatch and terminal/cancelled/deleted states. Already-processing orphan recovery remains an operator task requiring proof that the prior worker stopped; it is not claimed solved by this bounded change.
+
+For the disposable reproduction only, the driver re-added the interrupted processing job after all previous workers had been terminated. Real Nomic `/api/embed` requests returned200. A later job polling request timed out in the PGlite setup; the resumed six-file/33-case end-to-end run did **not** complete. Redis AOF was then enabled for subsequent local testing; no production Redis setting was changed.
+
+A supplemental `eval:ollama-fixtures` command runs the actual Mastra workflow and local Qwen3 model against four fixed evidence excerpts. It intentionally does not connect to TypeGraph, Prisma, HTTP authentication or ingestion, and must not be reported as an end-to-end retrieval benchmark. Its five multilingual synthesis/follow-up/insufficient-evidence results are checkpointed in `quality-live-ollama-controlled-evidence.json`. Native PostgreSQL/pgvector validation is still required.
+
+```bash
+MASTRA_PROVIDER=ollama MASTRA_MODEL=qwen3:8b OLLAMA_THINK=false MASTRA_OBSERVABILITY=false RUN_LIVE_OLLAMA_FIXTURES=true pnpm eval:ollama-fixtures
+```

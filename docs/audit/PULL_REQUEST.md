@@ -7,7 +7,7 @@ Adaptive retrieval uses up to four focused TypeGraph hybrid queries, RRF fusion,
 Validation so far:
 
 - Original main: 56 tests passed, 0 failed, 15 skipped.
-- Resumed suite: 75 passed, 0 failed, 15 skipped; source/audit TypeScript and Prisma validation passed.
+- Resumed suite: 76 passed, 0 failed, 15 skipped; source/audit TypeScript and Prisma validation passed.
 - Actual Nest HTTP/Mastra workflow regressions with mocked inference and in-memory persistence cover 429 retention/retry, pagination/ownership, multilingual context, SSE, cancellation and disconnect completion.
 - Real CPU Ollama Qwen3 8B, existing Nomic embeddings, Redis/BullMQ API/worker and disposable PGlite/pgvector processed six formats; earlier raw live attempts preserve both successes and failures. PGlite is not native PostgreSQL16 validation.
 - Controlled mocked original/improved workflows: 4→3 model calls for ordinary document questions; injected multi-query plans improve fixture document coverage. This is not a measured production speedup.

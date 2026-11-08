@@ -29,7 +29,8 @@
     "eval:workflow": "node --import tsx scripts/compare-workflow.ts",
     "eval:seed": "node --import tsx scripts/seed-quality-corpus.ts",
     "typecheck:audit": "tsc --project tsconfig.audit.json",
-    "eval:live-audit": "node --import tsx scripts/live-audit.ts"
+    "eval:live-audit": "node --import tsx scripts/live-audit.ts",
+    "eval:ollama-fixtures": "node --import tsx scripts/evaluate-ollama-fixtures.ts"
   },
   "dependencies": {
     "@mastra/core": "1.82.0",
