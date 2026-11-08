@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { config } from '../src/config.js';
 import { createSitePilotAgent } from '../src/mastra/factory.js';
+import { workflowGroundingInstructions } from '../src/agent/grounding-instructions.js';
 import { localGenerationOptions } from '../src/mastra/generation-options.js';
 
 test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correct wire format', async () => {
@@ -18,11 +19,13 @@ test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correc
   Object.assign(config, { modelProvider: 'ollama', model: 'qwen3:8b', ollamaThink: false, ollamaUrl: `http://127.0.0.1:${(server.address() as any).port}` });
   try {
     const agent = createSitePilotAgent({} as any, {} as any);
-    const result = await agent.generate('Say hello', { maxSteps: 1, toolChoice: 'none', activeTools: [], ...localGenerationOptions() });
+    const result = await agent.generate('Say hello', { maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions, activeTools: [], ...localGenerationOptions() });
     assert.equal(result.text, 'Hello');
     assert.equal(received.length, 1);
     assert.equal(received[0].reasoning_effort, 'none');
     assert.equal(received[0].tools, undefined);
+    assert.equal(received[0].messages[0].content, workflowGroundingInstructions);
+    assert.ok(!received[0].messages[0].content.includes('Only cite exact sourceRef values returned by the tools'));
     config.ollamaThink = true;
     assert.deepEqual(localGenerationOptions(), {});
     config.ollamaThink = false; config.modelProvider = 'openrouter';

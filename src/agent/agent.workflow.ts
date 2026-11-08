@@ -1,3 +1,4 @@
+import { workflowGroundingInstructions } from './grounding-instructions.js';
 import { localGenerationOptions } from '../mastra/generation-options.js';
 import { boundedConversationContext, retrievalQueries, mergeRetrievalEvidence, isEvidenceFollowUp } from './retrieval-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -277,8 +278,11 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       };
       const groundDocumentHits = async (hits: any[]) => {
         const evidenceByRef = new Map<string, any>();
-        for (const hit of hits) if (typeof hit.sourceRef === 'string' && hit.sourceRef.length > 0) evidenceByRef.set(hit.sourceRef, hit);
-        const evidence: Array<{ id: string; sourceRef: string; hit: any }> = [...evidenceByRef.entries()].map(([sourceRef, hit], index) => ({ id: `E${index + 1}`, sourceRef, hit }));
+        for (const hit of hits) if (typeof hit.sourceRef === 'string' && hit.sourceRef.length > 0) {
+          const identity = `${hit.citation?.documentId}:${hit.citation?.documentVersionId ?? 'legacy'}:${hit.citation?.chunkId ?? hit.citation?.chunkIndex}:${hit.sourceRef}`;
+          evidenceByRef.set(identity, hit);
+        }
+        const evidence: Array<{ id: string; sourceRef: string; hit: any }> = [...evidenceByRef.values()].map((hit, index) => ({ id: `E${index + 1}`, sourceRef: hit.sourceRef, hit }));
         if (!evidence.length) return { answer: 'I could not find authorized document evidence with a verifiable source reference.', outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
         const evidenceIds = evidence.map(item => item.id) as [string, ...string[]];
         const citationSchema = z.object({ answer: z.string(), evidenceSufficient: z.boolean(), evidenceIds: z.array(z.enum(evidenceIds)) });
@@ -287,7 +291,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const generateWithoutTools = (messages: any, options: any) => {
             const validationStartedAt = performance.now();
             return withProviderRetry(
-              () => { llmCalls++; return agent.generate(messages, { ...options, ...localGenerationOptions(), activeTools: [], maxRetries: 0 }); },
+              () => { llmCalls++; return agent.generate(messages, { ...options, ...localGenerationOptions(), instructions: workflowGroundingInstructions, activeTools: [], maxRetries: 0 }); },
               { signal: abortSignal, onRetry: async () => { providerRetries++; } },
             ).finally(() => { citationVerificationMs += Math.round(performance.now() - validationStartedAt); });
           };
@@ -296,7 +300,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const tracingOptions = { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } };
           const draft = await withProviderRetry(async () => {
             llmCalls++;
-            const answerStream = await agent.stream([{ role: 'user', content: prompt }], { maxSteps: 1, toolChoice: 'none', activeTools: [], abortSignal, tracingOptions, ...localGenerationOptions() });
+            const answerStream = await agent.stream([{ role: 'user', content: prompt }], { maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions, activeTools: [], abortSignal, tracingOptions, ...localGenerationOptions() });
             let streamedDraft = '';
             for await (const chunk of answerStream.fullStream) {
               if (chunk.type === 'text-delta' && chunk.payload.text) {
@@ -335,8 +339,10 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             traceFailure(requestId, principal.tenantId, { stage: 'semantic-answer', code: 'missing', answerHash: fingerprint(parsed.data.answer), evidenceLabels: evidence.map(item => item.id), sourceRefs: evidence.map(item => item.sourceRef), modelEvidenceIdCount: 0 });
             return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'missing' as const };
           }
-          const sourceRefs = [...new Set(parsed.data.evidenceIds.map(id => evidence.find(item => item.id === id)?.sourceRef).filter((ref): ref is string => Boolean(ref)))];
-          if (sourceRefs.length !== parsed.data.evidenceIds.length) return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'unknown' as const };
+          const mappedRefs = parsed.data.evidenceIds.map(id => evidence.find(item => item.id === id)?.sourceRef);
+          if (mappedRefs.some(ref => !ref)) return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'unknown' as const };
+          // Multiple distinct chunks can legitimately cite the same PDF page.
+          const sourceRefs = [...new Set(mappedRefs.filter((ref): ref is string => Boolean(ref)))];
           return { answer: `${parsed.data.answer.trim()}\n\nSources: ${sourceRefs.map(ref => `[[${ref}]]`).join(' ')}`, outcome: 'success' as const, citationFailure: undefined };
         } catch (error) {
           if (abortSignal?.aborted) throw abortSignal.reason ?? error;

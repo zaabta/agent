@@ -3,7 +3,7 @@ import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'followup'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'followup', 'same-source-chunks'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -17,18 +17,22 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'foll
       if (this.id.startsWith('sitepilot-planner')) {
         if (prompt.startsWith('Decide whether')) return { object: scenario === 'narrative' ? { mode: 'retrieve', retrievalQueries: ['project budget', 'project risks'] } : { mode: 'structured' } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
+        if (scenario === 'same-source-chunks') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
         if (scenario === 'followup') return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'وماذا عن المخاطر؟' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
       }
       if (scenario === 'followup') assert.ok(prompt.includes('ORIGINAL user message (answer in this language): وماذا عن المخاطر؟'));
       const ids = [...prompt.matchAll(/(?:^|\n)(E\d+):/g)].map((m: any) => m[1]);
-      return { object: { answer: 'Supported fixture answer', evidenceSufficient: true, evidenceIds: ids } } as any;
+      return { object: { answer: 'Supported fixture answer', evidenceSufficient: true, evidenceIds: scenario === 'same-source-chunks' ? [...ids, ids[0]] : ids } } as any;
     });
     const stream = mock.method(Agent.prototype, 'stream', async (messages: any) => {
       if (scenario === 'followup') assert.ok(messages[0].content.includes('ORIGINAL user message (answer in this language): وماذا عن المخاطر؟'));
+      if (scenario === 'same-source-chunks') { assert.ok(messages[0].content.includes('First fact 17')); assert.ok(messages[0].content.includes('Second fact 29')); }
       return ({ fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Supported fixture answer' } }; })(), getFullOutput: async () => ({ text: 'Supported fixture answer' }) }) as any; });
     const typegraph: any = { searchDocuments: async (query: string) => {
-      calls.push(query); const id = query.includes('budget') ? 'budget' : 'risks';
+      calls.push(query);
+      if (scenario === 'same-source-chunks') { const first = query.startsWith('first'); return { query, hits: [{ score: 0.8, content: first ? 'First fact 17' : 'Second fact 29', sourceRef: 'shared.pdf (page 1)', metadata: {}, citation: { documentId: 'shared', filename: 'shared.pdf', bucketId: 'documents', chunkIndex: first ? 0 : 1, chunkCount: 2 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } }; }
+      const id = query.includes('budget') ? 'budget' : 'risks';
       return { query, hits: [{ score: 0.7, content: `Project ${id} facts`, sourceRef: id, metadata: {}, citation: { documentId: id, filename: `${id}.md`, bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } };
     } };
     const structured: any = {
@@ -46,7 +50,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'foll
       if (result.status !== 'success') return;
       if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
       else if (scenario === 'aggregate-unique') { assert.match(result.result.answer, /300/); assert.deepEqual(calls, []); }
-      else { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.citationValidation, 'valid'); if (scenario === 'narrative') assert.equal(result.result.sources.length, 2); }
+      else { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.citationValidation, 'valid'); if (scenario === 'narrative') assert.equal(result.result.sources.length, 2); if (scenario === 'same-source-chunks') assert.equal(result.result.sources.length, 1); }
     } finally {
       generate.mock.restore(); stream.mock.restore();
       if (previous === undefined) delete process.env.MASTRA_OBSERVABILITY; else process.env.MASTRA_OBSERVABILITY = previous;

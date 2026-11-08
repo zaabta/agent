@@ -16,7 +16,7 @@ const headers = { authorization: `Bearer ${bearer}`, 'content-type': 'applicatio
 await mkdir('docs/audit', { recursive: true });
 async function save() { await writeFile(output, JSON.stringify(report, null, 2) + '\n'); }
 async function api(path: string, body?: unknown) {
-  const response = await fetch(`${base}${path}`, { headers, ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }), signal: AbortSignal.timeout(300_000) });
+  const response: Response = await fetch(`${base}${path}`, { headers, ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }), signal: AbortSignal.timeout(300_000) });
   const value = await response.json() as any;
   if (!response.ok) throw new Error(`HTTP ${response.status} at ${path}: ${value.code ?? value.message ?? 'request failed'}`);
   return value;
@@ -26,7 +26,7 @@ try {
     const started = performance.now();
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(fixture.buffer)], { type: 'application/octet-stream' }), fixture.filename);
-    const response = await fetch(`${base}/api/documents/upload`, { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: form, signal: AbortSignal.timeout(30_000) });
+    const response: Response = await fetch(`${base}/api/documents/upload`, { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: form, signal: AbortSignal.timeout(30_000) });
     assert.equal(response.status, 202);
     const uploaded = await response.json() as any;
     const deadline = Date.now() + 300_000;
@@ -56,7 +56,7 @@ try {
     console.log(JSON.stringify({ question, outcome: result.outcome, citationValidation: result.citationValidation }));
   }
   const started = performance.now();
-  const response = await fetch(`${base}/api/agent/stream`, { method: 'POST', headers, body: JSON.stringify({ message: 'متى إطلاق مشروع Orion؟' }), signal: AbortSignal.timeout(300_000) });
+  const response: Response = await fetch(`${base}/api/agent/stream`, { method: 'POST', headers, body: JSON.stringify({ message: 'متى إطلاق مشروع Orion؟' }), signal: AbortSignal.timeout(300_000) });
   assert.equal(response.status, 200); assert.ok(response.body);
   let pending = '', firstTextMs: number | null = null;
   const frames: Array<{ name: string; data: any }> = [];
