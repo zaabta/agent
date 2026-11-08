@@ -59,3 +59,14 @@ export function mergeRetrievalEvidence(lists: DocumentSearchHit[][], maxHits = 8
   }
   return selected;
 }
+
+/** A cited prior turn can resolve discourse references, but is never evidence.
+ * Limit the override to explicit follow-up references; unrelated conversation
+ * still uses the planner's ordinary-conversation path. */
+export function isEvidenceFollowUp(message: string, history: ContextTurn[]): boolean {
+  if (!history.some(turn => turn.role === 'assistant' && /\[\[[^\]]+\]\]/u.test(turn.content))) return false;
+  const text = message.normalize('NFKD').toLocaleLowerCase().replace(/\p{M}/gu, '').replace(/ı/g, 'i');
+  return /\b(?:it|them|those|these|previous|second|first)\b|\bwhat about\b/iu.test(text)
+    || /\b(?:ikisini|onceki|ikinci|peki|onun|onu|onlari|bunlari)\b/iu.test(text)
+    || /(?:ماذا عن|عنها|عنهم|بينهما|السابق|الثاني|الاول)/u.test(text);
+}

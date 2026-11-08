@@ -1,3 +1,4 @@
+import { localGenerationOptions } from '../mastra/generation-options.js';
 import { Inject, Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -1353,9 +1354,6 @@ export class AgentService implements OnModuleDestroy {
   }
 
   private ollamaGenerationOptions() {
-    if (config.modelProvider !== 'ollama' || !config.model.toLowerCase().startsWith('qwen3')) return {};
-    // Ollama's OpenAI-compatible endpoint uses reasoning_effort=none to disable
-    // Qwen3 thinking while retaining Mastra's native tool-calling stream.
-    return config.ollamaThink ? {} : { providerOptions: { ollama: { reasoning_effort: 'none' } } };
+    return localGenerationOptions();
   }
 }

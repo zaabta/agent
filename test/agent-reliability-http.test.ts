@@ -52,7 +52,8 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.equal(tenant, 'workspace'); assert.equal(user, 'owner'); queries.push(query);
     return { query, hits: [hit(query.includes('cost') ? 'costs' : 'risks')], timing: { embeddingMs: 0, retrievalMs: 1, searchMs: 1 } };
   } } as any, db as any, {} as any);
-  const generation = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
+  const generation = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any, options: any) {
+    if (config.modelProvider === 'ollama' && config.model.startsWith('qwen3') && !config.ollamaThink) assert.equal(options?.providerOptions?.ollama?.reasoningEffort, 'none');
     if (limited) throw Object.assign(new Error('mock rate limit'), { statusCode: 429, responseHeaders: { 'retry-after': '0' } });
     const prompt = messages[0].content;
     if (this.id.startsWith('sitepilot-planner')) {
@@ -61,10 +62,13 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     }
     return { object: { answer: 'Costs and risks are documented.', evidenceSufficient: true, evidenceIds: ['E1', 'E2'] } } as any;
   });
-  const streaming = mock.method(Agent.prototype, 'stream', async (_messages: any, options: any) => ({
+  const streaming = mock.method(Agent.prototype, 'stream', async (_messages: any, options: any) => {
+    assert.deepEqual(options.activeTools, []);
+    if (config.modelProvider === 'ollama' && config.model.startsWith('qwen3') && !config.ollamaThink) assert.equal(options?.providerOptions?.ollama?.reasoningEffort, 'none');
+    return ({
     fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Costs ' } }; if (slowStreaming) await new Promise(resolve => setTimeout(resolve, 200)); if (pauseStreaming) { await new Promise<void>((_resolve, reject) => { const abort = () => reject(options.abortSignal.reason); if (options.abortSignal.aborted) abort(); else options.abortSignal.addEventListener('abort', abort, { once: true }); }); } yield { type: 'text-delta', payload: { text: 'and risks.' } }; })(),
     getFullOutput: async () => ({ text: 'Costs and risks.' }),
-  }) as any);
+  }) as any; });
   @Module({ controllers: [AgentController], providers: [
     { provide: AgentService, useValue: service },
     { provide: AuthService, useValue: { validateAccessToken: async (token: string) => { if (!['test-session', 'test-other'].includes(token)) throw new UnauthorizedException(); return token === 'test-other' ? { ...principal, userId: 'other-owner' } : principal; } } },

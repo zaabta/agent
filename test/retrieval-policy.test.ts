@@ -26,3 +26,11 @@ test('multilingual conversation context stays within total and per-message budge
   assert.equal(boundedConversationContext(history, 2).length, 2);
   assert.ok(boundedConversationContext(history, 10, 15).reduce((n, h) => n + h.content.length, 0) <= 15);
 });
+
+test('explicit multilingual evidence follow-ups require prior cited context', async () => {
+  const { isEvidenceFollowUp } = await import('../src/agent/retrieval-policy.js');
+  const history = [{ role: 'assistant' as const, content: 'Supported finding [[report.md (line 1)]]' }];
+  for (const message of ['What about its risks?', 'Compare them', 'وماذا عن المخاطر؟', 'قارن بينهما', 'İkisini karşılaştır', 'Peki onun riskleri?']) assert.equal(isEvidenceFollowUp(message, history), true, message);
+  for (const message of ['Hi', 'شكراً', 'Merhaba', 'Explain quantum physics']) assert.equal(isEvidenceFollowUp(message, history), false, message);
+  assert.equal(isEvidenceFollowUp('Compare them', []), false);
+});
