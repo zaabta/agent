@@ -18,7 +18,7 @@ The entire reported UI disappearance incident cannot be fully attributed without
 
 Initial baseline: TypeScript passed; **56 passed, 0 failed, 15 skipped** out of 71 tests.
 
-Initial updated suite: **62 passed, 0 failed, 15 skipped** out of 77 tests. The resumed suite now reports **74 passed, 0 failed, 15 skipped** out of 89; application and evaluation-script typechecks and Prisma validation passed. Additional tests cover Ollama wire options, projected provenance, routing recovery, legitimate insufficient-evidence replies, and long-running audit session refresh.
+Initial updated suite: **62 passed, 0 failed, 15 skipped** out of 77 tests. The resumed suite now reports **75 passed, 0 failed, 15 skipped** out of 90; application and evaluation-script typechecks and Prisma validation passed. Additional tests cover Ollama wire options, projected provenance, routing recovery, legitimate insufficient-evidence replies, and long-running audit session refresh.
 
 The added HTTP regression starts a real Nest listener with the actual controller, auth guard, service, Mastra workflow and tools. It uses a test-token identity validator, an in-memory Prisma-shaped store and mocked Mastra model methods. It verifies:
 

@@ -409,7 +409,7 @@ export class AgentService implements OnModuleDestroy {
     // UI pagination is independent of the model context budget. Validate cursor
     // ownership before using Prisma's unique cursor.
     if (page.cursor && !await this.prisma.message.findFirst({ where: { id: page.cursor, conversationId }, select: { id: true } })) throw new NotFoundException('MESSAGE_CURSOR_NOT_FOUND');
-    const rows = await this.prisma.message.findMany({ where: { conversationId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: limit + 1, ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}) });
+    const rows = await this.prisma.message.findMany({ where: { conversationId }, orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }], take: limit + 1, ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}) });
     const hasMore = rows.length > limit;
     const messages = rows.slice(0, limit);
     const nextCursor = hasMore ? messages.at(-1)?.id : null;
@@ -1189,7 +1189,10 @@ export class AgentService implements OnModuleDestroy {
 
     const history = await this.prisma.message.findMany({
       where: { conversationId: conversation.id, OR: [{ role: 'user' }, { role: 'assistant', status: 'completed' }] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      // PostgreSQL now() is shared by the two inserts in a turn's transaction.
+      // Reverse chronological order must put assistant before user on that tie,
+      // so reversing the bounded page restores the actual dialogue order.
+      orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
       take: config.conversationHistoryMessages,
       select: { role: true, content: true },
     });

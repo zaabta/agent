@@ -33,7 +33,8 @@ for (const item of cases) {
       const cited = [...result.answer.matchAll(/\[\[([^\]]+)\]\]/g)].map((m: any) => m[1]);
       const refs = new Set(result.sources.map((s: any) => s.sourceRef));
       const documents = [...new Set(result.sources.map((s: any) => s.filename))];
-      const valid = result.citationValidation === 'valid' && cited.every((ref: string) => refs.has(ref)) && (!item.expectedSourceDocuments.length || cited.length > 0);
+      const validNoEvidence = item.category === 'missing' && result.citationValidation === 'no-evidence' && cited.length === 0 && refs.size === 0;
+      const valid = validNoEvidence || result.citationValidation === 'valid' && cited.every((ref: string) => refs.has(ref)) && (!item.expectedSourceDocuments.length || cited.length > 0);
       const normalize = (s: string) => s.normalize('NFKC').toLocaleLowerCase().replace(/\p{M}/gu, '').replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[,.\s]/g, '');
       const factAlternatives: Record<string, string[]> = {
         'safety review': ['safety review', 'مراجعة السلامة', 'مراجعة للسلامة', 'فحص السلامة', 'تقييم السلامة', 'güvenlik incelemesi', 'güvenlik değerlendirmesi', 'güvenlik kontrolü'],
@@ -53,6 +54,11 @@ for (const item of cases) {
       record.outputTokens = result.timing?.completionTokens ?? null;
       record.languageCheck = item.language === 'ar' ? /\p{Script=Arabic}/u.test(result.answer) : 'human-review';
       record.pass = valid && item.expectedSourceDocuments.every((d: string) => documents.includes(d)) && item.expectedFacts.every((f: string) => (factAlternatives[f] ?? [f]).some(variant => normalize(result.answer).includes(normalize(variant))));
+      record.checks = {
+        facts: item.expectedFacts.map((fact: string) => ({ fact, found: (factAlternatives[fact] ?? [fact]).some(variant => normalize(result.answer).includes(normalize(variant))) })),
+        sources: item.expectedSourceDocuments.map((document: string) => ({ document, cited: documents.includes(document) })),
+        requiredTool: !item.expectedAnyTools?.length || item.expectedAnyTools.some((name: string) => result.toolsCalled?.includes(name)),
+      };
       if (item.expectedAnyTools?.length && !item.expectedAnyTools.some((name: string) => result.toolsCalled?.includes(name))) record.pass = false;
       if (item.category === 'missing') record.pass = result.citationValidation === 'no-evidence' || (!result.sources.length && /insufficient|not.*evidence|could not find/i.test(result.answer));
       if (record.languageCheck === false) record.pass = false;
@@ -62,7 +68,9 @@ for (const item of cases) {
   }
   results.push(record);
   if (base && token) {
-    await writeFile(`docs/audit/quality-${label}.json`, JSON.stringify({ mode: 'live', label, complete: false, totalCases: cases.length, results }, null, 2) + '\n');
+    const completedIds = new Set(results.map(record => record.id));
+    const checkpoint = [...results, ...previousResults.filter(record => !completedIds.has(record.id))];
+    await writeFile(`docs/audit/quality-${label}.json`, JSON.stringify({ mode: 'live', label, complete: false, totalCases: cases.length, results: checkpoint }, null, 2) + '\n');
     console.log(JSON.stringify({ case: item.id, status: record.status, latencyMs: record.latencyMs, llmCalls: record.llmCalls }));
   }
 }

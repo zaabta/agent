@@ -18,6 +18,7 @@ const companyWorkspaceId = explicitCompanyWorkspaceId
 
 export const config = {
   port: Number(process.env.PORT || 3220),
+  apiHost: process.env.API_HOST || '127.0.0.1',
   databaseUrl: process.env.DATABASE_URL || 'postgres://sitepilot:sitepilot@localhost:5444/sitepilot',
   // Company knowledge uses one existing canonical workspace. DEV_TENANT_ID
   // remains a backwards-compatible local fallback only.

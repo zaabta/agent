@@ -32,6 +32,7 @@ services:
       dockerfile: Dockerfile.audit
     env_file: .env.audit
     environment:
+      API_HOST: 0.0.0.0
       DATABASE_URL: postgres://audit:audit-test-only@db:5432/sitepilot_audit
       REDIS_URL: redis://redis:6379
       OLLAMA_BASE_URL: http://ollama:11434

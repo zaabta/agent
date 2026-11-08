@@ -25,8 +25,8 @@
     "GitHub branch creation rejected403; PR not opened"
   ],
   "resumed": {
-    "tests": 89,
-    "passed": 74,
+    "tests": 90,
+    "passed": 75,
     "failed": 0,
     "skipped": 15,
     "typecheck": "passed",
