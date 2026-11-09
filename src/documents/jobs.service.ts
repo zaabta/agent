@@ -6,7 +6,7 @@ import { DocumentStorageService } from './document-storage.service.js';
 
 const PROGRESS_BANDS: Record<string, readonly [number, number]> = {
   upload: [0, 3], validation: [3, 6], queued: [6, 8], verification: [8, 12],
-  parsing: [12, 22], smart_chunking: [22, 30], indexing: [30, 95],
+  parsing: [12, 18], pdf_rendering: [18, 20], vision_extraction: [20, 22], smart_chunking: [22, 30], indexing: [30, 95],
   preparing: [30, 33], checking: [33, 35], embedding: [35, 82],
   persisting: [82, 91], pruning: [91, 95], publication: [95, 99], completed: [99, 100],
 };
@@ -42,7 +42,7 @@ export class JobsService {
       this.prisma.documentProgressEvent.findMany({ where: { documentId: doc.id, tenantId: doc.tenantId, jobId }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }], take: 100 }),
       jobId ? this.queue.queue.getJob(jobId).catch(() => null) : null,
     ]);
-    const stageOrder = ['upload', 'validation', 'queued', 'verification', 'parsing', 'smart_chunking', 'indexing', 'preparing', 'checking', 'embedding', 'persisting', 'pruning', 'publication', 'completed', 'cancelled', 'failed'];
+    const stageOrder = ['upload', 'validation', 'queued', 'verification', 'parsing', 'pdf_rendering', 'vision_extraction', 'smart_chunking', 'indexing', 'preparing', 'checking', 'embedding', 'persisting', 'pruning', 'publication', 'completed', 'cancelled', 'failed'];
     const events = loadedEvents.sort((left, right) => left.startedAt.getTime() - right.startedAt.getTime()
       || left.attempt - right.attempt
       || stageOrder.indexOf(left.stage) - stageOrder.indexOf(right.stage));

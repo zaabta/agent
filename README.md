@@ -159,12 +159,16 @@ selected values and applicable filters are used to constrain the SQL query. Appl
 the additive migration with `npm run prisma:deploy` against your development
 database before starting the updated API.
 
-Set `OLLAMA_VISION_MODEL` on the document worker to a vision-capable local Ollama
-model. Upload PNG/JPEG files normally, or use the suffix `.drawing.pdf` for PDFs
-that should be rendered for vision. Drawing PDFs are limited to eight physical
-pages. Regular PDF text extraction is selected by the usual `.pdf` filename.
-Indexing stores machine transcriptions and physical page references. Room
-schedules are searchable text and do not enter the SQL analytics tables.
+Set `OLLAMA_VISION_MODEL` on the document worker to an installed local Ollama
+vision model. Upload PNG/JPEG files normally. PDF pages are checked for
+extractable-text coverage; sparse or image-only pages are rendered and sent to
+the local model for OCR, while searchable pages keep normal text extraction.
+Mixed PDFs therefore retain native text and OCR text with their physical page
+numbers. Files ending in `.drawing.pdf` continue to use the drawing-specific
+vision extraction and remain limited to eight physical pages. If a scanned PDF
+needs OCR and no local vision model is configured, the job fails with
+`OCR_VISION_NOT_CONFIGURED` rather than retrying text parsing. Room schedules
+are searchable text and do not enter the SQL analytics tables.
 
 To compare revisions, upload them as separately named documents and mention both
 names in the question. The comparison requires citations from both documents.

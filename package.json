@@ -23,6 +23,7 @@
     "prisma:generate:safe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prisma-generate-safe.ps1",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
     "typegraph:deploy": "tsx src/scripts/deploy-typegraph.ts",
     "build": "tsc --noEmit",
     "eval:quality": "node --import tsx scripts/evaluate-agent.ts",

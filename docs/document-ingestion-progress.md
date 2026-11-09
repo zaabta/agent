@@ -42,6 +42,8 @@ The example is illustrative. `stagePercent`, unit totals, speed, remaining units
 
 Each `progressDetails.stages[]` item contains a durable `id`, `stage`, `status`, `attempt`, `startedAt`, `finishedAt`, `elapsedMs`, nullable `stagePercent` and counters, optional unit/speed/remaining data, and a sanitized `failureCode`. Upload bytes are only confirmed once the request body reaches the backend; the browser owns live transfer progress. Indexing counters and ETA are available when TypeGraph/embedding callbacks expose totals.
 
+PDF ingestion reports `parsing` while it measures per-page extractable-text coverage. Pages below the text-coverage threshold report `pdf_rendering` and `vision_extraction` with page counters when `OLLAMA_VISION_MODEL` is configured; searchable pages retain native text without OCR. OCR configuration and model errors are terminal failures rather than queue retries. Successful OCR text keeps its physical `Page N` marker and flows through the same Smart Chunking and TypeGraph indexing stages as searchable PDF text.
+
 ## SSE
 
 `GET /api/jobs/{jobId}/events` keeps the existing event stream and sends an initial `status` snapshot, `stage` transitions, later `status` snapshots, terminal `completed` / `failed` / `cancelled` snapshots, and comment keepalives. Stage transition events use persisted event UUIDs as SSE IDs. Reconnect with the standard `Last-Event-ID` request header to replay subsequent persisted transitions. If the ID is unknown or has aged out of the bounded snapshot history, the server sends available transitions and a current snapshot; this is not an unlimited event log. Disconnect closes the polling loop. Every lookup is scoped to the authenticated tenant, and payloads do not include document contents.

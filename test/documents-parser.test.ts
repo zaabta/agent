@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
-import { parseDocument } from '../src/documents/parser.js';
+import { extractableTextCoverage, parseDocument } from '../src/documents/parser.js';
 
 async function docxFixture() {
   const zip = new JSZip();
@@ -12,15 +12,20 @@ async function docxFixture() {
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
-function pdfFixture(text: string) {
-  const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+function pdfPagesFixture(texts: string[]) {
+  const pageIds = texts.map((_text, index) => 4 + index * 2);
   const bodies = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${texts.length} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
+  texts.forEach((text, index) => {
+    const pageId = pageIds[index]!;
+    const contentId = pageId + 1;
+    const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+    bodies.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
+    bodies.push(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+  });
   let pdf = '%PDF-1.4\n';
   const offsets = [0];
   bodies.forEach((body, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${body}\nendobj\n`; });
@@ -30,6 +35,8 @@ function pdfFixture(text: string) {
   pdf += `trailer\n<< /Size ${bodies.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   return Buffer.from(pdf);
 }
+
+function pdfFixture(text: string) { return pdfPagesFixture([text]); }
 
 test('parses Markdown and UTF-8 BOM TXT while retaining line references', async () => {
   const md = await parseDocument('terms.md', Buffer.from('# Price\nEnterprise costs 42 credits.'));
@@ -45,12 +52,65 @@ test('parses DOCX paragraphs and headings from an OOXML package', async () => {
   assert.match(result.text, /Table row: Enterprise \| 73 credits/);
 });
 
-test('extracts PDF text with page references and reports scanned PDFs as OCR required', async () => {
-  const result = await parseDocument('terms.pdf', pdfFixture('Enterprise price is 42 credits'));
+test('extracts text PDFs normally and sends scanned pages to local vision instead of OCR_REQUIRED', async t => {
+  const result = await parseDocument('terms.pdf', pdfFixture('Enterprise price is 42 credits. '.repeat(40)));
   assert.match(result.text, /Page 1:/);
   assert.match(result.text, /Enterprise price is 42 credits/);
   const scanned = pdfFixture('');
-  await assert.rejects(() => parseDocument('scan.pdf', scanned), /OCR_REQUIRED/);
+  const previousModel = process.env.OLLAMA_VISION_MODEL;
+  process.env.OLLAMA_VISION_MODEL = 'fixture-vision';
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (_url: URL, init?: RequestInit) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.model, 'fixture-vision');
+    assert.ok(body.messages[0].images[0]);
+    return Response.json({ message: { content: JSON.stringify({ text: 'Scanned resume text' }) } });
+  });
+  try {
+    const parsed = await parseDocument('scan.pdf', scanned);
+    assert.match(parsed.text, /Page 1:\nScanned resume text/);
+    assert.equal(calls, 1);
+  } finally {
+    if (previousModel === undefined) delete process.env.OLLAMA_VISION_MODEL;
+    else process.env.OLLAMA_VISION_MODEL = previousModel;
+  }
+});
+
+test('mixed PDFs preserve searchable pages and OCR only sparse pages with original page numbers', async t => {
+  const previousModel = process.env.OLLAMA_VISION_MODEL;
+  process.env.OLLAMA_VISION_MODEL = 'fixture-vision';
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json({ message: { content: JSON.stringify({ text: 'OCR content from page two' }) } });
+  });
+  try {
+    const nativeText = 'Searchable page one says native text. '.repeat(40);
+    const parsed = await parseDocument('mixed.pdf', pdfPagesFixture([nativeText, '']));
+    assert.match(parsed.text, /Page 1:\nSearchable page one says native text\./);
+    assert.match(parsed.text, /Page 2:\nOCR content from page two/);
+    assert.equal(calls, 1);
+  } finally {
+    if (previousModel === undefined) delete process.env.OLLAMA_VISION_MODEL;
+    else process.env.OLLAMA_VISION_MODEL = previousModel;
+  }
+});
+
+test('PDF text coverage identifies image-only pages and gives searchable pages a full score', () => {
+  assert.equal(extractableTextCoverage('', 595, 842), 0);
+  assert.ok(extractableTextCoverage('x'.repeat(1000), 595, 842) > 0.9);
+  assert.ok(extractableTextCoverage('x'.repeat(20), 595, 842) < 0.16);
+});
+
+test('scanned PDF without a local vision model fails once with an actionable configuration code', async () => {
+  const previousModel = process.env.OLLAMA_VISION_MODEL;
+  delete process.env.OLLAMA_VISION_MODEL;
+  try {
+    await assert.rejects(() => parseDocument('scan.pdf', pdfFixture('')), /OCR_VISION_NOT_CONFIGURED/);
+  } finally {
+    if (previousModel !== undefined) process.env.OLLAMA_VISION_MODEL = previousModel;
+  }
 });
 
 test('preserves workbook and sheet names, row/cell addresses, formulas, and displayed identifiers', async () => {

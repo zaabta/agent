@@ -7,6 +7,14 @@ export const backendCallSchema = z.object({
   args: z.record(z.string(), z.unknown()),
 });
 
+// OpenRouter's NVIDIA Nemotron structured-output implementation rejects the
+// `propertyNames` keyword emitted by z.record(). Keep this transport schema
+// separate from backendCallSchema, which remains the runtime validator.
+export const backendCallLLMSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+  args: z.object({}).catchall(z.unknown()),
+});
+
 type ReadTool = {
   id: string;
   description: string;

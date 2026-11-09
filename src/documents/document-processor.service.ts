@@ -1,5 +1,5 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Worker, type Job } from 'bullmq';
+import { HttpException, Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { config } from '../config.js';
@@ -11,6 +11,24 @@ import type { ProcessDocumentJob } from './document-queue.service.js';
 import { redisConnection } from './redis-connection.js';
 import { WorkerMonitoringService } from './worker-monitoring.service.js';
 import { CHUNKER_VERSION, smartChunk } from './smart-chunker.js';
+import type { ParseProgressEvent } from './parse-progress.js';
+
+function isTransientFailure(error: unknown): boolean {
+  if (error instanceof HttpException || error instanceof UnrecoverableError) return false;
+  if (error && typeof error === 'object' && (error as { retryable?: unknown }).retryable === true) return true;
+  const current = error as { status?: number; statusCode?: number; code?: string; cause?: unknown } | null;
+  const status = current?.status ?? current?.statusCode;
+  if (status === 408 || status === 425 || status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  const code = current?.code ?? '';
+  if (/^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|P1001|P1002|P1008|P1017|P2024)$/.test(code)) return true;
+  if (/^(?:08|40)[0-9A-Z]{3}$/.test(code)) return true;
+  return current?.cause ? isTransientFailure(current.cause) : false;
+}
+
+function safeFailureCode(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.match(/^[A-Z][A-Z0-9_]+/)?.[0] || 'PROCESSING_FAILED';
+}
 
 @Injectable()
 export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
@@ -25,7 +43,7 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    this.worker = new Worker<ProcessDocumentJob>(config.documentQueue, job => this.process(job), {
+    this.worker = new Worker<ProcessDocumentJob>(config.documentQueue, job => this.processWithRetryPolicy(job), {
       connection: redisConnection(config.redisUrl), concurrency: config.documentWorkerConcurrency,
     });
     this.monitoring.startHeartbeat();
@@ -41,6 +59,14 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
 
   private updateWorkerActivity() {
     this.monitoring.setActivity(this.activeJobIds.size ? 'busy' : 'idle');
+  }
+
+  private async processWithRetryPolicy(job: Job<ProcessDocumentJob>) {
+    try { return await this.process(job); }
+    catch (error) {
+      if (error instanceof UnrecoverableError || isTransientFailure(error)) throw error;
+      throw new UnrecoverableError(safeFailureCode(error));
+    }
   }
 
   private async process(job: Job<ProcessDocumentJob>) {
@@ -89,7 +115,38 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     if (await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
 
     await this.stage(job, 'parsing', attempt);
-    const parsed = await parseDocument(data.filename, buffer);
+    let activeParseStage: string | undefined = 'parsing';
+    const parseProgress = async (event: ParseProgressEvent) => {
+      if (event.status === 'in_progress') {
+        if (activeParseStage !== event.stage) {
+          if (activeParseStage) await this.finishStage(job, activeParseStage, attempt);
+          await this.stage(job, event.stage, attempt);
+          activeParseStage = event.stage;
+        }
+        await this.prisma.documentProgressEvent.updateMany({
+          where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, stage: event.stage, status: 'running' },
+          data: { completedUnits: event.completedUnits, totalUnits: event.totalUnits, unit: event.unit },
+        });
+        await job.updateProgress({ stage: event.stage, attempt, completedUnits: event.completedUnits, totalUnits: event.totalUnits, unit: event.unit, etaMs: null });
+      } else {
+        await this.finishStage(job, event.stage, attempt, event.completedUnits, event.totalUnits, event.unit);
+        if (activeParseStage === event.stage) activeParseStage = undefined;
+      }
+    };
+    const parseAbort = new AbortController();
+    let parseCancelled = false;
+    const parseCancellationPoll = setInterval(() => {
+      void cancelled().then(requested => {
+        if (requested) { parseCancelled = true; parseAbort.abort(new Error('DOCUMENT_JOB_CANCELLED')); }
+      }).catch(error => this.logger.warn(`Parse cancellation poll failed for job ${job.id}: ${String(error)}`));
+    }, 250);
+    let parsed;
+    try { parsed = await parseDocument(data.filename, buffer, parseAbort.signal, parseProgress); }
+    catch (error) {
+      if (parseCancelled || await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+      throw error;
+    } finally { clearInterval(parseCancellationPoll); }
+    if (activeParseStage) await this.finishStage(job, activeParseStage, attempt);
     const parsedRows = parsed.structuredCells?.length
       ? new Set(parsed.structuredCells.map(cell => `${cell.sheetName}:${cell.rowNumber}`)).size
       : undefined;
@@ -180,7 +237,9 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     await progressWrite;
     if (indexed.result.failedAt || indexed.result.status !== 'complete') {
       const failed = indexed.result.failedAt;
-      throw new Error(failed ? `TYPEGRAPH_INDEX_FAILED_${failed.phase}` : 'TYPEGRAPH_INDEX_INCOMPLETE');
+      const failure = new Error(failed ? `TYPEGRAPH_INDEX_FAILED_${failed.phase}` : 'TYPEGRAPH_INDEX_INCOMPLETE');
+      Object.assign(failure, { retryable: true });
+      throw failure;
     }
     if (indexed.timing.embeddingMs > 0) {
       await this.prisma.documentProgressEvent.updateMany({
@@ -297,8 +356,8 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
 
   private async failed(job: Job<ProcessDocumentJob>, error: Error) {
     const attempts = job.opts.attempts || 1;
-    const terminal = job.attemptsMade >= attempts;
-    const code = error.message.match(/^[A-Z][A-Z0-9_]+/)?.[0] || 'PROCESSING_FAILED';
+    const terminal = error instanceof UnrecoverableError || job.attemptsMade >= attempts;
+    const code = safeFailureCode(error);
     const current = await this.prisma.appDocument.findFirst({ where: { id: job.data.documentId, tenantId: job.data.tenantId }, select: { cancelRequested: true, deleteRequested: true } }).catch(() => null);
     if (current?.cancelRequested) {
       await this.prisma.documentProgressEvent.updateMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, status: 'running' }, data: { status: 'cancelled', finishedAt: new Date() } }).catch(() => undefined);

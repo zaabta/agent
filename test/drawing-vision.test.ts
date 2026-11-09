@@ -27,6 +27,9 @@ test('image and PDF drawing parsing keeps schedules, uncertainty and physical pa
     assert.equal(rendered.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.equal(body.model, 'fixture-vision');
     requests++;
+    if (body.messages[0].content.startsWith('Transcribe all readable text')) {
+      return Response.json({ message: { content: JSON.stringify({ text: 'supplier delay' }) } });
+    }
     return Response.json({ message: { content: JSON.stringify({
       observations: [{ kind: 'room', text: 'A101', area: 'North' }, { kind: 'dimension', text: '4000 mm', area: 'North' }],
       schedule: [['Room', 'Area'], ['A101', null]],
@@ -42,11 +45,15 @@ test('image and PDF drawing parsing keeps schedules, uncertainty and physical pa
       assert.match(chunks[0]!.content, /unverified/);
       assert.match(chunks[0]!.content, /Visual dimension \(North\): 4000 mm/);
       assert.match(chunks[0]!.content, /A101 \| \[unreadable\]/);
+      if (filename.endsWith('.pdf')) {
+        assert.match(parsed.text, /Embedded PDF text[^]*supplier delay/);
+        assert.ok(chunks.every(chunk => chunk.pageNumber === 1));
+      }
     }
     assert.equal(requests, 2);
     assert.match((await parseDocument('ordinary.pdf', pdf)).text, /supplier delay/);
     await assert.rejects(parseDocument('invalid.png', Buffer.from('bad')), /INVALID_DRAWING_IMAGE/);
-    assert.equal(requests, 2);
+    assert.equal(requests, 3);
   } finally {
     if (saved === undefined) delete process.env.OLLAMA_VISION_MODEL;
     else process.env.OLLAMA_VISION_MODEL = saved;

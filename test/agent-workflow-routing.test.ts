@@ -49,6 +49,8 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
           return { object: { operation: 'backend_tool', backendCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
         }
         if (scenario === 'mixed-dependent') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', columnName: 'Employee', groupLimit: 2, filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?', searchRankedGroups: true } } as any;
+        if (scenario === 'mixed' && !prompt.includes('Authorized schema:')) return { object: { operation: 'lookup', standaloneQuestion: 'Count violations from violations.xlsx' } } as any;
+        if (scenario === 'mixed') assert.doesNotMatch(prompt, /describe report risks/);
         if (scenario === 'mixed') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?' } } as any;
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
@@ -106,7 +108,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
     try {
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' }, undefined, {}, backendTools);
       const run = await workflow.createRun();
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 and describe report risks' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column'), history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column'), history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
@@ -145,7 +147,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       else if (scenario === 'mixed') {
         assert.match(result.result.answer, /21/);
         assert.match(result.result.answer, /Supported fixture answer/);
-        assert.deepEqual(calls, ['What risks are in the safety reports?']);
+        assert.deepEqual(calls, ['describe report risks in safety.md']);
         assert.deepEqual(result.result.sources.map(source => source.filename).sort(), ['risks.md', 'violations.xlsx']);
       }
       else if (scenario === 'aggregate-year') { assert.match(result.result.answer, /21/); assert.deepEqual(calls, []); }
