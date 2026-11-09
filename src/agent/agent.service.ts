@@ -1,6 +1,7 @@
+import { BackendTools } from './backend-tools.js';
 import { structuredSelectionSchema, type StructuredSelection } from './structured-selection.js';
 import { localGenerationOptions } from '../mastra/generation-options.js';
-import { Inject, Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, OnModuleDestroy, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { TypegraphService } from '../typegraph/typegraph.service.js';
@@ -175,6 +176,7 @@ export class AgentService implements OnModuleDestroy {
     @Inject(TypegraphService) typegraph: TypegraphService,
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(StructuredDataService) structuredData: StructuredDataService,
+    @Optional() @Inject(BackendTools) private readonly backendTools?: BackendTools,
   ) {
     this.typegraph = typegraph;
     this.structuredData = structuredData;
@@ -572,7 +574,7 @@ export class AgentService implements OnModuleDestroy {
   private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
-    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs));
+    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs), {}, this.backendTools);
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     try {
       const run = await workflow.createRun();
@@ -1118,7 +1120,7 @@ export class AgentService implements OnModuleDestroy {
         streamedAnswer = false;
         await write('text-reset', { reason: 'provider-retry' });
       },
-    });
+    }, this.backendTools);
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     let abort: (() => void) | undefined;
     try {

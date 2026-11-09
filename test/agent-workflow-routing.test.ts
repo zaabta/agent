@@ -1,9 +1,11 @@
+import { z } from 'zod';
+import { BackendTools } from '../src/agent/backend-tools.js';
 import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -22,6 +24,16 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       sheetName: 'Warnings', columnName: 'Employee', values: ['E1', 'E2'],
       filters: [{ columnName: 'Year', operator: 'EQ' as const, value: '2025' }],
     };
+    const backendTools = new BackendTools();
+    backendTools.register({
+      id: 'employee_count', description: 'Count registered employees', input: z.strictObject({ department: z.string().min(1) }),
+      authorize: principal => principal.tenantId === 'tenant' && scenario !== 'backend-denied',
+      execute: async (args, principal) => {
+        assert.equal(args.department, 'Safety');
+        assert.equal(principal.userId, 'user');
+        return 'Registered employees: 42';
+      },
+    });
     const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
       const prompt = messages[0].content;
       if (this.id.startsWith('sitepilot-planner')) {
@@ -31,6 +43,11 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
           return { object: { operation: 'aggregate', aggregate: 'COUNT', usePreviousSelection: !prompt.includes('Authorized schema:') } } as any;
         }
         if (scenario === 'drawing-revisions' || scenario === 'drawing-missing-revision') return { object: { operation: 'retrieve', compareDrawingRevisions: true, retrievalQueries: ['revision A', 'revision B'] } } as any;
+        if (scenario.startsWith('backend-')) {
+          if (scenario === 'backend-denied') assert.doesNotMatch(prompt, /Count registered employees/);
+          else assert.match(prompt, /Count registered employees/);
+          return { object: { operation: 'backend_tool', backendCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
+        }
         if (scenario === 'mixed') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?' } } as any;
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
@@ -80,7 +97,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       },
     };
     try {
-      const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' });
+      const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' }, undefined, {}, backendTools);
       const run = await workflow.createRun();
       const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed' ? 'Count violations in 2025 and describe report risks' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column'), history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
       assert.equal(result.status, 'success');
@@ -92,6 +109,17 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.equal(result.result.citationValidation, 'no-evidence');
         assert.deepEqual(result.result.sources, []);
         assert.equal(result.result.answer, scenario === 'irrelevant-evidence' ? 'لا تتوفر أدلة كافية في الملفات للإجابة.' : scenario === 'invalid-verifier-refusal' ? 'الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.' : 'لا يوجد إشارة إلى اسم شركة التأمين لمشروع Orion في البيانات المقدمة.');
+      }
+      else if (scenario === 'backend-mixed') {
+        assert.match(result.result.answer, /42/);
+        assert.ok(result.result.toolsCalled.includes('employee_count'));
+        assert.ok(result.result.toolsCalled.includes('documentSearch'));
+        assert.deepEqual(result.result.sources.map(source => source.filename), ['risks.md']);
+      }
+      else if (scenario === 'backend-denied' || scenario === 'backend-missing') {
+        assert.equal(result.result.outcome, 'clarification');
+        assert.deepEqual(result.result.toolsCalled, []);
+        assert.deepEqual(calls, []);
       }
       else if (scenario === 'drawing-revisions') {
         assert.equal(result.result.sources.length, 2);

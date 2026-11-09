@@ -171,3 +171,27 @@ names in the question. The comparison requires citations from both documents.
 The workflow keeps ordinary active-version filtering. Visual readings, including
 printed dimensions and schedule cells, are marked unverified and should be checked
 against the original. The workflow does not calculate dimensions from image scale.
+
+### Registering a read-only backend tool
+
+Inject the exported `BackendTools` provider from `AgentModule` into the owning
+Nest provider and register the tool during module initialization.
+
+```ts
+backendTools.register({
+  id: 'employee_count',
+  description: 'Count registered employees in a department.',
+  input: z.strictObject({ department: z.string().min(1).max(80) }),
+  authorize: principal => principal.role === 'TENANT_ADMIN',
+  execute: async ({ department }, principal, signal) => {
+    const count = await directory.countEmployees(principal.tenantId, department, signal);
+    return `Registered employees: ${count}`;
+  },
+});
+```
+
+The handler must independently enforce resource authorization and use the
+server-provided principal for tenant scoping. It must honor the abort signal.
+The registry is intended for read-only handlers. Tool summaries are displayed
+verbatim and are kept separate from document evidence. The existing planner can
+select a registered tool alone or pair it with TypeGraph retrieval.
