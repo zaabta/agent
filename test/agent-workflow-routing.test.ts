@@ -3,7 +3,7 @@ import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'cohort-ar', 'cohort-tr', 'cohort-en', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -12,10 +12,24 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       { documentId: '11111111-1111-4111-8111-111111111111', filename: 'items.csv', sheets: [{ sheetName: 'CSV', columns: ['Project', 'Item', 'Cost'] }] },
       { documentId: '22222222-2222-4222-8222-222222222222', filename: 'violations.xlsx', sheets: [{ sheetName: 'Warnings', columns: ['Project', 'Warning', 'Year'] }] },
     ];
+    const cohortQuestions: Record<string, string> = {
+      'cohort-ar': 'كم مخالفة لدى هؤلاء؟',
+      'cohort-tr': 'Bunların kaç ihlali var?',
+      'cohort-en': 'How many violations do they have?',
+    };
+    const previousSelection = {
+      documentId: datasets[1]!.documentId, versionId: '33333333-3333-4333-8333-333333333333',
+      sheetName: 'Warnings', columnName: 'Employee', values: ['E1', 'E2'],
+      filters: [{ columnName: 'Year', operator: 'EQ' as const, value: '2025' }],
+    };
     const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
       const prompt = messages[0].content;
       if (this.id.startsWith('sitepilot-planner')) {
         if (prompt.startsWith('Decide whether')) return { object: scenario === 'narrative' ? { mode: 'retrieve', retrievalQueries: ['project budget', 'project risks'] } : { mode: 'structured' } } as any;
+        if (cohortQuestions[scenario]) {
+          if (!prompt.includes('Authorized schema:')) assert.match(prompt, /"values":\["E1","E2"\]/);
+          return { object: { operation: 'aggregate', aggregate: 'COUNT', usePreviousSelection: !prompt.includes('Authorized schema:') } } as any;
+        }
         if (scenario === 'mixed') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?' } } as any;
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
@@ -45,6 +59,11 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       discoverDatasets: async () => datasets,
       lookupAnyExact: async () => { assert.fail('A valid aggregation filter must not trigger an exact lookup'); },
       aggregate: async (_operation: string, column: string, _tenant: string, scope: any) => {
+        if (cohortQuestions[scenario]) {
+          assert.deepEqual(scope.selection, previousSelection);
+          assert.deepEqual(scope.filters, previousSelection.filters);
+          return { operation: 'COUNT', total: 11 };
+        }
         if (scenario === 'aggregate-year' || scenario === 'mixed') {
           assert.equal(_operation, 'COUNT');
           assert.equal(scope.documentId, datasets[1]!.documentId);
@@ -58,7 +77,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
     try {
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' });
       const run = await workflow.createRun();
-      const result = await run.start({ inputData: { message: scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed' ? 'Count violations in 2025 and describe report risks' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column', history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed' ? 'Count violations in 2025 and describe report risks' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column'), history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
@@ -69,6 +88,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.deepEqual(result.result.sources, []);
         assert.equal(result.result.answer, scenario === 'irrelevant-evidence' ? 'لا تتوفر أدلة كافية في الملفات للإجابة.' : scenario === 'invalid-verifier-refusal' ? 'الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.' : 'لا يوجد إشارة إلى اسم شركة التأمين لمشروع Orion في البيانات المقدمة.');
       }
+      else if (cohortQuestions[scenario]) { assert.match(result.result.answer, /11/); assert.deepEqual(calls, []); }
       else if (scenario === 'mixed') {
         assert.match(result.result.answer, /21/);
         assert.match(result.result.answer, /Supported fixture answer/);

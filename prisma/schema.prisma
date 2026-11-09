@@ -132,6 +132,7 @@ model Conversation {
 }
 
 model Message {
+  structuredSelection Json? @map("structured_selection")
   id             String       @id @default(uuid()) @db.Uuid
   conversationId String       @db.Uuid @map("conversation_id")
   role           String

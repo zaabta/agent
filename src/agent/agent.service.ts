@@ -1,3 +1,4 @@
+import { structuredSelectionSchema, type StructuredSelection } from './structured-selection.js';
 import { localGenerationOptions } from '../mastra/generation-options.js';
 import { Inject, Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { createHash } from 'node:crypto';
@@ -413,7 +414,7 @@ export class AgentService implements OnModuleDestroy {
     const hasMore = rows.length > limit;
     const messages = rows.slice(0, limit);
     const nextCursor = hasMore ? messages.at(-1)?.id : null;
-    return { ...conversation, hasMore, nextCursor, meta: { limit, count: messages.length, hasMore, nextCursor, direction: 'older' as const }, messages: messages.reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
+    return { ...conversation, hasMore, nextCursor, meta: { limit, count: messages.length, hasMore, nextCursor, direction: 'older' as const }, messages: messages.map(({ structuredSelection: _selection, ...item }) => item).reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
   }
 
   async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {
@@ -575,13 +576,13 @@ export class AgentService implements OnModuleDestroy {
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     try {
       const run = await workflow.createRun();
-      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1) } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: Record<string, number> };
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: Record<string, number> };
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection);
       return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
@@ -1125,14 +1126,14 @@ export class AgentService implements OnModuleDestroy {
       abort = () => { void run.cancel().catch(() => undefined); };
       if (abortSignal.aborted) abort();
       else abortSignal.addEventListener('abort', abort, { once: true });
-      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1) } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; providerRetries: number; providerErrors: number } };
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; providerRetries: number; providerErrors: number } };
       this.activeRuns.beginFinalization(runId, abortSignal);
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection);
       // The streamed model draft is provisional. Citation validation may rewrite it
       // or append server-verified citations, so replace it atomically with the
       // persisted answer to prevent duplicate or unverified text in the client.
@@ -1171,7 +1172,7 @@ export class AgentService implements OnModuleDestroy {
     }
   }
 
-  private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{ conversationId: string; assistantMessageId: string; prompt: AgentMessage[] }> {
+  private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{ conversationId: string; assistantMessageId: string; prompt: AgentMessage[]; previousSelection?: StructuredSelection }> {
     const conversation = conversationId
       ? await this.prisma.conversation.findFirst({
           where: {
@@ -1194,7 +1195,7 @@ export class AgentService implements OnModuleDestroy {
       // so reversing the bounded page restores the actual dialogue order.
       orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
       take: config.conversationHistoryMessages,
-      select: { role: true, content: true },
+      select: { role: true, content: true, structuredSelection: true },
     });
     const [, assistantMessage] = await this.prisma.$transaction([
       this.prisma.message.create({
@@ -1208,12 +1209,14 @@ export class AgentService implements OnModuleDestroy {
       content: item.content.slice(0, config.conversationHistoryChars),
     }));
     prompt.push({ role: 'user', content: message });
-    return { conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt };
+    const storedSelection = history.find(item => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
+    const previous = structuredSelectionSchema.safeParse(storedSelection);
+    return { conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt, previousSelection: previous.success ? previous.data : undefined };
   }
 
-  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string) {
+  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection) {
     await this.prisma.$transaction([
-      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null } }),
+      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
   }

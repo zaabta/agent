@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import * as XLSX from 'xlsx';
 import { parseDocument } from '../src/documents/parser.js';
+import { structuredSelectionSchema } from '../src/agent/structured-selection.js';
 import { StructuredDataService } from '../src/documents/structured-data.service.js';
 
 test('ranks five employees from parsed Excel cells using PostgreSQL SQL and active tenant scope', async () => {
@@ -40,6 +41,11 @@ test('ranks five employees from parsed Excel cells using PostgreSQL SQL and acti
     });
     assert.ok("groups" in result && result.groups);
     assert.deepEqual(result.groups.map(group => [group.value, group.count]), employees.slice(0, 5).map((id, i) => [id, 6 - i]));
+    const selection = structuredSelectionSchema.parse('selection' in result ? result.selection : undefined);
+    const followup = await service.aggregate('COUNT', undefined, 'own', { filters: selection.filters, selection });
+    assert.equal('total' in followup && followup.total, 20);
+    const outdated = await service.aggregate('COUNT', undefined, 'own', { filters: selection.filters, selection: { ...selection, versionId: stale } });
+    assert.equal('total' in outdated && outdated.total, 0);
     assert.equal(result.sources.length, 5);
     assert.ok(result.sources.every(source => source.documentVersionId === version && source.sourceRef.includes('Violations')));
   } finally {

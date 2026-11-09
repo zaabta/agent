@@ -1,3 +1,4 @@
+import { structuredSelectionSchema } from '../agent/structured-selection.js';
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
@@ -73,6 +74,7 @@ export function createSitePilotAgent(
       columnName: z.string().min(1).max(250).optional(),
       documentId: z.string().uuid().optional(),
       sheetName: z.string().max(250).optional(),
+      selection: structuredSelectionSchema.optional(),
       groupLimit: z.number().int().min(1).max(100).optional(),
       filters: z
         .array(
@@ -92,12 +94,14 @@ export function createSitePilotAgent(
       documentId,
       sheetName,
       groupLimit,
+      selection,
       filters,
     }) =>
       structuredData.aggregate(operation, columnName, tenantId, {
         documentId,
         sheetName,
         ...(groupLimit === undefined ? {} : { groupLimit }),
+        ...(selection === undefined ? {} : { selection }),
         filters,
       }),
   });
