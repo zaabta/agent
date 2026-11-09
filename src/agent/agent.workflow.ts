@@ -476,7 +476,8 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             && !requestedColumns.some(column => inputData.message.toLocaleLowerCase().includes(column.toLocaleLowerCase()) && !resolveSchemaLabel(column, labels));
           const unscopedExactRecovery = !namesDataset && !plan.filters?.length && (inputData.plan.operation === 'lookup' || highSignalValues.length > 0);
           if (config.agentTrace) console.info(JSON.stringify({ type: 'sitepilot-exact-recovery', requestId, initialOperation: inputData.plan.operation, operation: plan.operation, candidateCount: searchCandidates.length, invalidColumnCount: invalidColumns.length, namesDataset, valueWasInMessage: Boolean(plan.value && inputData.message.toLocaleLowerCase().includes(plan.value.toLocaleLowerCase())), unscoped: unscopedExactRecovery, filterValueCandidate: filterCarriesExactUserValue }));
-          if (searchCandidates.length && (unscopedExactRecovery || modelPutCellValueInColumnSlot || filterCarriesExactUserValue)) {
+          const validAggregate = plan.operation === 'aggregate' && Boolean(plan.aggregate) && invalidColumns.length === 0;
+          if (!validAggregate && searchCandidates.length && (unscopedExactRecovery || modelPutCellValueInColumnSlot || filterCarriesExactUserValue)) {
           recoveredExactLookup = await structured.lookupAnyExact(filterCarriesExactUserValue ? [plan.filters![0]!.value] : searchCandidates, principal.tenantId);
           toolResults.push({ name: 'structuredDataLookup', result: recoveredExactLookup });
           toolNames.push('structuredDataLookup');
