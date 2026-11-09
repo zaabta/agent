@@ -3,7 +3,7 @@ import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'followup', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -16,6 +16,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const prompt = messages[0].content;
       if (this.id.startsWith('sitepilot-planner')) {
         if (prompt.startsWith('Decide whether')) return { object: scenario === 'narrative' ? { mode: 'retrieve', retrievalQueries: ['project budget', 'project risks'] } : { mode: 'structured' } } as any;
+        if (scenario === 'mixed') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?' } } as any;
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
         if (scenario === 'same-source-chunks' || scenario === 'irrelevant-evidence' || scenario === 'mislabelled-refusal' || scenario === 'invalid-verifier-refusal') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
@@ -44,11 +45,11 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       discoverDatasets: async () => datasets,
       lookupAnyExact: async () => { assert.fail('A valid aggregation filter must not trigger an exact lookup'); },
       aggregate: async (_operation: string, column: string, _tenant: string, scope: any) => {
-        if (scenario === 'aggregate-year') {
+        if (scenario === 'aggregate-year' || scenario === 'mixed') {
           assert.equal(_operation, 'COUNT');
           assert.equal(scope.documentId, datasets[1]!.documentId);
           assert.deepEqual(scope.filters, [{ columnName: 'Year', operator: 'EQ', value: '2025' }]);
-          return { operation: 'COUNT', total: 21 };
+          return { operation: 'COUNT', total: 21, sources: [{ documentId: datasets[1]!.documentId, filename: 'violations.xlsx', sourceRef: 'violations.xlsx rows 2-22', chunkIndex: 0 }] };
         }
         assert.equal(column, 'Cost'); assert.equal(scope.documentId, datasets[0]!.documentId);
         return { operation: 'SUM', value: 300, sources: [{ documentId: datasets[0]!.documentId, filename: 'items.csv', sourceRef: 'items.csv rows 2-3', chunkIndex: 0 }] };
@@ -57,7 +58,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
     try {
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' });
       const run = await workflow.createRun();
-      const result = await run.start({ inputData: { message: scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column', history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
+      const result = await run.start({ inputData: { message: scenario === 'followup' ? 'وماذا عن المخاطر؟' : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed' ? 'Count violations in 2025 and describe report risks' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column', history: scenario === 'followup' ? [{ role: 'user', content: 'Describe the project' }, { role: 'assistant', content: 'Project evidence [[project.md (line 1)]]' }] : [] } });
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
@@ -67,6 +68,12 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.equal(result.result.citationValidation, 'no-evidence');
         assert.deepEqual(result.result.sources, []);
         assert.equal(result.result.answer, scenario === 'irrelevant-evidence' ? 'لا تتوفر أدلة كافية في الملفات للإجابة.' : scenario === 'invalid-verifier-refusal' ? 'الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.' : 'لا يوجد إشارة إلى اسم شركة التأمين لمشروع Orion في البيانات المقدمة.');
+      }
+      else if (scenario === 'mixed') {
+        assert.match(result.result.answer, /21/);
+        assert.match(result.result.answer, /Supported fixture answer/);
+        assert.deepEqual(calls, ['What risks are in the safety reports?']);
+        assert.deepEqual(result.result.sources.map(source => source.filename).sort(), ['risks.md', 'violations.xlsx']);
       }
       else if (scenario === 'aggregate-year') { assert.match(result.result.answer, /21/); assert.deepEqual(calls, []); }
       else if (scenario === 'aggregate-unique') { assert.match(result.result.answer, /300/); assert.deepEqual(calls, []); }
