@@ -73,6 +73,7 @@ export function createSitePilotAgent(
       columnName: z.string().min(1).max(250).optional(),
       documentId: z.string().uuid().optional(),
       sheetName: z.string().max(250).optional(),
+      groupLimit: z.number().int().min(1).max(100).optional(),
       filters: z
         .array(
           z.object({
@@ -90,11 +91,13 @@ export function createSitePilotAgent(
       columnName,
       documentId,
       sheetName,
+      groupLimit,
       filters,
     }) =>
       structuredData.aggregate(operation, columnName, tenantId, {
         documentId,
         sheetName,
+        ...(groupLimit === undefined ? {} : { groupLimit }),
         filters,
       }),
   });

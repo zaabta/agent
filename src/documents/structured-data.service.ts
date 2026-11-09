@@ -4,7 +4,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { config } from '../config.js';
 
 type CellFilter = { columnName: string; operator: 'EQ' | 'CONTAINS' | 'GT' | 'GTE' | 'LT' | 'LTE'; value: string };
-type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[] };
+type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[]; groupLimit?: number };
 export type StructuredSource = { documentId: string; filename: string; sourceRef: string; chunkIndex: number; documentVersionId?: string; chunkId?: string; contentHash?: string };
 type QueryRow = Record<string, unknown>;
 
@@ -214,7 +214,10 @@ export class StructuredDataService {
     const numberPattern = '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$';
 
     if (operation === 'GROUP_BY' || operation === 'DISTINCT') {
+      const limit = filter.groupLimit ?? (operation === 'DISTINCT' ? 100 : 20);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('Invalid group limit');
       const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
+        WITH groups AS (
         SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName",
           LOWER(BTRIM(c.value)) AS normalized, MIN(BTRIM(c.value)) AS label,
           COUNT(DISTINCT c.row_number)::int AS count,
@@ -225,7 +228,13 @@ export class StructuredDataService {
           ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn} AND BTRIM(c.value) <> ''
           AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
         GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name, LOWER(BTRIM(c.value))
-        ORDER BY count DESC, normalized ASC, d.filename ASC LIMIT 1000
+        ), ranked AS (
+          SELECT normalized, SUM(count) AS total
+          FROM groups GROUP BY normalized
+          ORDER BY total DESC, normalized ASC LIMIT ${limit}
+        )
+        SELECT groups.* FROM groups JOIN ranked USING (normalized)
+        ORDER BY ranked.total DESC, normalized ASC, filename ASC, "sheetName" ASC, "documentId" ASC
       `);
       const groups = new Map<string, { value: string; count: number; sources: StructuredSource[] }>();
       const allSources: StructuredSource[] = [];
@@ -237,11 +246,11 @@ export class StructuredDataService {
         const ref = source(String(row.documentId), String(row.filename), String(row.sheetName), rowNumbers, allSources.length, String(row.versionId));
         group.sources.push(ref); allSources.push(ref); groups.set(key, group);
       }
-      const values = [...groups.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+      const values = [...groups.values()];
       return {
         operation, columnName: safeColumn,
         value: operation === 'DISTINCT' ? values.map(group => group.value) : undefined,
-        groups: values.slice(0, operation === 'DISTINCT' ? 100 : 20), sources: allSources,
+        groups: values, sources: allSources,
         durationMs: Math.round(performance.now() - startedAt),
       };
     }
