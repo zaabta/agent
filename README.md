@@ -149,3 +149,25 @@ AGENT_E2E_URL=http://127.0.0.1:3220 DEV_API_KEY="$API_KEY" pnpm test:e2e:stream
 This real integration test checks Mastra tool events, multiple text deltas before `done`, a verified citation and persisted conversation messages.
 
 The synchronous `/ask` compatibility and two-turn history test is available as `pnpm test:e2e:ask` under the same environment requirements.
+
+### Excel ranking and drawing evidence
+
+The workflow accepts requests such as “Top five employees by violation count in
+2025” and “How many safety violations do they have?”. A ranked result from a single
+sheet can be reused in a later turn of the same conversation. Its sheet, version,
+selected values and applicable filters are used to constrain the SQL query. Apply
+the additive migration with `npm run prisma:deploy` against your development
+database before starting the updated API.
+
+Set `OLLAMA_VISION_MODEL` on the document worker to a vision-capable local Ollama
+model. Upload PNG/JPEG files normally, or use the suffix `.drawing.pdf` for PDFs
+that should be rendered for vision. Drawing PDFs are limited to eight physical
+pages. Regular PDF text extraction is selected by the usual `.pdf` filename.
+Indexing stores machine transcriptions and physical page references. Room
+schedules are searchable text and do not enter the SQL analytics tables.
+
+To compare revisions, upload them as separately named documents and mention both
+names in the question. The comparison requires citations from both documents.
+The workflow keeps ordinary active-version filtering. Visual readings, including
+printed dimensions and schedule cells, are marked unverified and should be checked
+against the original. The workflow does not calculate dimensions from image scale.

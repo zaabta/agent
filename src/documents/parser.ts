@@ -3,9 +3,10 @@ import mammoth from 'mammoth';
 import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 import { PDFParse } from 'pdf-parse';
+import { isDrawing, parseDrawing } from './drawing-vision.js';
 import { BadRequestException } from '@nestjs/common';
 
-export const SUPPORTED_EXTENSIONS = ['.md', '.txt', '.docx', '.pdf', '.xlsx', '.xls', '.csv'] as const;
+export const SUPPORTED_EXTENSIONS = ['.md', '.txt', '.docx', '.pdf', '.xlsx', '.xls', '.csv', '.png', '.jpg', '.jpeg'] as const;
 export interface StructuredCell { sheetName: string; rowNumber: number; address: string; columnName: string; value: string; valueType: string; formula?: string; }
 export interface ParsedDocument { extension: string; text: string; structuredCells?: StructuredCell[]; }
 
@@ -74,9 +75,10 @@ function parseCsvDocument(text: string): { text: string; structuredCells: Struct
   return { text: lines.join('\n'), structuredCells };
 }
 
-export async function parseDocument(filename: string, buffer: Buffer): Promise<ParsedDocument> {
+export async function parseDocument(filename: string, buffer: Buffer, signal?: AbortSignal): Promise<ParsedDocument> {
   const extension = extname(filename).toLowerCase();
   if (!SUPPORTED_EXTENSIONS.includes(extension as typeof SUPPORTED_EXTENSIONS[number])) throw new BadRequestException('UNSUPPORTED_FILE_TYPE');
+  if (isDrawing(filename)) return { extension, text: await parseDrawing(filename, buffer, signal) };
   let text: string;
   let structuredCells: StructuredCell[] | undefined;
   if (extension === '.docx') {

@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 
 export const DOCUMENT_LIST_STATUSES = ['queued', 'processing', 'ready', 'failed', 'cancelled'] as const;
-export const DOCUMENT_LIST_TYPES = ['pdf', 'docx', 'xlsx', 'xls', 'csv', 'md', 'txt'] as const;
+export const DOCUMENT_LIST_TYPES = ['pdf', 'docx', 'xlsx', 'xls', 'csv', 'md', 'txt', 'png', 'jpg', 'jpeg'] as const;
 export type DocumentListQuery = {
   page: number;
   limit: number;

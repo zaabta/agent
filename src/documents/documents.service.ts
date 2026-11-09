@@ -7,11 +7,15 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { TypegraphService } from '../typegraph/typegraph.service.js';
 import { DocumentQueueService } from './document-queue.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
+import { isDrawing, matchesDrawingImage } from './drawing-vision.js';
 import { SUPPORTED_EXTENSIONS } from './parser.js';
 import type { DocumentListQuery } from './document-list-query.js';
 import { safeDisplayName } from './display-name.js';
 
 const MIME_BY_EXTENSION: Record<string, string[]> = {
+  '.png': ['image/png', 'application/octet-stream'],
+  '.jpg': ['image/jpeg', 'application/octet-stream'],
+  '.jpeg': ['image/jpeg', 'application/octet-stream'],
   '.md': ['text/markdown', 'text/plain', 'application/octet-stream'],
   '.txt': ['text/plain', 'application/octet-stream'],
   '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/zip', 'application/octet-stream'],
@@ -26,6 +30,9 @@ function validateSignature(extension: string, data: Buffer) {
   const checks: Record<string, boolean> = {
     '.md': data.length > 0, '.txt': data.length > 0,
     '.docx': isZip, '.xlsx': isZip,
+    '.png': matchesDrawingImage('.png', data),
+    '.jpg': matchesDrawingImage('.jpg', data),
+    '.jpeg': matchesDrawingImage('.jpeg', data),
     '.pdf': data.subarray(0, 5).toString('ascii') === '%PDF-',
     '.xls': data[0] === 0xd0 && data[1] === 0xcf && data[2] === 0x11 && data[3] === 0xe0,
     '.csv': data.length > 0,
@@ -153,12 +160,14 @@ export class DocumentsService implements OnModuleInit {
     const duplicateVersion = existingDocumentId ? await this.prisma.appDocumentVersion.findFirst({ where: { documentId: existingDocumentId, checksum } }) : null;
     if (duplicateVersion) {
       await this.storage.cleanup(file.filename);
+      if (isDrawing(duplicateVersion.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
       await this.recoverQueuedUpload(existingDocumentId!, tenantId, userId, duplicateVersion.id);
       return { document: await this.get(existingDocumentId!, tenantId), duplicate: true, version: this.safeVersion(duplicateVersion) };
     }
     const existing = existingDocumentId ? null : await this.prisma.appDocument.findFirst({ where: { tenantId, checksum } });
     if (existing) {
       await this.storage.cleanup(file.filename);
+      if (isDrawing(existing.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
       await this.recoverQueuedUpload(existing.id, tenantId, userId);
       return { document: await this.get(existing.id, tenantId), duplicate: true };
     }
@@ -166,6 +175,7 @@ export class DocumentsService implements OnModuleInit {
       const existingVersion = await this.prisma.appDocumentVersion.findFirst({ where: { tenantId, checksum } });
       if (existingVersion) {
         await this.storage.cleanup(file.filename);
+        if (isDrawing(existingVersion.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
         await this.recoverQueuedUpload(existingVersion.documentId, tenantId, userId, existingVersion.id);
         return { document: await this.get(existingVersion.documentId, tenantId), duplicate: true, version: this.safeVersion(existingVersion) };
       }

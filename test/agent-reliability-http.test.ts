@@ -46,18 +46,38 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
   let pauseStreaming = false;
   let slowStreaming = false;
   let planPrompt = '';
+  let analyticsMode: 'rank' | 'followup' | undefined;
+  const workbook = { documentId: randomUUID(), filename: 'violations.xlsx', sheets: [{ sheetName: 'Warnings', columns: ['Employee', 'Year'] }] };
+  const selection = { documentId: workbook.documentId, versionId: randomUUID(), sheetName: 'Warnings', columnName: 'Employee', values: ['E1', 'E2'], filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] };
   const queries: string[] = [];
   const hit = (id: string) => ({ content: `Project ${id}`, score: 0.4, sourceRef: id, metadata: {}, citation: { documentId: id, filename: `${id}.md`, bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } });
   const service = new AgentService({ searchDocuments: async (query: string, _limit: number, tenant: string, user: string) => {
     assert.equal(tenant, 'workspace'); assert.equal(user, 'owner'); queries.push(query);
     return { query, hits: [hit(query.includes('cost') ? 'costs' : 'risks')], timing: { embeddingMs: 0, retrievalMs: 1, searchMs: 1 } };
-  } } as any, db as any, {} as any);
+  } } as any, db as any, {
+    discoverDatasets: async () => [workbook],
+    aggregate: async (_operation: string, _column: string, tenant: string, scope: any) => {
+      assert.equal(tenant, principal.tenantId);
+      assert.deepEqual(scope.filters, selection.filters);
+      if (analyticsMode === 'followup') {
+        assert.deepEqual(scope.selection, selection);
+        return { operation: 'COUNT', total: 11 };
+      }
+      assert.equal(scope.groupLimit, 2);
+      return { operation: 'GROUP_BY', groups: [{ value: 'E1', count: 6 }, { value: 'E2', count: 5 }], selection, sources: [{ documentId: workbook.documentId, filename: workbook.filename, sourceRef: 'violations.xlsx rows 2-12', chunkIndex: 0 }] };
+    },
+  } as any);
   const generation = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any, options: any) {
     if (config.modelProvider === 'ollama' && config.model.startsWith('qwen3') && !config.ollamaThink) assert.equal(options?.providerOptions?.ollama?.reasoningEffort, 'none');
     if (limited) throw Object.assign(new Error('mock rate limit'), { statusCode: 429, responseHeaders: { 'retry-after': '0' } });
     const prompt = messages[0].content;
     if (this.id.startsWith('sitepilot-planner')) {
       planPrompt = prompt;
+      if (analyticsMode === 'rank') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', datasetId: workbook.documentId, columnName: 'Employee', filters: selection.filters, groupLimit: 2 } } as any;
+      if (analyticsMode === 'followup') {
+        if (!prompt.includes('Authorized schema:')) assert.match(prompt, /"values":\["E1","E2"\]/);
+        return { object: { operation: 'aggregate', aggregate: 'COUNT', usePreviousSelection: true } } as any;
+      }
       return { object: { operation: 'retrieve', standaloneQuestion: 'Compare project costs and risks', retrievalQuery: 'project costs risks', retrievalQueries: ['project costs', 'project risks'] } } as any;
     }
     return { object: { answer: 'Costs and risks are documented.', evidenceSufficient: true, evidenceIds: ['E1', 'E2'] } } as any;
@@ -165,6 +185,21 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.ok(olderList.conversations.some((c: any) => c.id === id));
     const other = await fetch(`${base}/api/agent/conversations?cursor=${listPage.nextCursor}`, { headers: { authorization: 'Bearer test-other' } });
     assert.equal(other.status, 404);
+    analyticsMode = 'rank';
+    const ranked = await request('ask', { message: 'Top two employees in 2025', conversationId: id });
+    assert.equal(ranked.status, 201);
+    assert.match((await ranked.json() as any).answer, /E1: 6/);
+    assert.deepEqual(db.messages.at(-1).structuredSelection, selection);
+    limited = true;
+    assert.equal((await request('ask', { message: 'Provider failure', conversationId: id })).status, 503);
+    limited = false;
+    analyticsMode = 'followup';
+    const followup = await request('ask', { message: 'How many violations do they have?', conversationId: id });
+    assert.equal(followup.status, 201);
+    assert.match((await followup.json() as any).answer, /Record count: 11/);
+    const history = await (await request(`conversations/${id}`)).json() as any;
+    assert.ok(history.messages.every((message: any) => !('structuredSelection' in message)));
+
   } finally {
     await app.close(); generation.mock.restore(); streaming.mock.restore();
     config.agentOrchestration = previous;

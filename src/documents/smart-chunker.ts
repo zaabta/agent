@@ -177,7 +177,7 @@ function tableBlocksFromCells(cells: ChunkableCell[], sourceType: string, filena
 }
 
 function blocksFor(sourceType: string, text: string): Block[] {
-  if (sourceType === 'pdf') {
+  if (['pdf', 'png', 'jpg', 'jpeg'].includes(sourceType)) {
     return [...text.matchAll(/(?:^|\n)Page\s+(\d+)\s*:\s*([\s\S]*?)(?=\nPage\s+\d+\s*:|$)/gi)]
       .map(m => ({ text: m[2]!.trim(), pageNumber: Number(m[1]) })).filter(b => b.text);
   }
