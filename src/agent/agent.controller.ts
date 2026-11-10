@@ -5,7 +5,7 @@ import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
-import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiSecurity, ApiTags, ApiUnauthorizedResponse } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../auth/roles.decorator.js';
 import { readTenantTrace } from '../mastra/observability.js';
 import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';

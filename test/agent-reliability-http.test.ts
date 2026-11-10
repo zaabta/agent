@@ -127,7 +127,7 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.doesNotMatch(failedFrames, /event: done/);
     assert.equal((await (await request(`conversations/${id}`)).json() as any).messages.at(-1).status, 'failed');
     limited = false;
-    for (const message of ['قارن بينهما', 'İkisini karşılaştır', 'Compare them']) {
+    for (const message of ['\u0642\u0627\u0631\u0646 \u0628\u064a\u0646\u0647\u0645\u0627', '\u0130kisini kar\u015f\u0131la\u015ft\u0131r', 'Compare them']) {
       const response = await request('stream', { message, conversationId: id });
       const frames = (await response.text()).split('\n\n').filter(Boolean).map(frame => ({ name: frame.split('\n')[0]!.slice(7), data: JSON.parse(frame.split('\ndata: ')[1]!) }));
       for (const name of ['status', 'stage', 'tool-start', 'tool-finish', 'text-delta', 'text-reset', 'sources', 'done']) assert.ok(frames.some(frame => frame.name === name), name);

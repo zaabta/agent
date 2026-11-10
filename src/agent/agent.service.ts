@@ -17,7 +17,9 @@ import { createAgentWorkflow } from './agent.workflow.js';
 import { recordWorkflowDiagnostic } from '../mastra/observability.js';
 import { safeProviderFailure } from './provider-errors.js';
 import { ActiveAgentRunRegistry, AgentRunCancelledError } from './active-run-registry.js';
-import { validateUserMemory } from './user-memory.js';
+import { ConversationContextService } from './conversation-context.service.js';
+import { UserMemoryService } from './user-memory.service.js';
+import { isEvidenceFollowUp } from './retrieval-policy.js';
 
 export interface VerifiedSource {
   documentId: string;
@@ -172,15 +174,21 @@ function withStructuredEvidence(prompt: AgentMessage[], question: string, result
 export class AgentService implements OnModuleDestroy {
   private readonly typegraph: TypegraphService;
   private readonly structuredData: StructuredDataService;
+  private readonly conversationContext: ConversationContextService;
+  private readonly userMemory: UserMemoryService;
   private readonly activeRuns = new ActiveAgentRunRegistry();
   constructor(
     @Inject(TypegraphService) typegraph: TypegraphService,
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(StructuredDataService) structuredData: StructuredDataService,
     @Optional() @Inject(BackendTools) private readonly backendTools?: BackendTools,
+    @Optional() @Inject(ConversationContextService) conversationContext?: ConversationContextService,
+    @Optional() @Inject(UserMemoryService) userMemory?: UserMemoryService,
   ) {
     this.typegraph = typegraph;
     this.structuredData = structuredData;
+    this.conversationContext = conversationContext ?? new ConversationContextService(prisma);
+    this.userMemory = userMemory ?? new UserMemoryService(prisma);
   }
 
   async onModuleDestroy() {
@@ -438,41 +446,19 @@ export class AgentService implements OnModuleDestroy {
   }
 
   async listMemories(principal: AuthPrincipal) {
-    return this.prisma.userMemory.findMany({
-      where: { tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: 100,
-      select: { id: true, category: true, content: true, createdAt: true, updatedAt: true },
-    });
+    return this.userMemory.list(principal);
   }
 
   async createMemory(input: { category?: unknown; content?: unknown }, principal: AuthPrincipal) {
-    const memory = validateUserMemory(input.content, input.category);
-    return this.prisma.userMemory.create({
-      data: { tenantId: principal.tenantId, userId: principal.userId, ...memory },
-      select: { id: true, category: true, content: true, createdAt: true, updatedAt: true },
-    });
+    return this.userMemory.create(input, principal);
   }
 
   async updateMemory(id: string, input: { category?: unknown; content?: unknown }, principal: AuthPrincipal) {
-    const memory = validateUserMemory(input.content, input.category);
-    const result = await this.prisma.userMemory.updateMany({
-      where: { id, tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      data: memory,
-    });
-    if (!result.count) throw new NotFoundException('MEMORY_NOT_FOUND');
-    return this.prisma.userMemory.findFirst({
-      where: { id, tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      select: { id: true, category: true, content: true, createdAt: true, updatedAt: true },
-    });
+    return this.userMemory.update(id, input, principal);
   }
 
   async deleteMemory(id: string, principal: AuthPrincipal) {
-    const result = await this.prisma.userMemory.updateMany({
-      where: { id, tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      data: { deletedAt: new Date() },
-    });
-    if (!result.count) throw new NotFoundException('MEMORY_NOT_FOUND');
-    return { id, deleted: true };
+    return this.userMemory.delete(id, principal);
   }
 
   async ask(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
@@ -489,7 +475,7 @@ export class AgentService implements OnModuleDestroy {
       const answer = documents.length
         ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}`
         : 'There are no indexed documents in your workspace.';
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer, undefined, principal, [], turn.preserveConversationContext);
       return { answer, sources: [], toolsCalled: ['listDocuments'], citationValidation: 'valid' as const,
         conversationId: turn.conversationId,
         timing: { retrievalMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) } };
@@ -591,7 +577,7 @@ export class AgentService implements OnModuleDestroy {
       }
     }
     this.trace('answer-finalized', { mode: 'generate', citationValidation: result.citationValidation, sources: result.sources.length, answerLength: result.answer.length, citationCheck: this.traceCitationCheck(answer, toolResults), draft: '[redacted]', toolResults: this.traceToolResults(toolResults) });
-    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer, undefined, principal, result.sources);
+    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer, undefined, principal, result.sources, turn.preserveConversationContext);
     const timings = this.extractTimings(toolResults);
     return {
       answer: result.answer, sources: result.sources, toolsCalled: result.toolsCalled,
@@ -622,7 +608,7 @@ export class AgentService implements OnModuleDestroy {
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
       const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: Record<string, number> };
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext);
       return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
@@ -679,7 +665,7 @@ export class AgentService implements OnModuleDestroy {
     // Recheck private conversation ownership in persistent state. The API guard
     // has already revalidated the JWT, workspace membership, and user status.
     const conversation = await this.prisma.conversation.findFirst({
-      where: { id: run.conversationId, ownerId: principal.userId },
+      where: { id: run.conversationId, tenantId: principal.tenantId, ownerId: principal.userId },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException('AGENT_RUN_NOT_FOUND');
@@ -720,7 +706,7 @@ export class AgentService implements OnModuleDestroy {
       const documents = listing.documents as Array<{ id?: string; name?: string }>;
       const answer = documents.length ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}` : 'There are no indexed documents in your workspace.';
       this.activeRuns.beginFinalization(runId, abortSignal);
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer, undefined, principal, [], turn.preserveConversationContext);
       await emit('tool-finish', { toolName: 'listDocuments', durationMs: listing.durationMs, sourceCount: 0 });
       await emit('text-delta', { text: answer, verification: 'verified' });
       const telemetry = { timeToFirstTokenMs: Math.round(performance.now() - startedAt), llmCalls: 0, toolExecutionMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) };
@@ -1094,7 +1080,7 @@ export class AgentService implements OnModuleDestroy {
       result.citationValidation = 'no-evidence';
     }
     this.activeRuns.beginFinalization(runId, abortSignal);
-    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer, undefined, principal, result.sources);
+    await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer, undefined, principal, result.sources, turn.preserveConversationContext);
 
     const totalMs = Math.round(performance.now() - startedAt);
     const telemetry = {
@@ -1174,7 +1160,7 @@ export class AgentService implements OnModuleDestroy {
       }
       const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; promptTokens: number; completionTokens: number; reasoningTokens: number; llmLatencyMs: number; providerRetries: number; providerErrors: number } };
       this.activeRuns.beginFinalization(runId, abortSignal);
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext);
       // The streamed model draft is provisional. Citation validation may rewrite it
       // or append server-verified citations, so replace it atomically with the
       // persisted answer to prevent duplicate or unverified text in the client.
@@ -1231,6 +1217,7 @@ export class AgentService implements OnModuleDestroy {
     userMemories: Array<{ category: 'preference' | 'fact' | 'project' | 'decision'; content: string }>;
     evidenceRefs: Array<{ documentId: string; filename: string; sourceRef: string; documentVersionId?: string }>;
     conversationSummary: string;
+    preserveConversationContext: boolean;
   }> {
     const conversation = conversationId
       ? await this.prisma.conversation.findFirst({
@@ -1248,20 +1235,10 @@ export class AgentService implements OnModuleDestroy {
         });
     if (!conversation) throw new NotFoundException('CONVERSATION_NOT_FOUND');
 
-    const context = this.prisma.conversationContext?.findFirst
-      ? await this.prisma.conversationContext.findFirst({
-          where: { conversationId: conversation.id, tenantId: principal.tenantId, ownerId: principal.userId },
-          select: { evidenceRefs: true, activeSelection: true, summary: true },
-        })
-      : null;
-    const userMemories = this.prisma.userMemory?.findMany
-      ? (await this.prisma.userMemory.findMany({
-          where: { tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-          orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: 8,
-          select: { category: true, content: true },
-        })).filter((item: any) => ['preference', 'fact', 'project', 'decision'].includes(item.category))
-        .map((item: any) => ({ category: item.category as 'preference' | 'fact' | 'project' | 'decision', content: item.content }))
-      : [];
+    const [context, userMemories] = await Promise.all([
+      this.conversationContext.load(conversation.id, principal),
+      this.userMemory.forPrompt(principal),
+    ]);
 
     const history = await this.prisma.message.findMany({
       where: { conversationId: conversation.id, OR: [{ role: 'user' }, { role: 'assistant', status: 'completed' }] },
@@ -1284,7 +1261,8 @@ export class AgentService implements OnModuleDestroy {
       content: item.content.slice(0, config.conversationHistoryChars),
     }));
     prompt.push({ role: 'user', content: message });
-    const storedSelection = context?.activeSelection ?? history.find(item => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
+    const preserveConversationContext = isEvidenceFollowUp(message, prompt.slice(0, -1));
+    const storedSelection = context ? context.activeSelection : history.find(item => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
     const previous = structuredSelectionSchema.safeParse(storedSelection);
     const refsSchema = z.array(z.object({
       documentId: z.string().uuid(), filename: z.string().max(500), sourceRef: z.string().max(1000),
@@ -1295,36 +1273,19 @@ export class AgentService implements OnModuleDestroy {
       conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt,
       previousSelection: previous.success ? previous.data : undefined,
       userMemories, evidenceRefs: evidenceRefs.success ? evidenceRefs.data : [],
-      conversationSummary: typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
+      conversationSummary: preserveConversationContext && typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
+      preserveConversationContext,
     };
   }
 
-  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = []) {
+  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = [], preserveConversationContext = false) {
     const operations: any[] = [
       this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ];
-    const validSources = sources.filter(source => source.documentId && source.filename && source.sourceRef && Number.isInteger(source.chunkIndex)).slice(0, 12);
-    if (principal && this.prisma.conversationContext?.upsert) {
-      const prior = await this.prisma.conversationContext.findFirst({ where: { conversationId, tenantId: principal.tenantId, ownerId: principal.userId }, select: { evidenceRefs: true, activeSelection: true, entities: true, decisions: true } });
-      const priorRefs = Array.isArray(prior?.evidenceRefs) ? prior.evidenceRefs as Array<Record<string, unknown>> : [];
-      const nextRefs = validSources.length
-        ? validSources.map(({ documentId, filename, sourceRef, documentVersionId }) => ({ documentId, filename, sourceRef, ...(documentVersionId ? { documentVersionId } : {}) }))
-        : priorRefs;
-      const entities = Array.isArray(prior?.entities) ? prior.entities.filter((value): value is string => typeof value === 'string') : [];
-      const entityHints = [...nextRefs.map(ref => ref.filename), ...(selection ? Object.values(selection).filter((value): value is string => typeof value === 'string') : [])];
-      const mergedEntities = [...new Set([...entities, ...entityHints])].slice(-30);
-      const decisions = Array.isArray(prior?.decisions) ? prior.decisions.filter((value): value is string => typeof value === 'string') : [];
-      const decisionSentences = content.split(/(?<=[.!?؟])\s+/u).filter(sentence => /\b(?:I will|we will|decided|decision|prefer|always|never|سأ|قررنا|أفضل|سأعتمد|karar|tercih|bundan sonra)\b/iu.test(sentence)).map(sentence => sentence.trim().slice(0, 240));
-      const mergedDecisions = [...new Set([...decisions, ...decisionSentences])].slice(-20);
-      const summary = [...mergedEntities.map(value => `Context: ${value}`), ...mergedDecisions.map(value => `Decision: ${value}`)].join('\n').slice(-2000);
-      const update: Record<string, unknown> = { evidenceRefs: nextRefs, entities: mergedEntities, decisions: mergedDecisions, summary };
-      if (selection) update.activeSelection = selection;
-      operations.push(this.prisma.conversationContext.upsert({
-        where: { conversationId },
-        create: { conversationId, tenantId: principal.tenantId, ownerId: principal.userId, ...update },
-        update,
-      }));
+    if (principal) {
+      const contextUpdate = this.conversationContext.saveTurn(conversationId, principal, content, sources, selection, preserveConversationContext);
+      if (contextUpdate) operations.push(contextUpdate);
     }
     await this.prisma.$transaction(operations);
   }

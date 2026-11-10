@@ -64,12 +64,13 @@ export function mergeRetrievalEvidence(lists: DocumentSearchHit[][], maxHits = 8
  * Limit the override to explicit follow-up references; unrelated conversation
  * still uses the planner's ordinary-conversation path. */
 export function isEvidenceFollowUp(message: string, history: ContextTurn[]): boolean {
-  if (!history.some(turn => turn.role === 'assistant' && /\[\[[^\]]+\]\]/u.test(turn.content))) return false;
+  const latestAssistant = [...history].reverse().find(turn => turn.role === 'assistant');
+  if (!latestAssistant || !/\[\[[^\]]+\]\]/u.test(latestAssistant.content)) return false;
   const text = message.normalize('NFKC').toLocaleLowerCase();
   const latin = text.normalize('NFKD').replace(/\p{M}/gu, '').replace(/ı/g, 'i');
   const english = /\b(?:it|them|those|these|that|this|previous|second|first|same|there)\b|\bwhat about\b/iu.test(text);
   const turkish = /(?:^|\s)(?:bunlar(?:la|dan|in|i)?|onlar(?:la|dan|in|i)?|onceki|ikincisi|ikisini|peki|onun|ona|bunun(?:la|dan|in|u)?|buna|ayni|orada)(?:\b|[?.!,])/iu.test(latin);
-  const arabic = /(?:ماذا\s+(?:عن|بشأن|حول)|ما\s+(?:رأيك|نتيجة|الذي|التي)(?:\s+(?:فيه|فيها|عنها|عنهم))?|(?:وماذا|وبالنسبة)\s|(?:هذا|هذه|ذلك|تلك|هؤلاء|هم|هن|ها|به|بها|لهم|لها|عنها|عنهم|منهم|منها|السابق|السابقة|المذكور|المذكورة|أيضًا|كذلك))/u.test(text);
+  const arabic = /(?:ماذا\s+(?:عن|بشأن|حول)|ما\s+(?:رأيك|نتيجة|الذي|التي)(?:\s+(?:فيه|فيها|عنها|عنهم))?|(?:وماذا|وبالنسبة)\s|بينهما|بينهم|بينها|(?:هذا|هذه|ذلك|تلك|هؤلاء|هم|هن|ها|به|بها|لهم|لها|عنها|عنهم|منهم|منها|السابق|السابقة|المذكور|المذكورة|أيضًا|كذلك))/u.test(text);
   const legacyArabic = /(?:Ù…Ø§Ø°Ø§ Ø¹Ù†|Ø¹Ù†Ù‡Ø§|Ø¹Ù†Ù‡Ù…|Ø¨ÙŠÙ†Ù‡Ù…Ø§|Ø§Ù„Ø³Ø§Ø¨Ù‚|Ø§Ù„Ø«Ø§Ù†ÙŠ|Ø§Ù„Ø§ÙˆÙ„)/u.test(text);
   return english || turkish || arabic || legacyArabic;
 }

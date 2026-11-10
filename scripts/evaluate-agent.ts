@@ -9,7 +9,9 @@ const label = process.env.EVAL_LABEL ?? 'after';
 if (!/^[a-z0-9-]+$/i.test(label)) throw new Error('Invalid EVAL_LABEL');
 let previousResults: any[] = [];
 if (process.env.EVAL_RESUME === 'true' && base && token) {
-  try { previousResults = JSON.parse(await readFile(`docs/audit/quality-${label}.json`, 'utf8')).results ?? []; } catch {}
+  try { previousResults = JSON.parse(await readFile(`docs/audit/quality-${label}.json`, 'utf8')).results ?? []; } catch {
+    // A missing checkpoint starts a fresh resumable evaluation.
+  }
 }
 const results: any[] = [];
 await mkdir('docs/audit', { recursive: true });

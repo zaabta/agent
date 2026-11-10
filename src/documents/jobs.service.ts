@@ -161,6 +161,8 @@ export class JobsService {
     let cursor = lastEventId;
     let initialized = false;
     let stopped = false;
+    // The abort/close callbacks are installed before the interval so they can safely run first.
+    // eslint-disable-next-line prefer-const
     let timer: NodeJS.Timeout | undefined;
     const stop = () => { stopped = true; if (timer) clearInterval(timer); };
     disconnected.addEventListener('abort', stop, { once: true });

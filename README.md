@@ -38,12 +38,14 @@ Conversation history is bounded by `AGENT_HISTORY_MESSAGES` and `AGENT_HISTORY_M
 
 ```bash
 pnpm prisma:generate
+pnpm lint
 pnpm build
 pnpm typecheck
+pnpm test:unit
 pnpm test
 ```
 
-Integration/e2e tests are separate scripts (`pnpm test:e2e:stream`, `pnpm test:e2e:documents`, `pnpm test:e2e:typegraph`, and related scripts). They require the local database, Redis, TypeGraph services, and configured model credentials as applicable. Live Gemini tests consume quota and should be run only when quota is available.
+The test harness also exposes `pnpm test:integration` for opt-in `*.e2e.test.ts` files; run it only with the isolated service environment and variables documented by each test. Named scripts include `pnpm test:e2e:stream`, `pnpm test:e2e:documents`, and `pnpm test:e2e:typegraph`. These suites require PostgreSQL, Redis, TypeGraph, worker, and local model services as applicable. Live Gemini checks consume quota and should be run only when quota is available. GitHub Actions runs lint, typecheck, build, and the non-E2E regression suite on pushes and pull requests.
 
 ```bash
 curl -X POST http://127.0.0.1:3220/api/agent/ask \

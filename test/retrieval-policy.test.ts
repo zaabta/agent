@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { boundedConversationContext, mergeRetrievalEvidence, retrievalQueries } from '../src/agent/retrieval-policy.js';
 import type { DocumentSearchHit } from '../src/typegraph/typegraph.service.js';
+import { evidenceReferencesForRequest, extractDecisionSentences } from '../src/agent/conversation-context.js';
 const hit = (documentId: string, index: number, version = 'v1'): DocumentSearchHit => ({ content: 'known evidence', score: 0.4, sourceRef: `${documentId}:${version}:${index}`, metadata: {}, citation: { documentId, documentVersionId: version, filename: `${documentId}.md`, chunkIndex: index, chunkCount: 10, bucketId: 'documents' } });
 
 test('evidence fusion preserves versions and exact citations, deduplicates chunks and covers documents', () => {
@@ -46,4 +47,20 @@ test('real Arabic and Turkish follow-ups retain the cited conversation context',
   const afterArabic = [...history, { role: 'user' as const, content: arabicFollowUp }, { role: 'assistant' as const, content: '\u0627\u0644\u062a\u0643\u0644\u0641\u0629 \u0645\u0648\u0636\u062d\u0629 \u0641\u064a \u0627\u0644\u0645\u0633\u062a\u0646\u062f. [[orion.pdf (page 3)]]' }];
   assert.equal(isEvidenceFollowUp('Peki maliyet nedir?', afterArabic), true);
   assert.equal(isEvidenceFollowUp('Bununla ilgili daha fazla ayr\u0131nt\u0131?', afterArabic), true);
+});
+
+test('old source references are hints only for a cited follow-up, not a new topic', () => {
+  const history = [{ role: 'assistant' as const, content: 'The Orion plan lists two risks. [[orion.pdf (page 2)]]' }];
+  const refs = [{ documentId: '11111111-1111-4111-8111-111111111111', filename: 'orion.pdf', sourceRef: 'orion.pdf (page 2)' }];
+  assert.deepEqual(evidenceReferencesForRequest('What about its costs?', history, refs), refs);
+  assert.deepEqual(evidenceReferencesForRequest('What are the warranty terms?', history, refs), []);
+  assert.deepEqual(evidenceReferencesForRequest('What about its costs?', [...history, { role: 'assistant' as const, content: 'A separate answer without document citations.' }], refs), []);
+});
+
+test('decision extraction recognizes English, Turkish, and Arabic without ASCII word boundaries', () => {
+  assert.deepEqual(extractDecisionSentences('We decided to use the Orion format.\nKararımız Orion formatını kullanmak.\nقررنا اعتماد تنسيق أوريون.'), [
+    'We decided to use the Orion format.',
+    'Kararımız Orion formatını kullanmak.',
+    'قررنا اعتماد تنسيق أوريون.',
+  ]);
 });

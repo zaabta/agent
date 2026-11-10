@@ -143,7 +143,7 @@ test('version identity survives SDK metadata projection and publication restore 
   const versionOneId = 'version-one';
   const versionTwoId = 'version-two';
   let activeVersionId = versionTwoId;
-  let activeGeneration = 2;
+  const activeGeneration = 1;
   const doc = { id: documentId, tenantId: tenant, filename: 'conflicting-values.pdf', checksum: 'current-checksum', status: 'ready', activeVersionId };
   const versions = [
     { id: versionOneId, documentId, tenantId: tenant, filename: 'conflicting-values.pdf', checksum: 'v1-checksum', versionNumber: 1, chunkingStrategy: 'structure-aware', indexGeneration: 1, activeIndexGeneration: 1 },
@@ -174,7 +174,6 @@ test('version identity survives SDK metadata projection and publication restore 
   assert.deepEqual(publishedV2.hits.map(hit => hit.citation.documentVersionId), [versionTwoId]);
 
   activeVersionId = versionOneId;
-  activeGeneration = 1;
   doc.activeVersionId = versionOneId;
   versions[0]!.activeIndexGeneration = activeGeneration;
   const restoredV1 = await service.searchDocuments('F-4 value', 8, tenant);

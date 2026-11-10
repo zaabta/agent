@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Prisma } from '@prisma/client';
 import { AgentService } from '../src/agent/agent.service.js';
 
 test('verified document references persist with a conversation and reload after service recreation', async () => {
@@ -41,4 +42,12 @@ test('verified document references persist with a conversation and reload after 
   assert.equal(turn.prompt.at(-2).content, messages[0]!.content);
   assert.equal(turn.evidenceRefs[0].filename, 'orion.pdf');
   assert.equal(turn.evidenceRefs[0].documentVersionId, '22222222-2222-4222-8222-222222222222');
+  assert.equal(turn.preserveConversationContext, true);
+
+  // A later completed turn on a different topic clears prior document hints.
+  savedContext.activeSelection = { documentId: 'old-selection' };
+  await (afterRestart as any).saveAssistant('conversation-a', 'assistant-new', 'The warranty period is one year.', undefined, principal, [], false);
+  assert.deepEqual(savedContext.evidenceRefs, []);
+  assert.equal(savedContext.activeSelection, Prisma.DbNull);
+  assert.doesNotMatch(savedContext.summary, /orion\.pdf/i);
 });

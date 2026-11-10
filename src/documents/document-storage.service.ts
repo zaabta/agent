@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { mkdir, open, unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 

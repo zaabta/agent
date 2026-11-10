@@ -262,8 +262,7 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     let previousActiveVersionId: string | null = null;
     let didPublishVersion = false;
     const completedCount = await this.prisma.$transaction(async tx => {
-      let completedCount = 0;
-      let publish = true;
+      let completedCount: number;
       if (data.versionId) {
         const parent = await tx.appDocument.findFirst({ where: { id: data.documentId, tenantId: data.tenantId }, select: { activeVersionId: true } });
         previousActiveVersionId = parent?.activeVersionId ?? null;
@@ -271,7 +270,7 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
         const publishedVersion = await tx.appDocumentVersion.updateMany({ where: { id: data.versionId, documentId: data.documentId, tenantId: data.tenantId, jobId: job.id, cancelRequested: false }, data: { status: 'ready', activeIndexGeneration: version?.indexGeneration ?? 1, publishRequested: false } });
         completedCount = publishedVersion.count;
         const newest = await tx.appDocumentVersion.findFirst({ where: { documentId: data.documentId, tenantId: data.tenantId }, orderBy: { versionNumber: 'desc' }, select: { id: true } });
-        publish = newest?.id === data.versionId || publishRequested;
+        const publish = newest?.id === data.versionId || publishRequested;
         if (completedCount && publish) {
           didPublishVersion = true;
           const active = await tx.appDocument.updateMany({ where: { id: data.documentId, tenantId: data.tenantId, cancelRequested: false }, data: { activeVersionId: data.versionId, filename: version!.filename, fileType: version!.filename.split('.').at(-1) || 'unknown', fileSize: version!.fileSize, status: 'ready', stage: 'completed', progress: 100, completedAt: committedAt, errorCode: null, failureCode: null, storageKey: null } });

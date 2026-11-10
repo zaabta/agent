@@ -1,7 +1,7 @@
 import { isolatedAccount } from './helpers/isolated-account.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';

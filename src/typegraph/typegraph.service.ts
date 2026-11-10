@@ -109,7 +109,6 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteDocument(id: string, tenantId = config.tenantId, userId?: string) {
-    const client = await this.clientFor(tenantId);
     return this.deleteDocumentScope(id, undefined, tenantId, userId);
   }
 
@@ -270,17 +269,14 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         if (!scope || !scope.versionId) continue;
         if (typeof document.metadata.tenantId === 'string' && document.metadata.tenantId !== scope.tenantId) continue;
         const indexedVersionId = document.metadata.documentVersionId;
-        let isActive = false;
-        if (typeof indexedVersionId === 'string') {
-          isActive = indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration;
-        } else {
-          const originalFilename = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
-          isActive = scope.legacy
+        const originalFilename = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
+        const isActive = typeof indexedVersionId === 'string'
+          ? indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration
+          : scope.legacy
             && document.id === logicalId
             && document.metadata.tenantId === scope.tenantId
             && document.metadata.checksum === scope.checksum
             && originalFilename === scope.filename;
-        }
         if (isActive) {
           indexedMetadata?.set(document.id, document.metadata);
           ids.push(document.id);
