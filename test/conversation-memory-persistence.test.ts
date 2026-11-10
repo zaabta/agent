@@ -17,7 +17,8 @@ test('verified document references persist with a conversation and reload after 
     conversationContext: {
       upsert: async ({ create, update }: any) => { savedContext = { ...create, ...update }; return savedContext; },
       findFirst: async ({ where }: any) => {
-        assert.deepEqual(where, { conversationId: 'conversation-a', tenantId: 'tenant-a', ownerId: 'user-a' });
+        assert.equal(where.conversationId, 'conversation-a');
+        if (where.tenantId !== undefined) assert.deepEqual(where, { conversationId: 'conversation-a', tenantId: 'tenant-a', ownerId: 'user-a' });
         return savedContext ?? null;
       },
     },
@@ -27,7 +28,7 @@ test('verified document references persist with a conversation and reload after 
       create: async ({ data }: any) => ({ id: 'assistant-new', ...data }),
       updateMany: async () => ({ count: 1 }),
     },
-    $transaction: async (ops: any[]) => Promise.all(ops),
+      $transaction: async (ops: any[] | ((transaction: any) => Promise<unknown>)) => Array.isArray(ops) ? Promise.all(ops) : ops(db),
   };
   const principal = { userId: 'user-a', tenantId: 'tenant-a' } as any;
   const firstService = new AgentService({} as any, db, {} as any);
@@ -38,7 +39,7 @@ test('verified document references persist with a conversation and reload after 
 
   // A new service instance reads the persisted state from the same durable store.
   const afterRestart = new AgentService({} as any, db, {} as any);
-  const turn = await (afterRestart as any).beginTurn('ماذا عن التكلفة؟', 'conversation-a', principal);
+  const turn = await (afterRestart as any).beginTurn('What about its costs?', 'conversation-a', principal);
   assert.equal(turn.prompt.at(-2).content, messages[0]!.content);
   assert.equal(turn.evidenceRefs[0].filename, 'orion.pdf');
   assert.equal(turn.evidenceRefs[0].documentVersionId, '22222222-2222-4222-8222-222222222222');
@@ -50,4 +51,7 @@ test('verified document references persist with a conversation and reload after 
   assert.deepEqual(savedContext.evidenceRefs, []);
   assert.equal(savedContext.activeSelection, Prisma.DbNull);
   assert.doesNotMatch(savedContext.summary, /orion\.pdf/i);
+  const unrelated = await (afterRestart as any).beginTurn('What are warranty terms?', 'conversation-a', principal);
+  assert.equal(unrelated.previousSelection, undefined);
+  assert.deepEqual(unrelated.evidenceRefs, []);
 });

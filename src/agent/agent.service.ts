@@ -18,6 +18,7 @@ import { recordWorkflowDiagnostic } from '../mastra/observability.js';
 import { safeProviderFailure } from './provider-errors.js';
 import { ActiveAgentRunRegistry, AgentRunCancelledError } from './active-run-registry.js';
 import { ConversationContextService } from './conversation-context.service.js';
+import { conversationEntitiesSchema, conversationEvidenceReferencesSchema } from './conversation-context.js';
 import { UserMemoryService } from './user-memory.service.js';
 import { isEvidenceFollowUp } from './retrieval-policy.js';
 
@@ -602,7 +603,7 @@ export class AgentService implements OnModuleDestroy {
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     try {
       const run = await workflow.createRun();
-      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection, userMemories: turn.userMemories, evidenceRefs: turn.evidenceRefs, conversationSummary: turn.conversationSummary } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection, userMemories: turn.userMemories, evidenceRefs: turn.evidenceRefs, contextEntities: turn.contextEntities, conversationSummary: turn.conversationSummary } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
@@ -1153,7 +1154,7 @@ export class AgentService implements OnModuleDestroy {
       abort = () => { void run.cancel().catch(() => undefined); };
       if (abortSignal.aborted) abort();
       else abortSignal.addEventListener('abort', abort, { once: true });
-      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection, userMemories: turn.userMemories, evidenceRefs: turn.evidenceRefs, conversationSummary: turn.conversationSummary } });
+      const execution = await run.start({ inputData: { message, history: turn.prompt.slice(0, -1), previousSelection: turn.previousSelection, userMemories: turn.userMemories, evidenceRefs: turn.evidenceRefs, contextEntities: turn.contextEntities, conversationSummary: turn.conversationSummary } });
       if (execution.status !== 'success' || !execution.result) {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
@@ -1216,6 +1217,7 @@ export class AgentService implements OnModuleDestroy {
     conversationId: string; assistantMessageId: string; prompt: AgentMessage[]; previousSelection?: StructuredSelection;
     userMemories: Array<{ category: 'preference' | 'fact' | 'project' | 'decision'; content: string }>;
     evidenceRefs: Array<{ documentId: string; filename: string; sourceRef: string; documentVersionId?: string }>;
+    contextEntities: string[];
     conversationSummary: string;
     preserveConversationContext: boolean;
   }> {
@@ -1261,33 +1263,42 @@ export class AgentService implements OnModuleDestroy {
       content: item.content.slice(0, config.conversationHistoryChars),
     }));
     prompt.push({ role: 'user', content: message });
-    const preserveConversationContext = isEvidenceFollowUp(message, prompt.slice(0, -1));
     const storedSelection = context ? context.activeSelection : history.find(item => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
     const previous = structuredSelectionSchema.safeParse(storedSelection);
-    const refsSchema = z.array(z.object({
-      documentId: z.string().uuid(), filename: z.string().max(500), sourceRef: z.string().max(1000),
-      documentVersionId: z.string().uuid().optional(),
-    })).max(12);
-    const evidenceRefs = refsSchema.safeParse(context?.evidenceRefs);
+    const contextEntities = conversationEntitiesSchema.safeParse(context?.entities);
+    const evidenceRefs = conversationEvidenceReferencesSchema.safeParse(context?.evidenceRefs);
+    const savedEvidenceRefs = evidenceRefs.success ? evidenceRefs.data : [];
+    const preserveConversationContext = isEvidenceFollowUp(message, prompt.slice(0, -1), {
+      entities: contextEntities.success ? contextEntities.data : [],
+      summary: typeof context?.summary === 'string' ? context.summary : '',
+      evidenceRefs: savedEvidenceRefs,
+      activeSelection: previous.success ? previous.data : undefined,
+    });
+    const activeSelection = preserveConversationContext && previous.success ? previous.data : undefined;
     return {
       conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt,
-      previousSelection: previous.success ? previous.data : undefined,
-      userMemories, evidenceRefs: evidenceRefs.success ? evidenceRefs.data : [],
+      previousSelection: activeSelection,
+      userMemories, evidenceRefs: savedEvidenceRefs,
+      contextEntities: contextEntities.success ? contextEntities.data : [],
       conversationSummary: preserveConversationContext && typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
       preserveConversationContext,
     };
   }
 
   private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = [], preserveConversationContext = false) {
-    const operations: any[] = [
+    const contextModel = (this.prisma as unknown as { conversationContext?: { upsert?: unknown } }).conversationContext;
+    if (principal && contextModel?.upsert) {
+      await this.prisma.$transaction(async transaction => {
+        await transaction.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } });
+        await transaction.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+        await this.conversationContext.saveTurn(transaction, conversationId, principal, content, sources, selection, preserveConversationContext);
+      });
+      return;
+    }
+    await this.prisma.$transaction([
       this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
-    ];
-    if (principal) {
-      const contextUpdate = this.conversationContext.saveTurn(conversationId, principal, content, sources, selection, preserveConversationContext);
-      if (contextUpdate) operations.push(contextUpdate);
-    }
-    await this.prisma.$transaction(operations);
+    ]);
   }
 
   private async updateAssistantStage(conversationId: string, assistantMessageId: string, stage: string) {
