@@ -14,6 +14,7 @@ Isolated development backend. The legacy SitePilot backend, database and volumes
 
 ```bash
 pnpm install
+cp .env.example .env
 pnpm prisma:generate
 docker compose up -d db
 pnpm prisma:deploy
@@ -23,11 +24,26 @@ pnpm test
 pnpm dev
 ```
 
+Set `GEMINI_API_KEY` in `.env` before cloud inference. The active model is `google/gemini-3.6-flash` via Mastra 1.82.0; `MASTRA_PROVIDER=google` is the provider selector. Keep real credentials only in the ignored `.env` file. `pnpm prisma:deploy` applies the additive migrations, including conversation context and user-managed memory tables; it does not reset the database.
+
 Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilot:sitepilot@localhost:5444/sitepilot`.
 
 ## API
 
 Protected routes require a valid bearer JWT. The development `x-api-key` is accepted only when `ENABLE_DEV_API_KEY_AUTH=true` outside production; it is disabled by default.
+
+Conversation history is bounded by `AGENT_HISTORY_MESSAGES` and `AGENT_HISTORY_MESSAGE_CHARS`. Verified document references and active selections are persisted per conversation and revalidated against the authenticated tenant/user on retrieval. Personal memory is explicit and user-managed (it is not extracted from every message): use `GET/POST /api/agent/memories` and `PATCH/DELETE /api/agent/memories/:id`. Memory operations are scoped to the authenticated tenant and user; entries are bounded and reject credential-like content. Conversation summaries and evidence references are context hints only; document content remains untrusted and must be retrieved and authorized again.
+
+### Build and tests
+
+```bash
+pnpm prisma:generate
+pnpm build
+pnpm typecheck
+pnpm test
+```
+
+Integration/e2e tests are separate scripts (`pnpm test:e2e:stream`, `pnpm test:e2e:documents`, `pnpm test:e2e:typegraph`, and related scripts). They require the local database, Redis, TypeGraph services, and configured model credentials as applicable. Live Gemini tests consume quota and should be run only when quota is available.
 
 ```bash
 curl -X POST http://127.0.0.1:3220/api/agent/ask \

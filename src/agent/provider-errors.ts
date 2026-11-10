@@ -1,5 +1,6 @@
 export type ProviderErrorCode =
   | 'PROVIDER_RATE_LIMITED'
+  | 'PROVIDER_DAILY_QUOTA_EXHAUSTED'
   | 'PROVIDER_AUTH_FAILED'
   | 'PROVIDER_CREDITS_EXHAUSTED'
   | 'PROVIDER_UNAVAILABLE'
@@ -64,7 +65,50 @@ function retryAfterMs(error: Record<string, unknown>, now: number): number | und
   const seconds = Number(raw);
   const parsed = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : Date.parse(raw) - now;
   if (!Number.isFinite(parsed) || parsed < 0) return undefined;
-  return Math.min(Math.round(parsed), 60_000);
+  return Math.min(Math.round(parsed), 86_400_000);
+}
+
+function providerPayload(error: Record<string, unknown>): unknown[] {
+  const values: unknown[] = [];
+  for (const key of ['responseBody', 'body', 'data']) {
+    const value = error[key];
+    if (typeof value === 'string' && value.length <= 100_000) {
+      try { values.push(JSON.parse(value)); } catch { /* provider payload is not JSON */ }
+    } else if (value && typeof value === 'object') values.push(value);
+  }
+  return values;
+}
+
+function quotaDetails(chain: Record<string, unknown>[]): { dailyQuota: boolean; retryAfterMs?: number } {
+  const queue = chain.flatMap(providerPayload);
+  let dailyQuota = false;
+  let retryAfter: number | undefined;
+  for (let index = 0; index < queue.length && index < 500; index++) {
+    const item = record(queue[index]);
+    if (!item) continue;
+    let marker = '';
+    try { marker = JSON.stringify(item).toLowerCase(); } catch { /* ignore cyclic SDK error internals */ }
+    if (/requestsperday|per_day|daily.?quota|quota.?exceeded/i.test(marker)) dailyQuota = true;
+    const details = Array.isArray(item.details) ? item.details : [];
+    for (const detail of details) {
+      const entry = record(detail);
+      if (!entry) continue;
+      const type = String(entry['@type'] ?? '');
+      if (type.endsWith('RetryInfo') && typeof entry.retryDelay === 'string') {
+        const match = /^(\d+(?:\.\d+)?)(s|ms)$/i.exec(entry.retryDelay);
+        if (match) retryAfter = Math.max(retryAfter ?? 0, Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))));
+      }
+      queue.push(entry);
+    }
+    for (const [key, value] of Object.entries(item)) {
+      if (/(retryinfo|retrydelay)/i.test(key) && typeof value === 'string') {
+        const match = /^(\d+(?:\.\d+)?)(s|ms)$/i.exec(value);
+        if (match) retryAfter = Math.max(retryAfter ?? 0, Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))));
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) queue.push(value);
+    }
+  }
+  return { dailyQuota, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
 }
 
 /** Extracts only status and retry metadata. Never copies provider messages or bodies. */
@@ -76,16 +120,20 @@ export function classifyProviderError(value: unknown, now = Date.now()): SafePro
   const code = String(chain.map(item => item.code).find(item => typeof item === 'string') ?? '');
   const name = String(chain.map(item => item.name).find(item => typeof item === 'string' && /timeout|timed.?out/i.test(item)) ?? chain[0]?.name ?? '');
   const timeout = /timeout|timed.?out/i.test(name) || ['ETIMEDOUT', 'ECONNABORTED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code);
+  const quota = quotaDetails(chain);
+  const providerRetryAfter = chain.map(item => retryAfterMs(item, now)).find(item => item !== undefined);
+  const exhaustedQuota = quota.dailyQuota || (status === 429 && ((quota.retryAfterMs ?? providerRetryAfter ?? 0) >= 3_600_000));
   let resultCode: ProviderErrorCode;
   let httpStatus: number;
   if (status === 401 || status === 403) { resultCode = 'PROVIDER_AUTH_FAILED'; httpStatus = 502; }
   else if (status === 402) { resultCode = 'PROVIDER_CREDITS_EXHAUSTED'; httpStatus = 503; }
+  else if (status === 429 && exhaustedQuota) { resultCode = 'PROVIDER_DAILY_QUOTA_EXHAUSTED'; httpStatus = 429; }
   else if (status === 429) { resultCode = 'PROVIDER_RATE_LIMITED'; httpStatus = 503; }
   else if (timeout || status === 408 || status === 504) { resultCode = 'PROVIDER_TIMEOUT'; httpStatus = 504; }
   else if (status >= 500 || status === 425 || status === 0 || !Number.isFinite(status) && chain.some(item => item.isRetryable === true)) { resultCode = 'PROVIDER_UNAVAILABLE'; httpStatus = 503; }
   else return undefined;
   const retryable = resultCode === 'PROVIDER_RATE_LIMITED' || resultCode === 'PROVIDER_UNAVAILABLE' || resultCode === 'PROVIDER_TIMEOUT';
-  const retryAfter = chain.map(item => retryAfterMs(item, now)).find(item => item !== undefined);
+  const retryAfter = quota.retryAfterMs ?? providerRetryAfter;
   return { code: resultCode, retryable, httpStatus, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
 }
 
@@ -143,11 +191,12 @@ export function safeProviderFailure(value: unknown): SafeProviderFailure | undef
   for (const error of errorChain(value)) {
     const safe = record(error.safe);
     if (error.name !== 'ProviderRequestFailure' || !safe) continue;
-    const statuses: Record<string, number> = { PROVIDER_RATE_LIMITED: 429, PROVIDER_AUTH_FAILED: 401, PROVIDER_CREDITS_EXHAUSTED: 402, PROVIDER_UNAVAILABLE: 503, PROVIDER_TIMEOUT: 504 };
+    const statuses: Record<string, number> = { PROVIDER_RATE_LIMITED: 429, PROVIDER_DAILY_QUOTA_EXHAUSTED: 429, PROVIDER_AUTH_FAILED: 401, PROVIDER_CREDITS_EXHAUSTED: 402, PROVIDER_UNAVAILABLE: 503, PROVIDER_TIMEOUT: 504 };
     const status = statuses[String(safe.code)];
     if (!status) continue;
     const restored = classifyProviderError({ statusCode: status });
     if (!restored) continue;
+    if (safe.code === 'PROVIDER_DAILY_QUOTA_EXHAUSTED') return { ...restored, code: 'PROVIDER_DAILY_QUOTA_EXHAUSTED', retryable: false, httpStatus: 429 };
     const retry = safe.retryAfterMs;
     return { ...restored, ...(typeof retry === 'number' && Number.isFinite(retry) && retry >= 0 ? { retryAfterMs: Math.min(60000, Math.round(retry)) } : {}) };
   }
@@ -171,8 +220,8 @@ export function modelWithExplicitFallback<T>(primary: T, fallback: T | undefined
     if (typeof primary === 'string' || typeof fallback === 'string') return primary;
     return [{ model: primary, maxRetries: 0 }, { model: fallback, maxRetries: 0 }];
   }
-  if (provider === 'openrouter' && typeof primary === 'string' && typeof fallback === 'string'
-    && primary.startsWith('openrouter/') && fallback.startsWith('openrouter/')) {
+  if (typeof primary === 'string' && typeof fallback === 'string'
+    && primary.startsWith(`${provider}/`) && fallback.startsWith(`${provider}/`)) {
     return [{ model: primary as T, maxRetries: 0 }, { model: fallback as T, maxRetries: 0 }];
   }
   return primary;

@@ -11,7 +11,15 @@ test('same-transaction timestamps retain user then assistant order in model cont
     { id: 'a-assistant', role: 'assistant', content: 'Orion requires review [[requirements.md]]', createdAt },
   ];
   const db: any = {
-    conversation: { findFirst: async () => ({ id: 'conversation' }), update: async () => ({}) },
+    conversation: { findFirst: async ({ where }: any) => { assert.equal(where.tenantId, 'tenant'); assert.equal(where.ownerId, 'user'); return { id: 'conversation' }; }, update: async () => ({}) },
+    conversationContext: { findFirst: async ({ where }: any) => {
+      assert.deepEqual(where, { conversationId: 'conversation', tenantId: 'tenant', ownerId: 'user' });
+      return { evidenceRefs: [{ documentId: '11111111-1111-4111-8111-111111111111', filename: 'orion.pdf', sourceRef: 'orion.pdf (page 2)', documentVersionId: '22222222-2222-4222-8222-222222222222' }], activeSelection: null };
+    } },
+    userMemory: { findMany: async ({ where, take }: any) => {
+      assert.deepEqual(where, { tenantId: 'tenant', userId: 'user', deletedAt: null }); assert.equal(take, 8);
+      return [{ category: 'preference', content: 'Use concise answers' }];
+    } },
     message: {
       findMany: async ({ orderBy, take }: any) => [...rows].sort((a: any, b: any) => {
         for (const order of orderBy) {
@@ -32,4 +40,6 @@ test('same-transaction timestamps retain user then assistant order in model cont
     { role: 'assistant', content: rows[1]!.content },
     { role: 'user', content: 'What about its risks?' },
   ]);
+  assert.deepEqual(turn.evidenceRefs, [{ documentId: '11111111-1111-4111-8111-111111111111', filename: 'orion.pdf', sourceRef: 'orion.pdf (page 2)', documentVersionId: '22222222-2222-4222-8222-222222222222' }]);
+  assert.deepEqual(turn.userMemories, [{ category: 'preference', content: 'Use concise answers' }]);
 });

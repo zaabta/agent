@@ -17,7 +17,8 @@ test('document catalog exposes scoped search, filters and numbered pagination th
   const rows = Array.from({ length: 25 }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     tenantId: 'company-a', filename: index === 24 ? 'file_100%.pdf' : index < 12 ? `متطلبات-${index}.pdf` : `İş-Planı-${index}.txt`,
-    fileType: index % 2 ? 'txt' : 'pdf', status: index % 3 ? 'failed' : 'ready', fileSize: 42n,
+    fileType: index % 2 ? 'txt' : 'pdf', status: index === 23 ? 'cancelled' : index === 22 ? 'processing' : index === 21 ? 'queued' : index % 3 ? 'failed' : 'ready',
+    stage: index === 22 ? 'embedding' : index === 21 ? 'queued' : null, activeVersionId: index % 3 === 0 || index === 24 ? `version-${index}` : null, fileSize: 42n,
     createdAt: new Date('2026-11-08T00:00:00Z'), updatedAt: new Date('2026-11-08T00:00:00Z'),
   }));
   const allRows = [...rows, { ...rows[0]!, id: 'private-other', tenantId: 'company-b' }];
@@ -63,6 +64,8 @@ test('document catalog exposes scoped search, filters and numbered pagination th
       assert.equal(first.meta.hasNextPage, true); assert.equal(first.meta.hasPreviousPage, false);
       assert.equal(first.documents[0].id, rows[24]!.id); assert.equal(first.documents[0].fileSize, 42);
       assert.equal(first.documents[0].tenantId, undefined);
+      assert.deepEqual(first.documents[0].statusPresentation, { label: 'Indexed', detail: 'Available in document search.', tone: 'success' });
+      assert.equal(first.documents[0].versionLabel, 'Active version');
       const second = await (await request('?page=2')).json() as any;
       assert.equal(second.meta.count, 5); assert.equal(second.meta.hasNextPage, false); assert.equal(second.meta.hasPreviousPage, true);
       assert.equal(new Set([...first.documents, ...second.documents].map(d => d.id)).size, 25);
@@ -90,6 +93,18 @@ test('document catalog exposes scoped search, filters and numbered pagination th
       assert.equal((await request('', 'invalid')).status, 401);
       assert.equal((await fetch(`${base}/api/documents`)).status, 401);
       assert.equal((await request('?tenantId=company-b')).status, 400);
+    });
+    await t.test('display status separates cancellation and processing stage from active version', async () => {
+      const cancelled = await (await request('?status=cancelled')).json() as any;
+      assert.equal(cancelled.documents.length, 1);
+      assert.deepEqual(cancelled.documents[0].statusPresentation, { label: 'Cancelled', detail: 'Processing stopped. This file is not available in search.', tone: 'neutral' });
+      assert.equal(cancelled.documents[0].versionLabel, null);
+      const processing = await (await request('?status=processing')).json() as any;
+      assert.deepEqual(processing.documents[0].statusPresentation, { label: 'Processing', detail: 'Creating search vectors.', tone: 'info' });
+      const queued = await (await request('?status=queued')).json() as any;
+      assert.equal(queued.documents[0].statusPresentation.label, 'Queued');
+      const failed = await (await request('?status=failed')).json() as any;
+      assert.equal(failed.documents[0].statusPresentation.label, 'Failed');
     });
     await t.test('invalid or repeated query values are rejected before querying storage', async () => {
       const countBefore = queries.length;

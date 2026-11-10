@@ -80,3 +80,20 @@ test('XLSX chunks keep workbook, sheet, header, and exact cell address metadata'
   assert.equal(chunks[0]!.rowEnd, 3);
   assert.equal(chunks[0]!.cellRange, 'A2:B3');
 });
+
+test('XLSX rows stay aligned when key columns are promoted ahead of sheet order', () => {
+  const cells = [
+    { sheetName: 'Projects', rowNumber: 1, address: 'A1', columnName: 'Project', value: 'Project' },
+    { sheetName: 'Projects', rowNumber: 1, address: 'B1', columnName: 'Owner', value: 'Owner' },
+    { sheetName: 'Projects', rowNumber: 1, address: 'C1', columnName: 'Delivery reference', value: 'Delivery reference' },
+    { sheetName: 'Projects', rowNumber: 1, address: 'D1', columnName: 'Review deadline', value: 'Review deadline' },
+    { sheetName: 'Projects', rowNumber: 2, address: 'A2', columnName: 'Project', value: 'Istanbul Line A' },
+    { sheetName: 'Projects', rowNumber: 2, address: 'B2', columnName: 'Owner', value: 'Selin Demir' },
+    { sheetName: 'Projects', rowNumber: 2, address: 'C2', columnName: 'Delivery reference', value: 'IST-42' },
+    { sheetName: 'Projects', rowNumber: 2, address: 'D2', columnName: 'Review deadline', value: '2026-12-05' },
+  ];
+  const [chunk] = smartChunk('', 'xlsx', { ...identity, originalFilename: 'projects.xlsx' }, cells);
+  assert.ok(chunk);
+  assert.match(chunk.content, /Columns: 1=Delivery reference \| 2=Project \| 3=Owner \| 4=Review deadline/);
+  assert.match(chunk.content, /Row 2: IST-42 \| Istanbul Line A \| Selin Demir \| 2026-12-05/);
+});

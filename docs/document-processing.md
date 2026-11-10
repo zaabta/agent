@@ -36,6 +36,8 @@ Supported extensions: `.md`, `.txt`, `.docx`, `.pdf`, `.xlsx`, `.xls`, `.csv`. S
 - `POST /api/jobs/{jobId}/cancel` removes a waiting job or sets a cancellation request for an active job.
 - `DELETE /api/documents/{id}` cancels processing or removes the document's TypeGraph index and Prisma metadata.
 
+`GET /api/documents` and `GET /api/documents/{id}` retain the machine-readable `status` and `stage` fields and add `statusPresentation: { label, detail, tone }` for display. Render this as the primary status; render `versionLabel` separately (for example, `Active version`). A cancelled file is labelled `Cancelled`, never `Processing · cancelled`.
+
 SSE sends the latest snapshot immediately, sends a new event when it changes, uses `id` from `updatedAt`, and accepts reconnects by replaying the current snapshot. It does not retain event history; clients can always refresh from the status endpoint.
 
 ## Structured exact lookup

@@ -66,8 +66,28 @@ export class DocumentsService implements OnModuleInit {
     const live = new Set([...referenced, ...versionFiles].flatMap(item => item.storageKey ? [item.storageKey] : []));
     await Promise.all(stale.filter(file => !live.has(file.key)).map(file => this.storage.cleanup(file.key)));
   }
-  private safeDocument<T extends { fileSize: bigint | null; filename: string }>(document: T) {
-    return { ...document, filename: safeDisplayName(document.filename), fileSize: document.fileSize == null ? null : Number(document.fileSize) };
+  private safeDocument<T extends { fileSize: bigint | null; filename: string; status?: string; stage?: string | null; activeVersionId?: string | null }>(document: T) {
+    const statusPresentation = document.status === 'ready'
+      ? { label: document.activeVersionId ? 'Indexed' : 'Ready', detail: document.activeVersionId ? 'Available in document search.' : 'Processing completed.', tone: 'success' as const }
+      : document.status === 'queued'
+        ? { label: 'Queued', detail: 'Waiting for a document worker to start.', tone: 'info' as const }
+        : document.status === 'processing'
+          ? { label: 'Processing', detail: ({
+              verification: 'Checking the uploaded file.', parsing: 'Extracting document content.', smart_chunking: 'Preparing content for search.',
+              indexing: 'Adding content to the search index.', embedding: 'Creating search vectors.', publication: 'Making the index available.',
+            } as Record<string, string>)[document.stage ?? ''] ?? 'Preparing the document for search.', tone: 'info' as const }
+          : document.status === 'cancelled'
+            ? { label: 'Cancelled', detail: 'Processing stopped. This file is not available in search.', tone: 'neutral' as const }
+            : document.status === 'failed'
+              ? { label: 'Failed', detail: 'The file could not be indexed and is not available in search.', tone: 'warning' as const }
+              : { label: 'Status unavailable', detail: 'Refresh this file to get its current status.', tone: 'neutral' as const };
+    return {
+      ...document,
+      filename: safeDisplayName(document.filename),
+      fileSize: document.fileSize == null ? null : Number(document.fileSize),
+      statusPresentation,
+      versionLabel: document.activeVersionId ? 'Active version' : null,
+    };
   }
 
   async list(tenantId = config.tenantId, query: DocumentListQuery = { page: 1, limit: 20, search: '' }) {

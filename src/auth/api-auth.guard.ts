@@ -17,8 +17,8 @@ export class ApiAuthGuard implements CanActivate {
       principal = await this.auth.validateAccessToken(authorization.slice(7));
     } else if (process.env.NODE_ENV !== 'production' && process.env.ENABLE_DEV_API_KEY_AUTH === 'true') {
       const supplied = request.headers['x-api-key'];
-      const expected = requireEnv('DEV_API_KEY');
       if (typeof supplied !== 'string') throw new UnauthorizedException();
+      const expected = requireEnv('DEV_API_KEY');
       const a = Buffer.from(supplied); const b = Buffer.from(expected);
       if (a.length !== b.length || !timingSafeEqual(a, b)) throw new UnauthorizedException();
       principal = { userId: config.conversationOwnerId, tenantId: config.tenantId, role: 'TENANT_ADMIN', authMethod: 'dev-api-key' };

@@ -5,10 +5,26 @@ export function requireEnv(name: string): string {
   if (!v) throw new Error(`Missing ${name}; see .env.example`);
   return v;
 }
-const modelProvider = process.env.MASTRA_PROVIDER ||
-  (process.env.MASTRA_MODEL?.startsWith('openrouter/') ? 'openrouter' : 'ollama');
-const model = process.env.MASTRA_MODEL ||
-  (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+// Mastra's Google model router reads GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY.
+// Keep the project's documented Gemini-specific secret name as the source of truth.
+if (!process.env.GOOGLE_API_KEY && process.env.GEMINI_API_KEY) {
+  process.env.GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
+}
+const configuredModel = process.env.MASTRA_MODEL?.trim();
+const configuredModelName = process.env.MASTRA_MODEL_NAME?.trim();
+const inferredProvider = configuredModel?.startsWith('openrouter/') ? 'openrouter'
+  : configuredModel?.startsWith('google/') || configuredModel === 'gemini'
+    || configuredModel?.startsWith('gemini-') || configuredModelName?.startsWith('gemini-') ? 'google'
+    : 'ollama';
+const modelProvider = (process.env.MASTRA_PROVIDER?.trim() || inferredProvider).toLowerCase();
+const model = modelProvider === 'google'
+  ? configuredModel?.startsWith('google/') ? configuredModel
+    : `google/${configuredModelName || (configuredModel && configuredModel !== 'gemini' ? configuredModel : 'gemini-3.6-flash')}`
+  : configuredModel || (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+const requestedGeminiThinkingLevel = process.env.GEMINI_THINKING_LEVEL?.trim().toLowerCase();
+const geminiThinkingLevel = ['minimal', 'low', 'medium', 'high'].includes(requestedGeminiThinkingLevel || '')
+  ? requestedGeminiThinkingLevel as 'minimal' | 'low' | 'medium' | 'high'
+  : 'low';
 const modelFallback = process.env.MASTRA_FALLBACK_MODEL?.trim() || undefined;
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
 const explicitCompanyWorkspaceId = process.env.COMPANY_WORKSPACE_ID?.trim();
@@ -34,6 +50,7 @@ export const config = {
     : 0.32,
   modelProvider,
   model,
+  geminiThinkingLevel,
   modelFallback,
   ollamaThink: process.env.OLLAMA_THINK === 'true',
   maxBytes: Number(process.env.MAX_FILE_BYTES || 10485760),

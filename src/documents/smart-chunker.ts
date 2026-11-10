@@ -137,7 +137,7 @@ function tableBlocksFromCells(cells: ChunkableCell[], sourceType: string, filena
     if (!columnBands.length && columns.length) columnBands.push(columns);
 
     for (const columnBand of columnBands) {
-      const columnNames = new Set(columnBand.map(cell => cell.columnName));
+      const columnOrder = new Map(columnBand.map((cell, index) => [cell.columnName, index]));
       const heading = `${headingPrefix}\nColumns: ${columnBand.map((cell, index) => `${index + 1}=${cell.columnName}`).join(' | ')}`;
       let pending: Array<{ line: string; row: number; addresses: string[] }> = [];
       const flush = () => {
@@ -149,7 +149,10 @@ function tableBlocksFromCells(cells: ChunkableCell[], sourceType: string, filena
         pending = [];
       };
       for (const [rowNumber, fullRow] of dataRows) {
-        const rowCells = fullRow.filter(cell => columnNames.has(cell.columnName)).sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true }));
+        // The heading may promote key columns (such as references) ahead of
+        // physical sheet order. Keep each row in that same order so values
+        // cannot be attributed to the wrong column by retrieval or the model.
+        const rowCells = fullRow.filter(cell => columnOrder.has(cell.columnName)).sort((a, b) => columnOrder.get(a.columnName)! - columnOrder.get(b.columnName)!);
         if (!rowCells.length) continue;
         const line = `Row ${rowNumber}: ${rowCells.map(tableValue).join(' | ')}`;
         const candidate = [...pending, { line, row: rowNumber, addresses: rowCells.map(cell => cell.address) }];

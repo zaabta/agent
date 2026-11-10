@@ -34,3 +34,16 @@ test('explicit multilingual evidence follow-ups require prior cited context', as
   for (const message of ['Hi', 'شكراً', 'Merhaba', 'Explain quantum physics']) assert.equal(isEvidenceFollowUp(message, history), false, message);
   assert.equal(isEvidenceFollowUp('Compare them', []), false);
 });
+
+test('real Arabic and Turkish follow-ups retain the cited conversation context', async () => {
+  const { isEvidenceFollowUp } = await import('../src/agent/retrieval-policy.js');
+  const history = [
+    { role: 'user' as const, content: 'Summarize the Orion project risks.' },
+    { role: 'assistant' as const, content: 'The project has two risks. [[orion.pdf (page 2)]]' },
+  ];
+  const arabicFollowUp = '\u0645\u0627\u0630\u0627 \u0639\u0646 \u0627\u0644\u062a\u0643\u0644\u0641\u0629\u061f';
+  assert.equal(isEvidenceFollowUp(arabicFollowUp, history), true);
+  const afterArabic = [...history, { role: 'user' as const, content: arabicFollowUp }, { role: 'assistant' as const, content: '\u0627\u0644\u062a\u0643\u0644\u0641\u0629 \u0645\u0648\u0636\u062d\u0629 \u0641\u064a \u0627\u0644\u0645\u0633\u062a\u0646\u062f. [[orion.pdf (page 3)]]' }];
+  assert.equal(isEvidenceFollowUp('Peki maliyet nedir?', afterArabic), true);
+  assert.equal(isEvidenceFollowUp('Bununla ilgili daha fazla ayr\u0131nt\u0131?', afterArabic), true);
+});

@@ -126,6 +126,7 @@ model Conversation {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   messages  Message[]
+  context   ConversationContext?
 
   @@index([tenantId, ownerId, deletedAt, updatedAt(sort: Desc)])
   @@map("conversations")
@@ -144,6 +145,40 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+// Small, durable conversation state. Evidence references are hints only; every
+// document search still runs through the tenant/user-scoped TypeGraph tools.
+model ConversationContext {
+  conversationId String   @id @db.Uuid @map("conversation_id")
+  tenantId       String   @map("tenant_id")
+  ownerId        String   @map("owner_id")
+  summary        String?  @db.Text
+  evidenceRefs   Json     @default("[]") @map("evidence_refs")
+  activeSelection Json?   @map("active_selection")
+  entities       Json     @default("[]")
+  decisions      Json     @default("[]")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, ownerId, updatedAt(sort: Desc)])
+  @@map("conversation_contexts")
+}
+
+// Explicit, user-managed facts/preferences only. Memory keys always include
+// both tenant and user identities; records are soft-deleted for correction/audit.
+model UserMemory {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  category  String
+  content   String    @db.VarChar(500)
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId, userId, deletedAt, updatedAt(sort: Desc)])
+  @@map("user_memories")
 }
 
 enum TenantRole {
