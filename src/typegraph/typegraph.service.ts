@@ -5,9 +5,13 @@ import { Pool } from 'pg';
 import { config } from '../config.js';
 import { EmbeddingsService } from './embeddings.service.js';
 import { typegraphConfig } from './typegraph.config.js';
+import { ollamaTypegraphLlm } from './ollama-llm.provider.js';
+import { localOllamaReranker, setLocalRerankerUsagePersistence } from './local-reranker.js';
 import type { SmartChunk } from '../documents/smart-chunker.js';
 import { repairFilenameEncoding } from '../documents/display-name.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { randomUUID } from 'node:crypto';
+import { runWithUsageContext } from '../llm-admin/usage-recorder.js';
 
 export interface DocumentSearchHit {
   content: string;
@@ -37,7 +41,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: config.databaseUrl });
   private readonly clients = new Map<string, Promise<typegraphInstance>>();
 
-  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService, @Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService, @Inject(PrismaService) private readonly prisma: PrismaService) { ollamaTypegraphLlm.setUsagePersistence(prisma); setLocalRerankerUsagePersistence(prisma); }
 
   async onModuleInit(): Promise<void> {
     try {
@@ -62,7 +66,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       content: chunk.content,
       metadata: { ...document.metadata, ...chunk, chunkId: chunk.id, chunkIndex: chunk.index, chunkCount: chunks.length },
     })) : document;
-    const measured = await this.embeddings.measure(() => client.document.ingest(inputs, {
+    const measured = await runWithUsageContext({tenantId,userId,logicalRequestId:document.id,runtime:{provider:'ollama',model:config.model,ollamaThink:config.ollamaThink}},()=>this.embeddings.measure(() => client.document.ingest(inputs, {
         bucketId: 'documents',
         context: this.actor(userId),
         // SDK 0.6 resolves chunk identity from deduplicateBy. Its default is
@@ -79,7 +83,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         } } : {}),
       }), abortSignal,
       progress => onProgress?.({ phase: 'embed', done: progress.done, total: progress.total }),
-    );
+      ));
     const result = measured.result;
     const indexingDurationMs = performance.now() - startedAt;
     return {
@@ -161,7 +165,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     if (!candidateDocumentIds.length) {
       return { query, hits: [], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: Math.round(performance.now() - startedAt) } };
     }
-    const measured = await this.embeddings.measure(() => client.search(query, {
+    const measured = await runWithUsageContext({tenantId,userId,logicalRequestId:randomUUID(),runtime:{provider:'ollama',model:config.model,ollamaThink:config.ollamaThink}},()=>this.embeddings.measure(() => client.search(query, {
         buckets: ['documents'],
         resources: config.typegraphGraphExtraction ? ['documents', 'entities', 'facts'] : ['documents'],
         weights: { semantic: 1, bm25: 1, graph: config.typegraphGraphExtraction ? 0.5 : false, recency: false },
@@ -181,7 +185,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         abortSignal,
       }),
       abortSignal,
-    );
+    ));
     const response = measured.result;
 
     const searchDurationMs = performance.now() - startedAt;

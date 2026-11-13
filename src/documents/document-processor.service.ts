@@ -12,6 +12,7 @@ import { redisConnection } from './redis-connection.js';
 import { WorkerMonitoringService } from './worker-monitoring.service.js';
 import { CHUNKER_VERSION, smartChunk } from './smart-chunker.js';
 import type { ParseProgressEvent } from './parse-progress.js';
+import { runWithUsageContext } from '../llm-admin/usage-recorder.js';
 
 function isTransientFailure(error: unknown): boolean {
   if (error instanceof HttpException || error instanceof UnrecoverableError) return false;
@@ -141,7 +142,7 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
       }).catch(error => this.logger.warn(`Parse cancellation poll failed for job ${job.id}: ${String(error)}`));
     }, 250);
     let parsed;
-    try { parsed = await parseDocument(data.filename, buffer, parseAbort.signal, parseProgress); }
+    try { parsed = await runWithUsageContext({tenantId:data.tenantId,userId:data.userId,logicalRequestId:data.documentId,runtime:{provider:'ollama',model:process.env.OLLAMA_VISION_MODEL||config.model,ollamaThink:false},prisma:this.prisma},()=>parseDocument(data.filename, buffer, parseAbort.signal, parseProgress)); }
     catch (error) {
       if (parseCancelled || await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
       throw error;

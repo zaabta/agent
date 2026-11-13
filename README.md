@@ -7,7 +7,7 @@ Isolated development backend. The legacy SitePilot backend, database and volumes
 - NestJS exposes authenticated HTTP endpoints.
 - Mastra `Agent.stream()` runs the agent and its `documentSearch` and `listDocuments` tools.
 - TypeGraph owns document ingestion, embeddings, pgvector, semantic/BM25 hybrid retrieval and source chunks.
-- Prisma stores application document metadata and conversation messages only.
+- Prisma stores application metadata, conversation state, LLM runtime settings, registered models, and redacted per-invocation usage metadata.
 - Ollama provides local `qwen3:8b` inference and `nomic-embed-text` 768-dimensional embeddings.
 
 ## Setup
@@ -27,6 +27,32 @@ pnpm dev
 Set `GEMINI_API_KEY` in `.env` before cloud inference. The active model is `google/gemini-3.6-flash` via Mastra 1.82.0; `MASTRA_PROVIDER=google` is the provider selector. Keep real credentials only in the ignored `.env` file. `pnpm prisma:deploy` applies the additive migrations, including conversation context and user-managed memory tables; it does not reset the database.
 
 Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilot:sitepilot@localhost:5444/sitepilot`.
+
+### Runtime model registry and token analytics
+
+`MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, and `OLLAMA_THINK` (plus the optional history, timeout, and TypeGraph threshold settings) seed database runtime settings without overwriting existing database values. Each new agent request reads one immutable model snapshot from PostgreSQL, so separate API instances see administrator changes on the next request. Ollama discovery reads the trusted `OLLAMA_BASE_URL` and confirms tool capability through `/api/show`; OpenRouter free models are read from its public model catalog and require tool plus structured-output support; Gemini is registered from the configured `GEMINI_MODEL_ID` (default `google/gemini-3.6-flash`) when `GEMINI_API_KEY` is configured. Only Gemini IDs can be manually registered. API keys remain backend-only. Embedding and TypeGraph ingestion configuration remains independent.
+
+Admin endpoints require `TENANT_ADMIN` or `SUPER_ADMIN`; usage analytics is authenticated and scoped to the caller's tenant:
+
+```text
+GET  /api/admin/llm/settings
+POST /api/admin/llm/settings
+GET  /api/admin/llm/models
+POST /api/admin/llm/models                 {"provider":"google","modelId":"google/gemini-3.6-flash"}
+GET  /api/admin/llm/usage?period=today|yesterday|daily|weekly|last7days|monthly|last30days
+GET  /api/admin/llm/usage?from=<ISO>&to=<ISO>&groupBy=date|provider|model&provider=<provider>&modelId=<exact-id>
+```
+
+Example switching and reporting requests:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3220/api/admin/llm/models
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \\
+  -d '{"MASTRA_PROVIDER":"ollama","MASTRA_MODEL":"qwen3:8b"}' http://127.0.0.1:3220/api/admin/llm/settings
+curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:3220/api/admin/llm/usage?period=last7days&groupBy=model'
+```
+
+Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; model results preserve exact provider/model identifiers. Usage results return `timezone`, UTC `from`/`to`, `groupBy`, and grouped `data` with invocation count, input/output/total/cached/reasoning tokens, missing usage count, and average latency. Provider usage values are recorded when returned by Mastra; unavailable token counts remain null. No prompt or document contents and no prices/costs are stored. The new additive migration is `202611130001_runtime_llm_registry_usage`; run `pnpm prisma:generate` then `pnpm prisma:deploy` after reviewing the migration in the target environment. Do not run the deploy command against production without the normal production approval.
 
 ## API
 
@@ -217,3 +243,44 @@ server-provided principal for tenant scoping. It must honor the abort signal.
 The registry is intended for read-only handlers. Tool summaries are displayed
 verbatim and are kept separate from document evidence. The existing planner can
 select a registered tool alone or pair it with TypeGraph retrieval.
+# LLM administration API (backend contract)
+
+All routes below require a JWT in `Authorization: Bearer <token>` and a `TENANT_ADMIN` or `SUPER_ADMIN` role, except usage analytics, which is available to authenticated tenant members and is always scoped to their token tenant. Swagger documents these routes at `/api/docs` outside production.
+
+```http
+GET  /api/admin/llm/settings
+POST /api/admin/llm/settings
+GET  /api/admin/llm/models
+POST /api/admin/llm/models
+GET  /api/admin/llm/usage?period=daily|weekly|monthly
+GET  /api/admin/llm/usage?from=2026-11-01T00:00:00Z&to=2026-11-14T00:00:00Z&groupBy=date|provider|model
+```
+
+Example requests:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3220/api/admin/llm/settings
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"MASTRA_PROVIDER":"ollama","MASTRA_MODEL":"qwen3:8b"}' http://localhost:3220/api/admin/llm/settings
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3220/api/admin/llm/models
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:3220/api/admin/llm/usage?period=monthly&groupBy=model'
+```
+
+`POST /settings` accepts only `MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, `OLLAMA_THINK`, `AGENT_HISTORY_MESSAGES`, `AGENT_HISTORY_MESSAGE_CHARS`, `AGENT_REQUEST_TIMEOUT_MS`, and `TYPEGRAPH_MIN_SCORE`. Secret values are never returned; settings response includes only `geminiConfigured` and `openrouterConfigured` flags. Usage responses contain token counts only and use Europe/Istanbul date buckets.
+
+On an offline Windows workstation with Prisma engines already installed in pnpm's store, generation can use the local 6.19.3 binaries rather than fetching checksums:
+
+```powershell
+$env:PRISMA_SCHEMA_ENGINE_BINARY = (Resolve-Path 'node_modules/.pnpm/@prisma+engines@6.19.3/node_modules/@prisma/engines/schema-engine-windows.exe').Path
+$env:PRISMA_QUERY_ENGINE_LIBRARY = (Resolve-Path 'node_modules/.pnpm/@prisma+engines@6.19.3/node_modules/@prisma/engines/query_engine-windows.dll.node').Path
+$env:PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING = '1'
+node node_modules/prisma/build/index.js validate
+node node_modules/prisma/build/index.js generate
+```
+
+If Node cannot spawn `tsx`/esbuild workers in a restricted shell, emit tests locally and run them in-process (E2E tests remain skipped unless their documented services and flags are configured):
+
+```powershell
+node node_modules/typescript/bin/tsc --noEmit false --outDir .test-build --declaration false
+node --test --test-isolation=none .test-build/test/*.test.js
+```

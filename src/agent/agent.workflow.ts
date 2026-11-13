@@ -17,6 +17,7 @@ import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { recordWorkflowDiagnostic, registerWorkflowTracing, tenantTraceKey } from '../mastra/observability.js';
 import { modelWithExplicitFallback, safeProviderFailure, withProviderRetry } from './provider-errors.js';
+import { asMastraModel, type RuntimeModelSnapshot } from '../mastra/runtime-model.js';
 
 const planFields = {
   datasetId: z.string().optional().describe('An exact authorized document ID from discovered schema; omit until schema is available.'),
@@ -172,10 +173,11 @@ export interface AgentWorkflowStreamCallbacks {
   onTextReset?: () => Promise<void>;
 }
 
-export function createAgentWorkflow(typegraph: TypegraphService, structured: StructuredDataService, principal: AuthPrincipal, abortSignal?: AbortSignal, callbacks: AgentWorkflowStreamCallbacks = {}, backendTools?: BackendTools) {
+export function createAgentWorkflow(typegraph: TypegraphService, structured: StructuredDataService, principal: AuthPrincipal, abortSignal?: AbortSignal, callbacks: AgentWorkflowStreamCallbacks = {}, backendTools?: BackendTools, runtime?: RuntimeModelSnapshot, usageRecorder?: (record: Record<string, unknown>) => Promise<void>, conversationId?: string) {
   const progress = (stage: string, status: AgentWorkflowProgress['status'], message: string, toolName?: string) =>
     callbacks.onProgress?.({ stage, status, message, ...(toolName ? { toolName } : {}) }) ?? Promise.resolve();
-  const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId, 0);
+  const modelSnapshot = runtime ?? { provider: config.modelProvider, model: config.model, fallback: config.modelFallback, ollamaThink: config.ollamaThink };
+  const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId, 0, modelSnapshot);
   const englishRetrieval = process.env.AGENT_RETRIEVAL_QUERY_LANGUAGE === 'english' || (process.env.AGENT_RETRIEVAL_QUERY_LANGUAGE !== 'original' && config.embedModel.split(':')[0] === 'nomic-embed-text');
   const retrievalLanguage = englishRetrieval ? 'Write retrievalQuery and retrievalQueries in concise English for the configured embedding model. Preserve literal names, identifiers, dates, amounts and filenames. Keep standaloneQuestion and reply in the current user language; the original user message controls the answer language.' : 'Preserve the user language and literal names/identifiers in retrieval queries.';
   const requestId = randomUUID();
@@ -188,14 +190,23 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
   const observeModelCall = async <T extends { totalUsage?: any; usage?: any }>(call: () => Promise<T>): Promise<T> => {
     llmCalls++;
     const started = performance.now();
+    let status = 'success'; let usage: any; let errorCategory:string|undefined; let result:any;
     try {
-      const result = await call();
-      const usage = result.totalUsage ?? result.usage;
+      result = await call();
+      usage = result.totalUsage ?? result.usage;
       if (typeof usage?.inputTokens === 'number') promptTokens += usage.inputTokens;
       if (typeof usage?.outputTokens === 'number') completionTokens += usage.outputTokens;
       if (typeof usage?.reasoningTokens === 'number') reasoningTokens += usage.reasoningTokens;
       return result;
-    } finally { llmLatencyMs += Math.round(performance.now() - started); }
+    } catch (error) { status='failed'; usage=(error as any)?.totalUsage??(error as any)?.usage; errorCategory=error instanceof Error?error.name:'LLM_ERROR'; throw error; }
+    finally {
+      const latencyMs=Math.round(performance.now()-started); llmLatencyMs += latencyMs;
+      if (usageRecorder) {
+        const steps=Array.isArray(result?.steps)?result.steps.filter((step:any)=>step?.usage):[];
+        const records=steps.length?steps.map((step:any)=>({usage:step.usage,modelId:step.response?.modelId,provider:step.providerMetadata?.provider,latencyMs:null})): [{usage,modelId:(result as any)?.response?.modelId,provider:(result as any)?.response?.providerId,latencyMs}];
+        for(const record of records){const reported=record.usage;await usageRecorder({invocationId:randomUUID(),tenantId:principal.tenantId,userId:principal.userId,conversationId,logicalRequestId:requestId,provider:String(reported?.provider??record.provider??modelSnapshot.provider),modelId:String(reported?.modelId??record.modelId??modelSnapshot.model),inputTokens:typeof reported?.inputTokens==='number'?reported.inputTokens:null,outputTokens:typeof reported?.outputTokens==='number'?reported.outputTokens:null,totalTokens:typeof reported?.totalTokens==='number'?reported.totalTokens:(typeof reported?.inputTokens==='number'&&typeof reported?.outputTokens==='number'?reported.inputTokens+reported.outputTokens:null),cachedTokens:typeof reported?.cachedInputTokens==='number'?reported.cachedInputTokens:null,reasoningTokens:typeof reported?.reasoningTokens==='number'?reported.reasoningTokens:null,usageSource:reported?'mastra-provider':'unavailable',accuracy:reported&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','reasoningTokens'].some(k=>typeof reported[k]==='number')?'provider-reported':'unavailable',status,latencyMs:record.latencyMs,errorCategory:status==='failed'?errorCategory:null}).catch(()=>undefined);}
+      }
+    }
   };
   let providerRetries = 0;
   let providerErrors = 0;
@@ -206,22 +217,14 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
   const planner = new Agent({
     id: `sitepilot-planner-${requestId}`,
     name: 'SitePilot constrained planner',
-    model: modelWithExplicitFallback(config.modelProvider === 'ollama'
-      ? { providerId: 'ollama', modelId: config.model, url: `${config.ollamaUrl.replace(/\/+$/, '')}/v1`, apiKey: 'local-ollama', api: 'chat' }
-      : config.model,
-      config.modelFallback
-        ? config.modelProvider === 'ollama'
-          ? { providerId: 'ollama', modelId: config.modelFallback, url: `${config.ollamaUrl.replace(/\/+$/, '')}/v1`, apiKey: 'local-ollama', api: 'chat' }
-          : config.modelFallback
-        : undefined,
-      config.modelProvider),
+    model: modelWithExplicitFallback(asMastraModel(modelSnapshot).primary as any, asMastraModel(modelSnapshot).fallback as any, modelSnapshot.provider),
     maxRetries: 0,
     instructions: `Return only a validated operation plan, never a factual answer. Distinguish a request to list available files from a question about a named file: explicit inventory requests select list; explain/summarize/content questions about a named file select retrieve. A filename mention by itself is never enough to select list. Structured schema discovery selects discover. Counts, calculations, groups, and distinct values select aggregate; exact cell values or criteria based on row content select lookup; semantic document facts select retrieve. Workspace-dependent facts always require authorized evidence. A narrative comparison across documents is retrieve, even when it mentions costs, risks, dates or requirements. Aggregate requires a requested numeric calculation over actual table rows; lookup requires a specific record/value, not a project summary. Never echo a follow-up as a conversational reply. For a record identifier, retain that identifier in value/filters; do not substitute the project name shared by many rows. Examples: What decision applies to record 17? => lookup, value 17. ما القرار للبلاغ رقم 17؟ => lookup, value 17. 17 numaralı kaydın kararı nedir? => lookup, value 17. A numbered table record is lookup, even when the user says document or asks in Arabic/Turkish. Greetings, thanks, and simple social acknowledgements are ordinary conversation: select respond and do not call workspace tools. Select respond only for ordinary conversation independent of workspace evidence. If uncertain, choose an evidence-seeking operation rather than respond. ${retrievalLanguage}`,
   });
   const retryPlanner = new Proxy(planner, {
     get(target, property, receiver) {
       if (property === 'generate') return (...args: any[]) => withProviderRetry(() =>
-        observeModelCall(() => (target.generate as any)(args[0], { ...args[1], ...localGenerationOptions() })),
+        observeModelCall(() => (target.generate as any)(args[0], { ...args[1], ...localGenerationOptions(modelSnapshot) })),
       { signal: abortSignal, onRetry: async () => { providerRetries++; } });
       return Reflect.get(target, property, receiver);
     },
@@ -394,7 +397,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const generateWithoutTools = (messages: any, options: any) => {
             const validationStartedAt = performance.now();
             return withProviderRetry(
-              () => observeModelCall(() => agent.generate(messages, { ...options, ...localGenerationOptions(), instructions: workflowGroundingInstructions, activeTools: [], maxRetries: 0 })),
+              () => observeModelCall(() => agent.generate(messages, { ...options, ...localGenerationOptions(modelSnapshot), instructions: workflowGroundingInstructions, activeTools: [], maxRetries: 0 })),
               { signal: abortSignal, onRetry: async () => { providerRetries++; } },
             ).finally(() => { citationVerificationMs += Math.round(performance.now() - validationStartedAt); });
           };
@@ -406,10 +409,11 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           const answerStream = await withProviderRetry(async () => {
             llmCalls++;
             const callStartedAt = performance.now();
+            let streamedUsage: any; let streamedModelId:string|undefined; let streamedStatus='success';
             try {
               const streamed = await agent.stream([{ role: 'user', content: prompt }], {
                 maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions,
-                activeTools: [], abortSignal, tracingOptions, ...localGenerationOptions(),
+                activeTools: [], abortSignal, tracingOptions, ...localGenerationOptions(modelSnapshot),
               });
               let streamedDraft = '';
               let usageSeen = false;
@@ -419,6 +423,8 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
                   await callbacks.onTextDelta?.(chunk.payload.text);
                 } else if (chunk.type === 'step-finish') {
                   const usage = chunk.payload.output.usage;
+                  streamedModelId=(chunk.payload.output as any).response?.modelId;
+                  streamedUsage = usage;
                   if (typeof usage.inputTokens === 'number') promptTokens += usage.inputTokens;
                   if (typeof usage.outputTokens === 'number') completionTokens += usage.outputTokens;
                   if (typeof usage.reasoningTokens === 'number') reasoningTokens += usage.reasoningTokens;
@@ -428,13 +434,16 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
               const output = await streamed.getFullOutput();
               if (output.error) throw output.error;
               if (!usageSeen && output.totalUsage) {
+                streamedUsage = output.totalUsage;
                 if (typeof output.totalUsage.inputTokens === 'number') promptTokens += output.totalUsage.inputTokens;
                 if (typeof output.totalUsage.outputTokens === 'number') completionTokens += output.totalUsage.outputTokens;
                 if (typeof output.totalUsage.reasoningTokens === 'number') reasoningTokens += output.totalUsage.reasoningTokens;
               }
               return streamedDraft.trim() ? streamedDraft : output.text;
-            } finally {
-              llmLatencyMs += Math.round(performance.now() - callStartedAt);
+            } catch (error) { streamedStatus='failed'; streamedUsage=(error as any)?.totalUsage??(error as any)?.usage??streamedUsage; throw error; }
+            finally {
+              const latencyMs=Math.round(performance.now()-callStartedAt); llmLatencyMs += latencyMs;
+              if(usageRecorder) await usageRecorder({invocationId:randomUUID(),tenantId:principal.tenantId,userId:principal.userId,conversationId,logicalRequestId:requestId,provider:String(streamedUsage?.provider??modelSnapshot.provider),modelId:String(streamedUsage?.modelId??streamedModelId??modelSnapshot.model),inputTokens:typeof streamedUsage?.inputTokens==='number'?streamedUsage.inputTokens:null,outputTokens:typeof streamedUsage?.outputTokens==='number'?streamedUsage.outputTokens:null,totalTokens:typeof streamedUsage?.totalTokens==='number'?streamedUsage.totalTokens:(typeof streamedUsage?.inputTokens==='number'&&typeof streamedUsage?.outputTokens==='number'?streamedUsage.inputTokens+streamedUsage.outputTokens:null),cachedTokens:typeof streamedUsage?.cachedInputTokens==='number'?streamedUsage.cachedInputTokens:null,reasoningTokens:typeof streamedUsage?.reasoningTokens==='number'?streamedUsage.reasoningTokens:null,usageSource:streamedUsage?'mastra-stream':'unavailable',accuracy:streamedUsage&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','reasoningTokens'].some(k=>typeof streamedUsage[k]==='number')?'provider-reported':'unavailable',status:streamedStatus,latencyMs}).catch(()=>undefined);
             }
           }, {
             signal: abortSignal,
