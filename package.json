@@ -37,6 +37,8 @@
     "eval:ollama-fixtures": "node --import tsx scripts/evaluate-ollama-fixtures.ts"
   },
   "dependencies": {
+    "@ai-sdk/google": "^2.0.111",
+    "@ai-sdk/openai": "^2.0.143",
     "@mastra/core": "1.82.0",
     "@mastra/observability": "1.17.6",
     "@mastra/pg": "1.35.0",

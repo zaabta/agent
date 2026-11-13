@@ -4,10 +4,9 @@ import { test } from 'node:test';
 import { config } from '../src/config.js';
 
 const baseUrl = process.env.DOCUMENT_E2E_URL || `http://127.0.0.1:${config.port}`;
-const apiKey = process.env.DEV_API_KEY;
 const bearer = process.env.AGENT_E2E_BEARER;
-const enabled = process.env.RUN_DOCUMENT_VERSION_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!(bearer || apiKey);
-const headers: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : { 'x-api-key': apiKey! };
+const enabled = process.env.RUN_DOCUMENT_VERSION_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!bearer;
+const headers: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : {};
 
 async function sendText(path: string, name: string, content: string, extra?: Record<string, string>) {
   const form = new FormData();
@@ -41,7 +40,7 @@ async function rawSearch(documentId: string, marker: string) {
 }
 
 test('versions publish atomically, preserve failed replacements, deduplicate, restore, and reindex', {
-  skip: !enabled ? 'Requires RUN_DOCUMENT_VERSION_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER (or an explicitly enabled DEV_API_KEY), API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
+  skip: !enabled ? 'Requires RUN_DOCUMENT_VERSION_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER, API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
   timeout: 600000,
 }, async () => {
   const marker = randomUUID();

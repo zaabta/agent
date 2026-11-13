@@ -105,7 +105,7 @@ test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E f
   try {
     const identity = await isolatedAccount(prisma, baseUrl, 'documents-e2e');
     accessToken = identity.accessToken;
-    tenantId = identity.tenant.id;
+    tenantId = config.companyWorkspaceId;
     userId = identity.user.id;
     const allFixtures = await fixtures;
     const initialStorage = new Set(await readdir(config.uploadDir).catch(() => []));

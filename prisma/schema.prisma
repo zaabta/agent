@@ -202,7 +202,8 @@ model Tenant {
 
 model User {
   id            String       @id @default(uuid()) @db.Uuid
-  email         String       @unique
+  username      String       @unique
+  email         String?      @unique
   passwordHash  String       @map("password_hash")
   displayName   String?      @map("display_name")
   disabledAt    DateTime?    @map("disabled_at")
@@ -275,8 +276,13 @@ model RegisteredModel {
   modelId     String   @map("model_id")
   displayName String?  @map("display_name")
   compatible Boolean  @default(true)
+  enabled     Boolean  @default(true)
   source      String   @default("manual")
   available   Boolean  @default(true)
+  local       Boolean  @default(false)
+  validationStatus String @default("unknown") @map("validation_status")
+  capabilities Json @default("{}")
+  contextLength Int? @map("context_length")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
   @@unique([provider, modelId])
@@ -284,9 +290,31 @@ model RegisteredModel {
   @@map("registered_models")
 }
 
+model RuntimeSettingAudit {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String
+  oldValue  String?  @map("old_value") @db.Text
+  newValue  String   @map("new_value") @db.Text
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([key, createdAt(sort: Desc)])
+  @@map("runtime_setting_audit")
+}
+
+model ProviderCredential {
+  provider   String   @id
+  ciphertext String   @db.Text
+  iv         String
+  authTag    String   @map("auth_tag")
+  updatedBy  String?  @map("updated_by")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  @@map("provider_credentials")
+}
+
 model LlmUsage {
   id                String   @id @default(uuid()) @db.Uuid
   provider          String
+  configuredModelId String?  @map("configured_model_id")
   modelId           String   @map("model_id")
   inputTokens       Int?     @map("input_tokens")
   outputTokens      Int?     @map("output_tokens")
@@ -301,7 +329,7 @@ model LlmUsage {
   logicalRequestId  String   @map("logical_request_id")
   invocationId      String   @unique @map("invocation_id")
   status            String
-  latencyMs          Int?
+  latencyMs          Int?     @map("latency_ms")
   errorCategory     String?  @map("error_category")
   createdAt         DateTime @default(now()) @map("created_at")
   @@index([tenantId, createdAt])

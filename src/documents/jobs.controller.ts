@@ -1,15 +1,13 @@
 import { Controller, Get, Headers, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
-import { ApiBearerAuth, ApiNotFoundResponse, ApiOperation, ApiParam, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiNotFoundResponse, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
-import { Roles } from '../auth/roles.decorator.js';
 import { JobsService } from './jobs.service.js';
 
 @ApiTags('document jobs')
 @ApiBearerAuth('bearer')
-@ApiSecurity('dev-api-key')
 @Controller('api/jobs')
 @UseGuards(ApiAuthGuard)
 export class JobsController {
@@ -23,7 +21,6 @@ export class JobsController {
   @ApiParam({ name: 'jobId', description: 'BullMQ document processing job identifier.' })
   @ApiResponse({ status: 201, description: 'Updated job view; cancellation can be terminal or still cancelling.' })
   @ApiNotFoundResponse({ description: 'Job does not exist or belongs to another tenant.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   cancel(@Param('jobId') jobId: string, @CurrentPrincipal() principal: AuthPrincipal) { return this.jobs.cancel(jobId, principal.tenantId); }
   @Get(':jobId/events')
   @ApiOperation({ summary: 'Stream tenant-scoped job snapshots and persisted stage transitions; no document content is sent.' })

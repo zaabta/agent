@@ -6,11 +6,10 @@ import { extname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {} from 'multer';
 import type { Express } from 'express';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
-import { Roles } from '../auth/roles.decorator.js';
 import { config } from '../config.js';
 import { DocumentsService } from './documents.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
@@ -33,7 +32,6 @@ const uploadFilter = (_request: unknown, file: Express.Multer.File, callback: (e
 
 @ApiTags('documents')
 @ApiBearerAuth('bearer')
-@ApiSecurity('dev-api-key')
 @Controller('api/documents')
 @UseGuards(ApiAuthGuard)
 export class DocumentsController {
@@ -78,7 +76,6 @@ export class DocumentsController {
   @ApiResponse({ status: 400, description: 'FILE_REQUIRED, INVALID_REPLACEMENT_REASON, unsupported type, MIME mismatch, or upload size/signature validation failure.' })
   @ApiNotFoundResponse({ description: 'DOCUMENT_NOT_FOUND or document belongs to another tenant.' })
   @UseInterceptors(FileInterceptor('file', { storage: diskUpload, fileFilter: uploadFilter, limits: { fileSize: config.maxBytes, files: 1 } }))
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   async uploadVersion(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Body() body: { reason?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!validUuid(id)) throw new BadRequestException('INVALID_DOCUMENT_ID');
     if (!file) throw new BadRequestException('FILE_REQUIRED');
@@ -104,7 +101,6 @@ export class DocumentsController {
   @ApiResponse({ status: 202, description: 'Returns { documentId, activeVersionId, versionNumber, status }; status may be queued while index publication completes.' })
   @ApiResponse({ status: 400, description: 'VERSION_NOT_RETRIEVAL_READY or version job conflict.' })
   @ApiNotFoundResponse({ description: 'DOCUMENT_VERSION_NOT_FOUND or cross-tenant version.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   restoreVersion(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
     return this.documents.restoreVersion(id, versionId, principal.tenantId, principal.userId);
@@ -116,7 +112,6 @@ export class DocumentsController {
   @ApiResponse({ status: 202, description: 'Returns { documentId, versionId, jobId, indexGeneration, status: queued }. Poll GET /api/jobs/{jobId} or subscribe to its events.' })
   @ApiResponse({ status: 400, description: 'VERSION_CONTENT_UNAVAILABLE or VERSION_JOB_ALREADY_ACTIVE.' })
   @ApiNotFoundResponse({ description: 'DOCUMENT_VERSION_NOT_FOUND.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   reindexVersion(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
     return this.documents.reindexVersion(id, versionId, principal.tenantId, principal.userId);
@@ -128,7 +123,6 @@ export class DocumentsController {
   @ApiResponse({ status: 202, description: 'Returns { documentId, versionId, status }, where status is cancelled or cancelling.' })
   @ApiResponse({ status: 400, description: 'VERSION_JOB_NOT_ACTIVE.' })
   @ApiNotFoundResponse({ description: 'DOCUMENT_VERSION_NOT_FOUND.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   cancelVersionJob(@Param('id') id: string, @Param('versionId') versionId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!validUuid(id) || !validUuid(versionId)) throw new BadRequestException('INVALID_DOCUMENT_VERSION_ID');
     return this.documents.cancelVersionJob(id, versionId, principal.tenantId);
@@ -138,7 +132,6 @@ export class DocumentsController {
   @ApiBody({ schema: { type: 'object', required: ['query'], properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 } } } })
   @ApiResponse({ status: 200, description: 'Matching passages with source references and retrieval timing.' })
   @ApiResponse({ status: 400, description: 'QUERY_REQUIRED or INVALID_SEARCH_LIMIT.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER', 'READ_ONLY')
   search(@Body() body: { query?: unknown; limit?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
     if (typeof body?.query !== 'string' || !body.query.trim() || body.query.trim().length > 2000) {
       throw new BadRequestException('QUERY_REQUIRED');
@@ -154,7 +147,6 @@ export class DocumentsController {
   @ApiResponse({ status: 202, description: 'Accepted for asynchronous indexing; returns a document and job ID.' })
   @ApiResponse({ status: 400, description: 'FILE_REQUIRED, unsupported type, MIME mismatch, empty/oversized file, invalid signature, or tenant document quota reached.' })
   @UseInterceptors(FileInterceptor('file', { storage: diskUpload, fileFilter: uploadFilter, limits: { fileSize: config.maxBytes, files: 1 } }))
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   async upload(@UploadedFile() file: Express.Multer.File, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!file) throw new BadRequestException('FILE_REQUIRED');
     try { return await this.documents.upload({ filename: file.filename, originalName: file.originalname, mimetype: file.mimetype, size: file.size, path: file.path }, principal.tenantId, principal.userId); }
@@ -165,7 +157,6 @@ export class DocumentsController {
   @ApiResponse({ status: 202, description: 'Accepted upload jobs.' })
   @ApiResponse({ status: 400, description: 'FILES_REQUIRED or BATCH_LIMIT_EXCEEDED. Per-file rejections are returned in the rejected array.' })
   @UseInterceptors(FilesInterceptor('files', config.maxBatchFiles, { storage: diskUpload, fileFilter: uploadFilter, limits: { fileSize: config.maxBytes, files: config.maxBatchFiles } }))
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   async uploadBatch(@UploadedFiles() files: Express.Multer.File[], @CurrentPrincipal() principal: AuthPrincipal) {
     if (!files?.length) throw new BadRequestException('FILES_REQUIRED');
     return this.documents.uploadBatch(files.map(file => ({ filename: file.filename, originalName: file.originalname, mimetype: file.mimetype, size: file.size, path: file.path })), principal.tenantId, principal.userId);
@@ -175,7 +166,6 @@ export class DocumentsController {
   @ApiResponse({ status: 200, description: 'Deletion or cancellation result for the tenant document.' })
   @ApiResponse({ status: 400, description: 'Invalid document ID or deletion cannot be completed in the current state.' })
   @ApiNotFoundResponse({ description: 'DOCUMENT_NOT_FOUND or document belongs to another tenant.' })
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MEMBER')
   remove(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) { return this.documents.remove(id, principal.tenantId); }
 }
 

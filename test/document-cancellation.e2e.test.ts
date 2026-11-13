@@ -7,10 +7,9 @@ import { config } from '../src/config.js';
 import { redisConnection } from '../src/documents/redis-connection.js';
 
 const baseUrl = process.env.DOCUMENT_E2E_URL || `http://127.0.0.1:${config.port}`;
-const apiKey = process.env.DEV_API_KEY;
 const bearer = process.env.AGENT_E2E_BEARER;
-const authHeaders: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : { 'x-api-key': apiKey! };
-const enabled = process.env.RUN_DOCUMENT_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!(bearer || apiKey);
+const authHeaders: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : {};
+const enabled = process.env.RUN_DOCUMENT_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!bearer;
 
 async function upload(name: string, content: string) {
   const form = new FormData();
@@ -38,7 +37,7 @@ async function until(jobId: string, predicate: (state: Awaited<ReturnType<typeof
 }
 
 test('real queued and active document cancellation cleans partial indexes and stays terminal', {
-  skip: !enabled ? 'Requires RUN_DOCUMENT_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER (or an explicitly enabled DEV_API_KEY), API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
+  skip: !enabled ? 'Requires RUN_DOCUMENT_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER, API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
   timeout: 300000,
 }, async () => {
   const connection = redisConnection(config.redisUrl);

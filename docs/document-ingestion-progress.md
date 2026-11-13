@@ -64,7 +64,7 @@ BullMQ/Redis owns queue execution, locks, retries and stalled-job recovery. Pris
 
 ## Administrative monitoring APIs
 
-All `/api/admin/workers/*` routes require a JWT with the explicit `TENANT_ADMIN` or `SUPER_ADMIN` role. They do not accept a caller-supplied tenant ID. Tenant job lists, details, and event history are restricted to the authenticated principal's tenant; only aggregate queue counters and worker process health are global. Worker health does not expose active job IDs.
+All `/api/admin/workers/*` routes require a JWT for the configured installation owner (`INSTALLATION_OWNER_USER_ID`). They do not accept a caller-supplied workspace identifier. Job lists, details, and event history remain scoped to the authenticated installation workspace; only aggregate queue counters and worker process health are global. Worker health does not expose active job IDs.
 
 - `GET /api/admin/workers/overview` — retained queue counts, bounded worker health snapshots, and this tenant's document-state totals.
 - `GET /api/admin/workers/health` — worker heartbeat state (`busy`, `idle`, `disconnected`, `stale`, or `unknown`), process CPU/RSS/heap and host memory labels.

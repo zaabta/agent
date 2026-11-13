@@ -50,7 +50,7 @@ test('document catalog exposes scoped search, filters and numbered pagination th
     { provide: DocumentsService, useValue: service }, { provide: DocumentStorageService, useValue: storage },
     { provide: AuthService, useValue: { validateAccessToken: async (token: string) => {
       if (!['company-a', 'company-b'].includes(token)) throw new UnauthorizedException();
-      return { userId: 'user', tenantId: token, role: 'MEMBER', authMethod: 'jwt' };
+      return { userId: 'user', tenantId: token, authMethod: 'jwt' };
     } } },
   ] }) class TestModule {}
   const app = await NestFactory.create(TestModule, { logger: false });

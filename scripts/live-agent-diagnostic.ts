@@ -10,7 +10,7 @@ const app = await NestFactory.createApplicationContext(AppModule, { logger: fals
 const agent = app.get(AgentService);
 const structured = app.get(StructuredDataService);
 const prisma = app.get(PrismaService);
-const principal: AuthPrincipal = { userId: config.conversationOwnerId, tenantId: config.tenantId, role: 'MEMBER' };
+const principal: AuthPrincipal = { userId: config.conversationOwnerId, tenantId: config.tenantId, authMethod: 'jwt' };
 const datasets = await structured.discoverDatasets(principal.tenantId);
 const selectedScenarios = process.env.AGENT_DIAG_SCENARIOS?.split(',').map(value => value.trim()).filter(Boolean);
 const runScenario = (name: string) => !selectedScenarios?.length || selectedScenarios.includes(name);

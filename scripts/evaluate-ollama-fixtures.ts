@@ -38,7 +38,7 @@ for (const item of cases) {
   const deadline = setTimeout(() => controller.abort(new Error('SUPPLEMENTAL_EVAL_TIMEOUT')), 240000);
   const result: any = { ...item, actualAnswer: null, pass: false };
   try {
-    const workflow = createAgentWorkflow({ searchDocuments: async (query: string) => { queries.push(query); return { query, hits, timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } }; } } as any, { discoverDatasets: async () => [] } as any, { userId: 'fixture-user', tenantId: 'fixture-workspace', role: 'MEMBER', authMethod: 'jwt' }, controller.signal, {
+    const workflow = createAgentWorkflow({ searchDocuments: async (query: string) => { queries.push(query); return { query, hits, timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } }; } } as any, { discoverDatasets: async () => [] } as any, { userId: 'fixture-user', tenantId: 'fixture-workspace', authMethod: 'jwt' }, controller.signal, {
       onTextDelta: async text => { deltas.push({ ms: Math.round(performance.now() - started), text }); },
       onProgress: async stage => { stages.push({ ...stage, ms: Math.round(performance.now() - started) }); },
     });

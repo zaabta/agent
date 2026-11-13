@@ -31,7 +31,7 @@ for (const [kind, question] of [
   } };
   const started = performance.now();
   try {
-    const workflow = createAgentWorkflow(typegraph, { discoverDatasets: async () => [] } as any, { userId: 'comparison-user', tenantId: 'comparison-workspace', role: 'MEMBER', authMethod: 'jwt' });
+    const workflow = createAgentWorkflow(typegraph, { discoverDatasets: async () => [] } as any, { userId: 'comparison-user', tenantId: 'comparison-workspace', authMethod: 'jwt' });
     const run = await workflow.createRun();
     const execution = await run.start({ inputData: { message: question, history: [{ role: 'user', content: 'context-marker: compare the Orion cost and risk documents' }] } });
     if (execution.status !== 'success') throw execution.error;

@@ -81,7 +81,7 @@ test('authenticated multipart upload validates drawing files and queues the orig
   @Module({ controllers: [DocumentsController], providers: [
     { provide: DocumentsService, useValue: service },
     { provide: DocumentStorageService, useValue: storage },
-    { provide: AuthService, useValue: { validateAccessToken: async () => ({ userId: 'owner', tenantId: 'test-tenant', role: 'MEMBER', authMethod: 'jwt' }) } },
+    { provide: AuthService, useValue: { validateAccessToken: async () => ({ userId: 'owner', tenantId: 'test-tenant', authMethod: 'jwt' }) } },
   ] }) class TestModule {}
   const app = await NestFactory.create(TestModule, { logger: false });
   try {

@@ -7,3 +7,9 @@ coverage/
 .DS_Store
 
 .env.audit
+.agents/
+.claude/
+/AGENTS.md
+/CLAUDE.md
+.gitnexus
+backups

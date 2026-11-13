@@ -24,15 +24,15 @@ pnpm test
 pnpm dev
 ```
 
-Set `GEMINI_API_KEY` in `.env` before cloud inference. The active model is `google/gemini-3.6-flash` via Mastra 1.82.0; `MASTRA_PROVIDER=google` is the provider selector. Keep real credentials only in the ignored `.env` file. `pnpm prisma:deploy` applies the additive migrations, including conversation context and user-managed memory tables; it does not reset the database.
+Choose the active provider/model and add cloud API keys in the LLM Settings page. The backend needs `LLM_CREDENTIALS_ENCRYPTION_KEY` to encrypt UI-managed keys. Existing `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and model-selection environment values remain supported as backward-compatible fallbacks/bootstrap, but are no longer listed in `.env.example`. `pnpm prisma:deploy` applies additive migrations; it does not reset the database.
 
 Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilot:sitepilot@localhost:5444/sitepilot`.
 
 ### Runtime model registry and token analytics
 
-`MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, and `OLLAMA_THINK` (plus the optional history, timeout, and TypeGraph threshold settings) seed database runtime settings without overwriting existing database values. Each new agent request reads one immutable model snapshot from PostgreSQL, so separate API instances see administrator changes on the next request. Ollama discovery reads the trusted `OLLAMA_BASE_URL` and confirms tool capability through `/api/show`; OpenRouter free models are read from its public model catalog and require tool plus structured-output support; Gemini is registered from the configured `GEMINI_MODEL_ID` (default `google/gemini-3.6-flash`) when `GEMINI_API_KEY` is configured. Only Gemini IDs can be manually registered. API keys remain backend-only. Embedding and TypeGraph ingestion configuration remains independent.
+`MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, and `OLLAMA_THINK` (plus the optional history, timeout, and TypeGraph threshold settings) seed database runtime settings without overwriting existing database values. Each new agent request reads one immutable model snapshot from PostgreSQL, so separate API instances see installation-owner changes on the next request. Ollama discovery reads the trusted `OLLAMA_BASE_URL` and confirms tool capability through `/api/show`; OpenRouter free models are read from its public model catalog and require tool plus structured-output support; Gemini remains available from `GEMINI_API_KEY` or an encrypted installation-owner-managed credential. OpenAI models are discovered from the official model catalog when an `OPENAI_API_KEY` fallback or encrypted credential is configured. Only API keys stay backend-only. UI-managed credentials require `LLM_CREDENTIALS_ENCRYPTION_KEY` (32 random bytes encoded as base64) and are encrypted with AES-256-GCM; environment keys remain supported as fallbacks. Embedding and TypeGraph ingestion configuration remains independent.
 
-Admin endpoints require `TENANT_ADMIN` or `SUPER_ADMIN`; usage analytics is authenticated and scoped to the caller's tenant:
+Global provider/model/runtime endpoints require a JWT for the configured installation owner (`INSTALLATION_OWNER_USER_ID`). User usage analytics is authenticated and scoped to the caller:
 
 ```text
 GET  /api/admin/llm/settings
@@ -56,9 +56,11 @@ Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; m
 
 ## API
 
-Protected routes require a valid bearer JWT. The development `x-api-key` is accepted only when `ENABLE_DEV_API_KEY_AUTH=true` outside production; it is disabled by default.
+Protected routes require a valid bearer JWT. Register with `{ "username", "password" }` and log in with the same fields at `/api/auth/register` and `/api/auth/login`. Registration does not issue a session; login returns an access token and an HttpOnly refresh cookie. Existing users are assigned a stable username by the additive migration and may continue to log in by their existing email during frontend migration. The API no longer accepts workspace selection, membership management, roles, or shared development API keys.
 
-Conversation history is bounded by `AGENT_HISTORY_MESSAGES` and `AGENT_HISTORY_MESSAGE_CHARS`. Verified document references and active selections are persisted per conversation and revalidated against the authenticated tenant/user on retrieval. Personal memory is explicit and user-managed (it is not extracted from every message): use `GET/POST /api/agent/memories` and `PATCH/DELETE /api/agent/memories/:id`. Memory operations are scoped to the authenticated tenant and user; entries are bounded and reject credential-like content. Conversation summaries and evidence references are context hints only; document content remains untrusted and must be retrieved and authorized again.
+Global LLM settings, credentials, model selection, and worker administration fail closed until `INSTALLATION_OWNER_USER_ID` is set to the selected user's database ID. Find that ID locally with `SELECT id FROM users WHERE username = '<username>';`, set it in the backend environment, and restart the API. The owner is a single installation-level trust anchor; tenant/member role records remain in PostgreSQL for data preservation but are no longer used for API authorization.
+
+Conversation history is bounded by `AGENT_HISTORY_MESSAGES` and `AGENT_HISTORY_MESSAGE_CHARS`. Conversations, memories, and usage logs are scoped to the authenticated user. Documents retain their existing shared installation workspace behavior; retrieval continues to use server-side authorization filters. Verified document references and active selections are persisted per conversation and revalidated against the authenticated user on retrieval. Personal memory is explicit and user-managed (it is not extracted from every message): use `GET/POST /api/agent/memories` and `PATCH/DELETE /api/agent/memories/:id`. Entries are bounded and reject credential-like content. Conversation summaries and evidence references are context hints only; document content remains untrusted and must be retrieved and authorized again.
 
 ### Build and tests
 
@@ -187,7 +189,7 @@ Chunk limits can be tuned with `SITEPILOT_CHUNK_MAX_TOKENS`, `SITEPILOT_CHUNK_TA
 `pnpm test` runs the unit suite. For a running local API, installed local Ollama models and the synthetic pricing fixture already indexed in the isolated development TypeGraph, run:
 
 ```bash
-AGENT_E2E_URL=http://127.0.0.1:3220 DEV_API_KEY="$API_KEY" pnpm test:e2e:stream
+AGENT_E2E_URL=http://127.0.0.1:3220 AGENT_E2E_BEARER="$TOKEN" pnpm test:e2e:stream
 ```
 
 This real integration test checks Mastra tool events, multiple text deltas before `done`, a verified citation and persisted conversation messages.
@@ -230,7 +232,7 @@ backendTools.register({
   id: 'employee_count',
   description: 'Count registered employees in a department.',
   input: z.strictObject({ department: z.string().min(1).max(80) }),
-  authorize: principal => principal.role === 'TENANT_ADMIN',
+  authorize: principal => principal.userId === config.installationOwnerUserId,
   execute: async ({ department }, principal, signal) => {
     const count = await directory.countEmployees(principal.tenantId, department, signal);
     return `Registered employees: ${count}`;
@@ -239,13 +241,13 @@ backendTools.register({
 ```
 
 The handler must independently enforce resource authorization and use the
-server-provided principal for tenant scoping. It must honor the abort signal.
+server-provided principal for user scoping. It must honor the abort signal.
 The registry is intended for read-only handlers. Tool summaries are displayed
 verbatim and are kept separate from document evidence. The existing planner can
 select a registered tool alone or pair it with TypeGraph retrieval.
 # LLM administration API (backend contract)
 
-All routes below require a JWT in `Authorization: Bearer <token>` and a `TENANT_ADMIN` or `SUPER_ADMIN` role, except usage analytics, which is available to authenticated tenant members and is always scoped to their token tenant. Swagger documents these routes at `/api/docs` outside production.
+All global routes below require a JWT in `Authorization: Bearer <token>` for the configured installation owner. Usage analytics is available to authenticated users and is scoped to the caller's user ID. Swagger documents these routes at `/api/docs` outside production.
 
 ```http
 GET  /api/admin/llm/settings
@@ -266,7 +268,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3220/api/admin/llm/model
 curl -H "Authorization: Bearer $TOKEN" 'http://localhost:3220/api/admin/llm/usage?period=monthly&groupBy=model'
 ```
 
-`POST /settings` accepts only `MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, `OLLAMA_THINK`, `AGENT_HISTORY_MESSAGES`, `AGENT_HISTORY_MESSAGE_CHARS`, `AGENT_REQUEST_TIMEOUT_MS`, and `TYPEGRAPH_MIN_SCORE`. Secret values are never returned; settings response includes only `geminiConfigured` and `openrouterConfigured` flags. Usage responses contain token counts only and use Europe/Istanbul date buckets.
+`POST /settings` accepts only `MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, `OLLAMA_THINK`, `AGENT_HISTORY_MESSAGES`, `AGENT_HISTORY_MESSAGE_CHARS`, `AGENT_REQUEST_TIMEOUT_MS`, and `TYPEGRAPH_MIN_SCORE`. Secret values are never returned; settings response includes configured flags for Gemini, OpenRouter, and OpenAI. Credential save, revoke, and connection-test endpoints are documented in `docs/llm-models-and-usage.md`; generic runtime settings cannot write credentials. Usage responses contain token counts only and use Europe/Istanbul date buckets.
 
 On an offline Windows workstation with Prisma engines already installed in pnpm's store, generation can use the local 6.19.3 binaries rather than fetching checksums:
 

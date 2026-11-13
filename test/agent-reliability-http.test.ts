@@ -41,7 +41,7 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
   config.agentOrchestration = 'workflow';
   process.env.MASTRA_OBSERVABILITY = 'false';
   const db = store();
-  const principal = { userId: 'owner', tenantId: 'workspace', role: 'MEMBER', authMethod: 'jwt' };
+  const principal = { userId: 'owner', tenantId: 'workspace', authMethod: 'jwt' };
   let limited = false;
   let pauseStreaming = false;
   let slowStreaming = false;

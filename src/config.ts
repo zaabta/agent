@@ -39,6 +39,7 @@ export const config = {
   // Company knowledge uses one existing canonical workspace. DEV_TENANT_ID
   // remains a backwards-compatible local fallback only.
   companyWorkspaceId,
+  installationOwnerUserId: process.env.INSTALLATION_OWNER_USER_ID?.trim(),
   tenantId: companyWorkspaceId || process.env.DEV_TENANT_ID || 'demo-workspace',
   ollamaUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
   embedModel: process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text',
@@ -65,7 +66,7 @@ export const config = {
   agentTimeoutMs: Number(process.env.AGENT_REQUEST_TIMEOUT_MS || 180000),
   agentTrace: process.env.AGENT_TRACE === 'true',
   agentOrchestration: process.env.SITEPILOT_AGENT_ORCHESTRATION === 'workflow' ? 'workflow' : 'legacy',
-  conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'dev-shared-api-key',
+  conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'diagnostic-user',
   conversationHistoryMessages: Math.max(0, Number(process.env.AGENT_HISTORY_MESSAGES || 10)),
   conversationHistoryChars: Math.max(256, Number(process.env.AGENT_HISTORY_MESSAGE_CHARS || 3000)),
 };

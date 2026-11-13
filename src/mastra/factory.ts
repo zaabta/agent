@@ -7,6 +7,7 @@ import { TypegraphService } from "../typegraph/typegraph.service.js";
 import { StructuredDataService } from "../documents/structured-data.service.js";
 import { modelWithExplicitFallback } from "../agent/provider-errors.js";
 import type { RuntimeModelSnapshot } from './runtime-model.js';
+import { asMastraModel } from './runtime-model.js';
 
 export function createSitePilotAgent(
   typegraph: TypegraphService,
@@ -138,14 +139,7 @@ export function createSitePilotAgent(
   });
 
   const snapshot = runtime ?? { provider: config.modelProvider, model: config.model, fallback: config.modelFallback, ollamaThink: config.ollamaThink };
-  const primaryModel = snapshot.provider === "ollama"
-    ? { providerId: "ollama", modelId: snapshot.model, url: `${config.ollamaUrl.replace(/\/+$/, "")}/v1`, apiKey: "local-ollama", api: "chat" as const }
-    : snapshot.provider==='google' ? `google/${snapshot.model.replace(/^google\//,'')}`
-      : snapshot.provider==='openrouter' ? `openrouter/${snapshot.model.replace(/^openrouter\//,'')}` : snapshot.model;
-  const fallbackModel = snapshot.fallback ? snapshot.provider === "ollama"
-    ? { providerId: "ollama", modelId: snapshot.fallback, url: `${config.ollamaUrl.replace(/\/+$/, "")}/v1`, apiKey: "local-ollama", api: "chat" as const }
-    : snapshot.provider==='google' ? `google/${snapshot.fallback.replace(/^google\//,'')}`
-      : snapshot.provider==='openrouter' ? `openrouter/${snapshot.fallback.replace(/^openrouter\//,'')}` : snapshot.fallback : undefined;
+  const { primary: primaryModel, fallback: fallbackModel } = asMastraModel(snapshot);
   const model = modelWithExplicitFallback(primaryModel, fallbackModel, snapshot.provider);
   return new Agent({
     id: "sitepilot-agent",

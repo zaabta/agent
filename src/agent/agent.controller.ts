@@ -5,8 +5,8 @@ import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
-import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { Roles } from '../auth/roles.decorator.js';
+import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { InstallationOwnerOnly } from '../auth/installation-owner.decorator.js';
 import { readTenantTrace } from '../mastra/observability.js';
 import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';
 import { AgentRunCancelledError, AgentRunCapacityError } from './active-run-registry.js';
@@ -19,8 +19,7 @@ interface AgentBody {
 @Controller('api/agent')
 @ApiTags('agent and conversations')
 @ApiBearerAuth('bearer')
-@ApiSecurity('dev-api-key')
-@ApiResponse({ status: 401, description: 'Valid access JWT required; local dev key is optional when explicitly enabled.' })
+@ApiResponse({ status: 401, description: 'Valid access JWT required.' })
 @UseGuards(ApiAuthGuard)
 export class AgentController {
   constructor(@Inject(AgentService) private readonly agent: AgentService) {}
@@ -223,11 +222,11 @@ export class AgentController {
   }
 
   @Get('traces/:traceId')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
-  @ApiOperation({ summary: 'Read redacted Mastra diagnostics for the authenticated tenant' })
+  @InstallationOwnerOnly()
+  @ApiOperation({ summary: 'Read redacted Mastra diagnostics for the installation' })
   @ApiParam({ name: 'traceId', description: '32-character hexadecimal trace identifier.' })
   @ApiResponse({ status: 200, description: 'Redacted trace metadata and spans.' })
-  @ApiResponse({ status: 403, description: 'TENANT_ADMIN or SUPER_ADMIN role required.' })
+  @ApiResponse({ status: 403, description: 'Installation owner required.' })
   @ApiNotFoundResponse({ description: 'TRACE_NOT_FOUND.' })
   async trace(@Param('traceId') traceId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!/^[a-f0-9]{32}$/i.test(traceId)) throw new NotFoundException('TRACE_NOT_FOUND');

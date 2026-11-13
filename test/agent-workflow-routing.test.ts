@@ -111,7 +111,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       },
     };
     try {
-      const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', role: 'MEMBER', authMethod: 'jwt' }, undefined, {
+      const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', authMethod: 'jwt' }, undefined, {
         onTextDelta: async text => { if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
       }, backendTools);
       const run = await workflow.createRun();

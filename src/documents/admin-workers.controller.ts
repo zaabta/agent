@@ -1,17 +1,16 @@
 import { Controller, Get, Inject, NotFoundException, Query, Param, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
-import { Roles } from '../auth/roles.decorator.js';
+import { InstallationOwnerOnly } from '../auth/installation-owner.decorator.js';
 import { WorkerMonitoringService } from './worker-monitoring.service.js';
 
 @ApiTags('admin worker monitoring')
 @ApiBearerAuth('bearer')
-@ApiSecurity('dev-api-key')
 @Controller('api/admin/workers')
 @UseGuards(ApiAuthGuard)
-@Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+@InstallationOwnerOnly()
 export class AdminWorkersController {
   constructor(@Inject(WorkerMonitoringService) private readonly monitoring: WorkerMonitoringService) {}
 

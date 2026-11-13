@@ -17,7 +17,7 @@ export async function persistUsage(prisma:PrismaService,context:UsageContext,det
   const hasCounts=!!usage&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','cachedTokens','reasoningTokens'].some(key=>Number.isInteger(usage[key]));
   await persistUsageEvent(prisma,{
     tenantId:context.tenantId,userId:context.userId??null,conversationId:context.conversationId??null,logicalRequestId:context.logicalRequestId,
-    invocationId:detail.invocationId??randomUUID(),provider:String(usage?.provider??context.runtime.provider),modelId:String(detail.actualModel??usage?.modelId??context.runtime.model),
+    invocationId:detail.invocationId??randomUUID(),provider:String(usage?.provider??context.runtime.provider),configuredModelId:context.runtime.model,modelId:String(detail.actualModel??usage?.modelId??context.runtime.model),
     inputTokens:Number.isInteger(usage?.inputTokens)?usage.inputTokens:null,outputTokens:Number.isInteger(usage?.outputTokens)?usage.outputTokens:null,
     totalTokens:Number.isInteger(usage?.totalTokens)?usage.totalTokens:Number.isInteger(usage?.inputTokens)&&Number.isInteger(usage?.outputTokens)?usage.inputTokens+usage.outputTokens:null,
     cachedTokens:Number.isInteger(usage?.cachedInputTokens)?usage.cachedInputTokens:Number.isInteger(usage?.cachedTokens)?usage.cachedTokens:null,

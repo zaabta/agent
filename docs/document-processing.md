@@ -11,7 +11,7 @@ Local Redis is available through Compose at `127.0.0.1:6391`; set `REDIS_URL` if
 
 ## Upload
 
-`POST /api/documents/upload` accepts multipart field `file`. `POST /api/documents/upload-batch` accepts repeated multipart field `files`. Both require `x-api-key` and return `202 Accepted` with document/job metadata, not file bytes. The batch response contains per-file `accepted` and `rejected` lists. Reuploading the same content for the tenant returns its existing document and job.
+`POST /api/documents/upload` accepts multipart field `file`. `POST /api/documents/upload-batch` accepts repeated multipart field `files`. Both require a JWT bearer token and return `202 Accepted` with document/job metadata, not file bytes. The batch response contains per-file `accepted` and `rejected` lists. Documents retain the existing shared installation workspace behavior; conversations and usage logs remain user scoped.
 
 ```json
 {
