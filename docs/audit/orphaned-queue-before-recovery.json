@@ -1,0 +1,12 @@
+{
+  "note": "Test-only repair after terminating every prior worker. Original job identity and retained bytes reused; no production recovery claim.",
+  "versions": [
+    {
+      "id": "623348c3-9de2-4245-a679-a6af915e4a66",
+      "documentId": "9d300e84-cd4d-4eff-bbbf-04bc5e5e0478",
+      "jobId": "c8a1ca46-3840-4181-a9e3-08a26876e978",
+      "status": "processing",
+      "redisState": "missing"
+    }
+  ]
+}

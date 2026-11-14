@@ -11,7 +11,7 @@ export interface ProcessDocumentJob {
 @Injectable()
 export class DocumentQueueService implements OnModuleDestroy {
   constructor(@Inject(DOCUMENT_QUEUE) readonly queue: Queue<ProcessDocumentJob>) {}
-  async enqueue(data: ProcessDocumentJob, jobId = randomUUID()) {
+  async enqueue(data: ProcessDocumentJob, jobId: string = randomUUID()) {
     const job = await this.queue.add('process-document', data, {
       jobId, attempts: config.documentJobAttempts,
       backoff: { type: 'exponential', delay: 2000 },

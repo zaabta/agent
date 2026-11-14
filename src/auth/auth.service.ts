@@ -1,24 +1,16 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { domainToUnicode } from 'node:url';
-import { Inject, Injectable, UnauthorizedException, HttpException, HttpStatus, ConflictException, ForbiddenException, OnModuleDestroy, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Inject, Injectable, UnauthorizedException, HttpException, HttpStatus, ConflictException, BadRequestException, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { config } from '../config.js';
-import type { AuthPrincipal, TenantRole } from './auth.types.js';
+import type { AuthPrincipal } from './auth.types.js';
 
 const scrypt = promisify(scryptCb);
 const REFRESH_COOKIE = 'sitepilot_refresh';
 const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_DAYS = 30;
-type Claims = { sub: string; tid: string; sid: string; role: TenantRole; iat: number; exp: number; iss: string };
-
-function displayEmail(email: string) {
-  const at = email.lastIndexOf('@');
-  if (at < 0) return email;
-  const domain = email.slice(at + 1);
-  return `${email.slice(0, at)}@${domainToUnicode(domain) || domain}`;
-}
+type Claims = { sub: string; tid?: string; sid: string; iat: number; exp: number; iss: string };
 
 @Injectable()
 export class AuthService implements OnModuleDestroy {
@@ -29,47 +21,54 @@ export class AuthService implements OnModuleDestroy {
     else this.redis.disconnect();
   }
 
-  async register(input: { email: string; password: string; displayName?: string }) {
-    const email = this.normalizeEmail(input.email);
-    await this.enforceLoginLimit('register', 'unknown', email);
+  async register(input: { username?: string; email?: string; password: string; displayName?: string }, ip?: string) {
+    const email = input.email ? this.normalizeEmail(input.email) : null;
+    const username = input.username ? this.normalizeUsername(input.username) : email ? `legacy-${createHash('sha256').update(email).digest('hex').slice(0, 16)}` : '';
+    if (!username) throw new BadRequestException('USERNAME_REQUIRED');
+    await this.enforceLoginLimit('register', ip || 'unknown', username);
     this.validatePassword(input.password);
-    const existing = await this.prisma.user.findUnique({ where: { email }, select: { id: true } });
+    const existing = await this.prisma.user.findUnique({ where: { username }, select: { id: true } });
     if (existing) throw new ConflictException('ACCOUNT_EXISTS');
+    if (email && await this.prisma.user.findUnique({ where: { email }, select: { id: true } })) throw new ConflictException('ACCOUNT_EXISTS');
     const passwordHash = await this.hashPassword(input.password);
     let user;
     try { user = await this.prisma.$transaction(async tx => {
-      const created = await tx.user.create({ data: { email, passwordHash, displayName: input.displayName?.trim().slice(0, 120) || null } });
-      // Registration creates an identity only. A company workspace admin must
-      // explicitly grant shared document access through addMember.
-      await tx.auditLog.create({ data: { tenantId: null, userId: created.id, action: 'auth.registration_pending' } });
+      const created = await tx.user.create({ data: { username, email, passwordHash, displayName: input.displayName?.trim().slice(0, 120) || null } });
+      await tx.auditLog.create({ data: { tenantId: this.companyWorkspaceId(), userId: created.id, action: 'auth.registered' } });
       return created;
     }); } catch (error) {
       if ((error as { code?: string }).code === 'P2002') throw new ConflictException('ACCOUNT_EXISTS');
       throw error;
     }
-    return { status: 'pending_workspace_membership', user: { id: user.id, emailDisplay: displayEmail(user.email) } };
+    return { status: 'registered', user: { id: user.id, username: user.username, displayName: user.displayName } };
   }
 
-  async login(input: { email: string; password: string }, ip: string | undefined) {
-    const email = this.normalizeEmail(input.email);
-    await this.enforceLoginLimit('login', ip || 'unknown', email);
-    const user = await this.prisma.user.findUnique({ where: { email }, include: { memberships: { include: { tenant: true } } } });
+  async login(input: { username?: string; email?: string; password: string }, ip: string | undefined) {
+    const identifier = typeof input.username === 'string' ? input.username : typeof input.email === 'string' ? input.email : '';
+    await this.enforceLoginLimit('login', ip || 'unknown', identifier.toLowerCase().trim().slice(0, 254));
+    if (typeof input.password !== 'string') throw new UnauthorizedException('INVALID_CREDENTIALS');
+    const byEmail = identifier.includes('@');
+    let username: string | undefined;
+    try { username = byEmail ? undefined : this.normalizeUsername(identifier); }
+    catch { throw new UnauthorizedException('INVALID_CREDENTIALS'); }
+    const email = byEmail ? this.normalizeEmail(identifier) : undefined;
+    const user = username
+      ? await this.prisma.user.findUnique({ where: { username } })
+      : await this.prisma.user.findUnique({ where: { email } });
     if (!user || user.disabledAt || !await this.verifyPassword(input.password, user.passwordHash)) {
       await this.audit(null, user?.id ?? null, 'auth.login_failed', ip);
       throw new UnauthorizedException('INVALID_CREDENTIALS');
     }
     const workspaceId = this.companyWorkspaceId();
-    const membership = user.memberships.find(item => item.tenantId === workspaceId);
-    if (!membership) throw new ForbiddenException('COMPANY_WORKSPACE_ACCESS_REQUIRED');
-    await this.audit(membership.tenantId, user.id, 'auth.login', ip);
-    await this.redis.del(`sitepilot:auth:login:email:${createHash('sha256').update(email).digest('hex')}`).catch(() => undefined);
-    return this.issueTokens(user.id, membership.tenantId, membership.role);
+    await this.audit(workspaceId, user.id, 'auth.login', ip);
+    await this.redis.del(`sitepilot:auth:login:email:${createHash('sha256').update(username ?? email!).digest('hex')}`).catch(() => undefined);
+    return this.issueTokens(user.id, workspaceId);
   }
 
   async refresh(token: string | undefined, ip?: string) {
     if (!token) throw new UnauthorizedException('REFRESH_TOKEN_REQUIRED');
     const tokenHash = this.hashToken(token);
-    const session = await this.prisma.refreshSession.findUnique({ where: { tokenHash }, include: { user: true, tenant: true } });
+    const session = await this.prisma.refreshSession.findUnique({ where: { tokenHash }, include: { user: true } });
     if (!session || session.revokedAt || session.expiresAt <= new Date() || session.user.disabledAt) {
       if (session) {
         await this.prisma.refreshSession.updateMany({ where: { familyId: session.familyId, revokedAt: null }, data: { revokedAt: new Date() } });
@@ -79,10 +78,8 @@ export class AuthService implements OnModuleDestroy {
     }
     const workspaceId = this.companyWorkspaceId();
     if (session.tenantId !== workspaceId) throw new UnauthorizedException('REFRESH_TOKEN_INVALID');
-    const membership = await this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: workspaceId, userId: session.userId } } });
-    if (!membership) throw new UnauthorizedException('REFRESH_TOKEN_INVALID');
     await this.prisma.refreshSession.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
-    return this.issueTokens(session.userId, workspaceId, membership.role, session.familyId);
+    return this.issueTokens(session.userId, workspaceId, session.familyId);
   }
 
   async logout(token: string | undefined, ip?: string) {
@@ -93,55 +90,25 @@ export class AuthService implements OnModuleDestroy {
     await this.audit(session.tenantId, session.userId, 'auth.logout', ip);
   }
 
-  async switchTenant(principal: AuthPrincipal, tenantId: string) {
-    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
-    const membership = await this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId, userId: principal.userId } }, include: { tenant: true } });
-    if (!membership) throw new ForbiddenException('TENANT_ACCESS_DENIED');
-    await this.audit(tenantId, principal.userId, 'auth.tenant_switched');
-    return this.issueTokens(principal.userId, tenantId, membership.role);
-  }
-
   async validateAccessToken(token: string): Promise<AuthPrincipal> {
     let claims: Claims;
     try { claims = this.verifyJwt(token); } catch { throw new UnauthorizedException('ACCESS_TOKEN_INVALID'); }
     const workspaceId = this.companyWorkspaceId();
-    const [user, membership, session] = await Promise.all([
+    const [user, session] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: claims.sub }, select: { disabledAt: true } }),
-      this.prisma.membership.findUnique({ where: { tenantId_userId: { tenantId: workspaceId, userId: claims.sub } }, select: { role: true } }),
       this.prisma.refreshSession.findUnique({ where: { id: claims.sid }, select: { userId: true, tenantId: true, revokedAt: true, expiresAt: true } }),
     ]);
-    if (!user || user.disabledAt || !membership || !session || claims.tid !== workspaceId || session.revokedAt || session.expiresAt <= new Date() || session.userId !== claims.sub || session.tenantId !== workspaceId || session.tenantId !== claims.tid) throw new UnauthorizedException('ACCESS_TOKEN_REVOKED');
-    return { userId: claims.sub, tenantId: workspaceId, role: membership.role, authMethod: 'jwt' };
+    if (!user || user.disabledAt || !session || (claims.tid && claims.tid !== workspaceId) || session.revokedAt || session.expiresAt <= new Date() || session.userId !== claims.sub || session.tenantId !== workspaceId) throw new UnauthorizedException('ACCESS_TOKEN_REVOKED');
+    return { userId: claims.sub, tenantId: workspaceId, authMethod: 'jwt' };
   }
 
-  async listMembers(tenantId: string) {
-    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
-    const members = await this.prisma.membership.findMany({ where: { tenantId }, orderBy: { createdAt: 'asc' }, select: { role: true, createdAt: true, user: { select: { id: true, email: true, displayName: true, disabledAt: true } } } });
-    return members.map(member => ({ ...member, user: { ...member.user, emailDisplay: displayEmail(member.user.email) } }));
-  }
-
-  async addMember(tenantId: string, emailInput: string, role: TenantRole, actorId: string) {
-    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
-    if (role === 'SUPER_ADMIN') throw new ForbiddenException('SUPER_ADMIN_ASSIGNMENT_REQUIRES_PLATFORM_ADMIN');
-    const email = this.normalizeEmail(emailInput);
-    const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true, displayName: true } });
-    if (!user) throw new NotFoundException('USER_NOT_FOUND');
-    try { await this.prisma.membership.create({ data: { tenantId, userId: user.id, role } }); }
-    catch (error) {
-      if ((error as { code?: string }).code === 'P2002') throw new ConflictException('MEMBERSHIP_EXISTS');
-      throw error;
-    }
-    await this.audit(tenantId, actorId, 'tenant.member_added', undefined, { targetUserId: user.id, role });
-    return { user: { ...user, emailDisplay: displayEmail(user.email) }, tenantId, role };
-  }
-
-  async changeMemberRole(tenantId: string, userId: string, role: TenantRole, actorId: string) {
-    if (tenantId !== this.companyWorkspaceId()) throw new ForbiddenException('COMPANY_WORKSPACE_ONLY');
-    if (role === 'SUPER_ADMIN') throw new ForbiddenException('SUPER_ADMIN_ASSIGNMENT_REQUIRES_PLATFORM_ADMIN');
-    const updated = await this.prisma.membership.updateMany({ where: { tenantId, userId }, data: { role } });
-    if (!updated.count) throw new NotFoundException('TENANT_MEMBER_NOT_FOUND');
-    await this.audit(tenantId, actorId, 'tenant.member_role_changed', undefined, { targetUserId: userId, role });
-    return { userId, tenantId, role };
+  async currentUser(userId: string, tenantId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, displayName: true, memberships: { where: { tenantId }, select: { role: true } } },
+    });
+    if (!user) throw new UnauthorizedException('ACCOUNT_NOT_FOUND');
+    return { id: user.id, username: user.username, displayName: user.displayName, role: user.memberships[0]?.role ?? null };
   }
 
   refreshCookie(token: string, production = process.env.NODE_ENV === 'production') {
@@ -158,15 +125,21 @@ export class AuthService implements OnModuleDestroy {
     return workspaceId;
   }
 
-  private async issueTokens(userId: string, tenantId: string, role: TenantRole, familyId: string = randomUUID()) {
+  private async issueTokens(userId: string, tenantId: string, familyId: string = randomUUID()) {
     const now = Math.floor(Date.now() / 1000);
     const sessionId = randomUUID();
     const refreshToken = randomBytes(48).toString('base64url');
     await this.prisma.refreshSession.create({ data: { id: sessionId, tokenHash: this.hashToken(refreshToken), familyId, tenantId, userId, expiresAt: new Date(Date.now() + REFRESH_TTL_DAYS * 86400000) } });
-    const accessToken = this.signJwt({ sub: userId, tid: tenantId, sid: sessionId, role, iat: now, exp: now + ACCESS_TTL_SECONDS, iss: 'sitepilot-ai' });
-    return { accessToken, tokenType: 'Bearer', expiresIn: ACCESS_TTL_SECONDS, refreshToken, user: { id: userId }, tenant: { id: tenantId, role } };
+    const accessToken = this.signJwt({ sub: userId, sid: sessionId, iat: now, exp: now + ACCESS_TTL_SECONDS, iss: 'sitepilot-ai' });
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, username: true, displayName: true } });
+    return { accessToken, tokenType: 'Bearer', expiresIn: ACCESS_TTL_SECONDS, refreshToken, user };
   }
 
+  private normalizeUsername(value: string) {
+    const username = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (username.length < 3 || username.length > 64 || !/^[a-z0-9._-]+$/.test(username)) throw new BadRequestException('INVALID_USERNAME');
+    return username;
+  }
   private normalizeEmail(value: string) {
     if (typeof value !== 'string' || value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) throw new UnauthorizedException('INVALID_CREDENTIALS');
     return value.trim().toLowerCase();
@@ -207,13 +180,13 @@ export class AuthService implements OnModuleDestroy {
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('invalid signature');
     const header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString()) as { alg?: string };
     const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as Claims;
-    if (header.alg !== 'HS256' || payload.iss !== 'sitepilot-ai' || !payload.sub || !payload.tid || payload.exp <= Date.now() / 1000) throw new Error('invalid claims');
+    if (header.alg !== 'HS256' || payload.iss !== 'sitepilot-ai' || !payload.sub || !payload.sid || payload.exp <= Date.now() / 1000) throw new Error('invalid claims');
     return payload;
   }
-  private async enforceLoginLimit(operation: 'register' | 'login', ip: string, email: string) {
+  private async enforceLoginLimit(operation: 'register' | 'login', ip: string, identifier: string) {
     try {
       if (this.redis.status === 'wait') await this.redis.connect();
-      const emailKey = `sitepilot:auth:${operation}:email:${createHash('sha256').update(email).digest('hex')}`;
+      const emailKey = `sitepilot:auth:${operation}:identity:${createHash('sha256').update(identifier).digest('hex')}`;
       const ipKey = `sitepilot:auth:${operation}:ip:${createHash('sha256').update(ip).digest('hex')}`;
       const [emailCount, ipCount] = await Promise.all([this.redis.incr(emailKey), this.redis.incr(ipKey)]);
       if (emailCount === 1) await this.redis.expire(emailKey, 900);

@@ -12,7 +12,7 @@ import {
 import type { DocumentSearchHit, TypegraphService } from '../src/typegraph/typegraph.service.js';
 import type { AuthPrincipal } from '../src/auth/auth.types.js';
 
-const principal = { userId: 'user-a', tenantId: 'tenant-a', role: 'MEMBER' } as AuthPrincipal;
+const principal = { userId: 'user-a', tenantId: 'tenant-a' } as AuthPrincipal;
 
 test('fallback eligibility depends on missing evidence, regardless of wording', () => {
   for (const question of ['unseen English wording', 'Türkçe yeni bir soru', 'سؤال عربي جديد']) assert.equal(needsWorkspaceRecovery([]), true, question);

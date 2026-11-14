@@ -1,0 +1,234 @@
+{
+  "mode": "live",
+  "label": "live-qwen3-8b",
+  "complete": false,
+  "totalCases": 33,
+  "results": [
+    {
+      "id": "factual-en",
+      "category": "factual",
+      "language": "en",
+      "question": "What approval is required for Orion?",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": false,
+      "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
+      "retrievedDocuments": null,
+      "citationValidity": false,
+      "latencyMs": 74098,
+      "llmCalls": 5,
+      "pass": false,
+      "status": "failed",
+      "reason": null,
+      "conversationId": "f523c092-9c32-448c-9048-25c634ebc0d2",
+      "toolsCalled": [
+        "datasetDiscovery",
+        "documentSearch",
+        "documentSearch"
+      ],
+      "citedDocuments": []
+    },
+    {
+      "id": "factual-ar",
+      "category": "factual",
+      "language": "ar",
+      "question": "ما الموافقة المطلوبة لمشروع Orion؟",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "الموافقة المطلوبة لمشروع Orion هي تقييم السلامة.\n\nSources: [[requirements.md (section Orion requirements)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 38742,
+      "llmCalls": 3,
+      "pass": true,
+      "status": "passed",
+      "reason": null,
+      "conversationId": "d670157b-4f35-4926-9704-320ba38800ce",
+      "toolsCalled": [
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "requirements.md"
+      ]
+    },
+    {
+      "id": "factual-tr",
+      "category": "factual",
+      "language": "tr",
+      "question": "Orion için hangi onay gerekiyor?",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "Orion için güvenlik incelemesi onay gerekiyor.\n\nSources: [[requirements.md (section Orion requirements)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 37921,
+      "llmCalls": 3,
+      "pass": true,
+      "status": "passed",
+      "reason": null,
+      "conversationId": "50254231-cac7-48dd-ae81-0ac9054de1df",
+      "toolsCalled": [
+        "documentSearch",
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "requirements.md"
+      ]
+    },
+    {
+      "id": "cost-en",
+      "category": "cost",
+      "language": "en",
+      "question": "What is the Orion base budget?",
+      "expectedFacts": [
+        "120000"
+      ],
+      "expectedSourceDocuments": [
+        "costs.txt"
+      ],
+      "history": [],
+      "humanReviewRequired": false,
+      "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
+      "retrievedDocuments": null,
+      "citationValidity": false,
+      "latencyMs": 35788,
+      "llmCalls": 3,
+      "pass": false,
+      "status": "failed",
+      "reason": null,
+      "conversationId": "59f04e51-05ce-4f68-ad5d-e1071203b114",
+      "toolsCalled": [
+        "documentSearch"
+      ],
+      "citedDocuments": []
+    },
+    {
+      "id": "cost-ar",
+      "category": "cost",
+      "language": "ar",
+      "question": "كم الميزانية الأساسية لمشروع Orion؟",
+      "expectedFacts": [
+        "120000"
+      ],
+      "expectedSourceDocuments": [
+        "costs.txt"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "الميزانية الأساسية لمشروع Orion هي 120000 دولار أمريكي.\n\nSources: [[costs.txt (line 1)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 64095,
+      "llmCalls": 5,
+      "pass": true,
+      "status": "passed",
+      "reason": null,
+      "conversationId": "0b83d801-5855-416b-97b4-e5ebf4601bca",
+      "toolsCalled": [
+        "datasetDiscovery",
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "costs.txt"
+      ]
+    },
+    {
+      "id": "cost-tr",
+      "category": "cost",
+      "language": "tr",
+      "question": "Orion temel bütçesi ne kadar?",
+      "expectedFacts": [
+        "120000"
+      ],
+      "expectedSourceDocuments": [
+        "costs.txt"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
+      "retrievedDocuments": null,
+      "citationValidity": false,
+      "latencyMs": 54262,
+      "llmCalls": 4,
+      "pass": false,
+      "status": "failed",
+      "reason": null,
+      "conversationId": "3cbbd0ed-ca73-45dd-9877-97792c680e74",
+      "toolsCalled": [
+        "datasetDiscovery",
+        "documentSearch",
+        "documentSearch"
+      ],
+      "citedDocuments": []
+    },
+    {
+      "id": "risk-en",
+      "category": "risk",
+      "language": "en",
+      "question": "What is the main Orion delivery risk?",
+      "expectedFacts": [
+        "supplier delay"
+      ],
+      "expectedSourceDocuments": [
+        "risks.pdf"
+      ],
+      "history": [],
+      "humanReviewRequired": false,
+      "actualAnswer": null,
+      "retrievedDocuments": null,
+      "citationValidity": null,
+      "latencyMs": null,
+      "llmCalls": null,
+      "pass": false,
+      "status": "failed",
+      "reason": "The operation was aborted due to timeout"
+    },
+    {
+      "id": "risk-ar",
+      "category": "risk",
+      "language": "ar",
+      "question": "ما خطر التسليم الرئيسي لمشروع Orion؟",
+      "expectedFacts": [
+        "supplier delay"
+      ],
+      "expectedSourceDocuments": [
+        "risks.pdf"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
+      "retrievedDocuments": null,
+      "citationValidity": false,
+      "latencyMs": 52480,
+      "llmCalls": 3,
+      "pass": false,
+      "status": "failed",
+      "reason": null,
+      "conversationId": "c63762d0-f0d0-404c-924d-4bb88b2c1122",
+      "toolsCalled": [
+        "documentSearch",
+        "documentSearch",
+        "documentSearch",
+        "documentSearch"
+      ],
+      "citedDocuments": []
+    }
+  ]
+}

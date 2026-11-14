@@ -124,6 +124,7 @@ function safeAttributes(attributes: unknown) {
 }
 
 export function registerWorkflowTracing(agent: any, planner: any, workflow: any) {
+  if (process.env.MASTRA_OBSERVABILITY === 'false') return;
   const { mastra } = ensureObservability();
   mastra.addAgent(agent, 'sitepilot-request-agent');
   mastra.addAgent(planner, 'sitepilot-request-planner');

@@ -1,0 +1,42 @@
+{
+  "largeCsv": {
+    "rows": 3000,
+    "bytes": 350722,
+    "smartChunks": 545,
+    "observedCompletedChunksAt90Seconds": 320,
+    "observedPhase": "embedding",
+    "measuredChunksPerSecond": 3.62,
+    "remainingEtaMs": 62230,
+    "initialTestResult": "failed: 90-second test timeout while processing continued",
+    "followupResult": "not completed: connection-pool failures / interrupted test-only PGlite validation",
+    "nativePostgreSQL16Result": "not run"
+  },
+  "memory": {
+    "limitGiB": 8,
+    "observedOomKills": true,
+    "contributingConditions": [
+      "8B model loading/residency",
+      "concurrent broad unit tests during one exploratory run"
+    ],
+    "mitigation": "sequential test phases, one loaded model, one parallel inference request"
+  },
+  "databaseAdapter": {
+    "name": "PGlite WASM PostgreSQL with TCP multiplexer",
+    "observedFailure": "Timed out fetching a new connection from the connection pool (10 seconds; connection limit 1)",
+    "productionAttribution": "not established on native PostgreSQL"
+  },
+  "resumedAttempt": {
+    "fullCorpusCompleted": false,
+    "full33CaseEvaluationStarted": false,
+    "testDatabase": "PGlite 0.5.15 pgvector socket",
+    "setupOutcome": "Job polling TimeoutError; native PostgreSQL16 unavailable",
+    "realEmbeddingRequestsObserved": "nomic-embed-text /api/embed returned200",
+    "orphanedVersion": {
+      "storedStatus": "processing",
+      "redisState": "missing",
+      "repair": "Re-added original job only in disposable environment after all prior workers terminated"
+    },
+    "processingOrphanRecoveryImplemented": false,
+    "missingQueuedDuplicateRecovery": "bounded backend fix with unit regression; not a claim of completed restart E2E"
+  }
+}

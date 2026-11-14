@@ -10,7 +10,10 @@
     "start": "tsx src/main.ts",
     "worker": "tsx src/document-worker.ts",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "test": "node --import tsx --test test/*.test.ts",
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:integration": "node scripts/run-tests.mjs integration",
     "test:e2e:stream": "node --import tsx --test test/agent-stream.e2e.test.ts",
     "test:e2e:ask": "node --import tsx --test test/agent-ask.e2e.test.ts",
     "test:e2e:documents": "node --import tsx --test test/document-processing.e2e.test.ts",
@@ -23,10 +26,19 @@
     "prisma:generate:safe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prisma-generate-safe.ps1",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
     "typegraph:deploy": "tsx src/scripts/deploy-typegraph.ts",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "eval:quality": "node --import tsx scripts/evaluate-agent.ts",
+    "eval:workflow": "node --import tsx scripts/compare-workflow.ts",
+    "eval:seed": "node --import tsx scripts/seed-quality-corpus.ts",
+    "typecheck:audit": "tsc --project tsconfig.audit.json",
+    "eval:live-audit": "node --import tsx scripts/live-audit.ts",
+    "eval:ollama-fixtures": "node --import tsx scripts/evaluate-ollama-fixtures.ts"
   },
   "dependencies": {
+    "@ai-sdk/google": "^2.0.111",
+    "@ai-sdk/openai": "^2.0.143",
     "@mastra/core": "1.82.0",
     "@mastra/observability": "1.17.6",
     "@mastra/pg": "1.35.0",
@@ -51,14 +63,18 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.15",
+    "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.0",
     "@types/multer": "^2.0.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
+    "eslint": "^10.14.0",
     "jszip": "^3.10.2",
     "prisma": "^6.19.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.72.2"
   },
   "engines": {
     "node": ">=22.18.0"

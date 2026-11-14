@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { StructuredSelection } from '../agent/structured-selection.js';
 import { config } from '../config.js';
 
 type CellFilter = { columnName: string; operator: 'EQ' | 'CONTAINS' | 'GT' | 'GTE' | 'LT' | 'LTE'; value: string };
-type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[] };
+type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[]; groupLimit?: number; selection?: StructuredSelection };
 export type StructuredSource = { documentId: string; filename: string; sourceRef: string; chunkIndex: number; documentVersionId?: string; chunkId?: string; contentHash?: string };
 type QueryRow = Record<string, unknown>;
 
@@ -119,6 +120,19 @@ export class StructuredDataService {
     }));
   }
 
+  private selectionClause(selection?: StructuredSelection) {
+    if (!selection) return Prisma.empty;
+    return Prisma.sql`AND c.version_id = ${selection.versionId}::uuid
+      AND c.document_id = ${selection.documentId}::uuid AND c.sheet_name = ${selection.sheetName}
+      AND EXISTS (
+        SELECT 1 FROM app_document_cells cohort
+        WHERE cohort.tenant_id = c.tenant_id AND cohort.document_id = c.document_id
+          AND cohort.version_id = c.version_id AND cohort.sheet_name = c.sheet_name AND cohort.row_number = c.row_number
+          AND cohort.column_name = ${selection.columnName}
+          AND LOWER(BTRIM(cohort.value)) IN (${Prisma.join(selection.values.map(value => Prisma.sql`LOWER(BTRIM(${value}))`))})
+      )`;
+  }
+
   async countRecords(tenantId = config.tenantId, filter: DatasetFilter = {}) {
     const startedAt = performance.now();
     const rowFilters = await this.rowFilterClauses(tenantId, filter.filters, filter.documentId, filter.sheetName);
@@ -132,7 +146,7 @@ export class StructuredDataService {
         FROM app_document_cells c
         JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
         WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
-          ${documentClause} ${sheetClause} ${joinClauses(rowFilters)}
+          ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} ${this.selectionClause(filter.selection)}
           AND c.row_number > (
             SELECT MIN(h.row_number) FROM app_document_cells h
             WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name
@@ -214,7 +228,10 @@ export class StructuredDataService {
     const numberPattern = '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$';
 
     if (operation === 'GROUP_BY' || operation === 'DISTINCT') {
+      const limit = filter.groupLimit ?? (operation === 'DISTINCT' ? 100 : 20);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('Invalid group limit');
       const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
+        WITH groups AS (
         SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName",
           LOWER(BTRIM(c.value)) AS normalized, MIN(BTRIM(c.value)) AS label,
           COUNT(DISTINCT c.row_number)::int AS count,
@@ -222,10 +239,16 @@ export class StructuredDataService {
         FROM app_document_cells c
         JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
         WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
-          ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn} AND BTRIM(c.value) <> ''
+          ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} ${this.selectionClause(filter.selection)} AND c.column_name = ${safeColumn} AND BTRIM(c.value) <> ''
           AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
         GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name, LOWER(BTRIM(c.value))
-        ORDER BY count DESC, normalized ASC, d.filename ASC LIMIT 1000
+        ), ranked AS (
+          SELECT normalized, SUM(count) AS total
+          FROM groups GROUP BY normalized
+          ORDER BY total DESC, normalized ASC LIMIT ${limit}
+        )
+        SELECT groups.* FROM groups JOIN ranked USING (normalized)
+        ORDER BY ranked.total DESC, normalized ASC, filename ASC, "sheetName" ASC, "documentId" ASC
       `);
       const groups = new Map<string, { value: string; count: number; sources: StructuredSource[] }>();
       const allSources: StructuredSource[] = [];
@@ -237,11 +260,16 @@ export class StructuredDataService {
         const ref = source(String(row.documentId), String(row.filename), String(row.sheetName), rowNumbers, allSources.length, String(row.versionId));
         group.sources.push(ref); allSources.push(ref); groups.set(key, group);
       }
-      const values = [...groups.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+      const values = [...groups.values()];
+      const firstRow = rows[0];
+      const selection = operation === 'GROUP_BY' && filter.groupLimit !== undefined && firstRow
+        && rows.every(row => row.documentId === firstRow.documentId && row.sheetName === firstRow.sheetName && row.versionId === firstRow.versionId)
+        ? { documentId: firstRow.documentId, versionId: firstRow.versionId, sheetName: firstRow.sheetName, columnName: safeColumn, values: values.map(group => group.value), filters: filter.filters ?? [] }
+        : undefined;
       return {
         operation, columnName: safeColumn,
         value: operation === 'DISTINCT' ? values.map(group => group.value) : undefined,
-        groups: values.slice(0, operation === 'DISTINCT' ? 100 : 20), sources: allSources,
+        groups: values, sources: allSources, selection,
         durationMs: Math.round(performance.now() - startedAt),
       };
     }
@@ -256,7 +284,7 @@ export class StructuredDataService {
         COUNT(*) FILTER (WHERE BTRIM(c.value) <> '' AND BTRIM(c.value) !~ ${numberPattern})::int AS "nonnumericCount"
       FROM app_document_cells c JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
       WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
-        ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn}
+        ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} ${this.selectionClause(filter.selection)} AND c.column_name = ${safeColumn}
         AND BTRIM(c.value) <> ''
         AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
     `);
@@ -266,7 +294,7 @@ export class StructuredDataService {
         ARRAY_AGG(DISTINCT c.row_number ORDER BY c.row_number) FILTER (WHERE BTRIM(c.value) ~ ${numberPattern}) AS "rowNumbers"
       FROM app_document_cells c JOIN app_documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
       WHERE c.tenant_id = ${tenantId} AND c.version_id = d.active_version_id AND d.status = 'ready' AND d.file_type IN ('csv','xls','xlsx')
-        ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} AND c.column_name = ${safeColumn}
+        ${documentClause} ${sheetClause} ${joinClauses(rowFilters)} ${this.selectionClause(filter.selection)} AND c.column_name = ${safeColumn}
         AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
       GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name
     `);

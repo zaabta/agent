@@ -126,12 +126,14 @@ model Conversation {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   messages  Message[]
+  context   ConversationContext?
 
   @@index([tenantId, ownerId, deletedAt, updatedAt(sort: Desc)])
   @@map("conversations")
 }
 
 model Message {
+  structuredSelection Json? @map("structured_selection")
   id             String       @id @default(uuid()) @db.Uuid
   conversationId String       @db.Uuid @map("conversation_id")
   role           String
@@ -143,6 +145,40 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+// Small, durable conversation state. Evidence references are hints only; every
+// document search still runs through the tenant/user-scoped TypeGraph tools.
+model ConversationContext {
+  conversationId String   @id @db.Uuid @map("conversation_id")
+  tenantId       String   @map("tenant_id")
+  ownerId        String   @map("owner_id")
+  summary        String?  @db.Text
+  evidenceRefs   Json     @default("[]") @map("evidence_refs")
+  activeSelection Json?   @map("active_selection")
+  entities       Json     @default("[]")
+  decisions      Json     @default("[]")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, ownerId, updatedAt(sort: Desc)])
+  @@map("conversation_contexts")
+}
+
+// Explicit, user-managed facts/preferences only. Memory keys always include
+// both tenant and user identities; records are soft-deleted for correction/audit.
+model UserMemory {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  category  String
+  content   String    @db.VarChar(500)
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId, userId, deletedAt, updatedAt(sort: Desc)])
+  @@map("user_memories")
 }
 
 enum TenantRole {
@@ -166,7 +202,8 @@ model Tenant {
 
 model User {
   id            String       @id @default(uuid()) @db.Uuid
-  email         String       @unique
+  username      String       @unique
+  email         String?      @unique
   passwordHash  String       @map("password_hash")
   displayName   String?      @map("display_name")
   disabledAt    DateTime?    @map("disabled_at")
@@ -223,4 +260,79 @@ model AuditLog {
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([userId, createdAt(sort: Desc)])
   @@map("audit_logs")
+}
+
+model RuntimeSetting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+  @@map("runtime_settings")
+}
+
+model RegisteredModel {
+  id          String   @id @default(uuid()) @db.Uuid
+  provider    String
+  modelId     String   @map("model_id")
+  displayName String?  @map("display_name")
+  compatible Boolean  @default(true)
+  enabled     Boolean  @default(true)
+  source      String   @default("manual")
+  available   Boolean  @default(true)
+  local       Boolean  @default(false)
+  validationStatus String @default("unknown") @map("validation_status")
+  capabilities Json @default("{}")
+  contextLength Int? @map("context_length")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  @@unique([provider, modelId])
+  @@index([provider, available, compatible])
+  @@map("registered_models")
+}
+
+model RuntimeSettingAudit {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String
+  oldValue  String?  @map("old_value") @db.Text
+  newValue  String   @map("new_value") @db.Text
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([key, createdAt(sort: Desc)])
+  @@map("runtime_setting_audit")
+}
+
+model ProviderCredential {
+  provider   String   @id
+  ciphertext String   @db.Text
+  iv         String
+  authTag    String   @map("auth_tag")
+  updatedBy  String?  @map("updated_by")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  @@map("provider_credentials")
+}
+
+model LlmUsage {
+  id                String   @id @default(uuid()) @db.Uuid
+  provider          String
+  configuredModelId String?  @map("configured_model_id")
+  modelId           String   @map("model_id")
+  inputTokens       Int?     @map("input_tokens")
+  outputTokens      Int?     @map("output_tokens")
+  totalTokens       Int?     @map("total_tokens")
+  cachedTokens      Int?     @map("cached_tokens")
+  reasoningTokens   Int?     @map("reasoning_tokens")
+  usageSource       String?  @map("usage_source")
+  accuracy          String   @default("unavailable")
+  tenantId          String   @map("tenant_id")
+  userId            String?  @map("user_id")
+  conversationId    String?  @map("conversation_id") @db.Uuid
+  logicalRequestId  String   @map("logical_request_id")
+  invocationId      String   @unique @map("invocation_id")
+  status            String
+  latencyMs          Int?     @map("latency_ms")
+  errorCategory     String?  @map("error_category")
+  createdAt         DateTime @default(now()) @map("created_at")
+  @@index([tenantId, createdAt])
+  @@index([provider, modelId, createdAt])
+  @@map("llm_usage")
 }

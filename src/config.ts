@@ -5,10 +5,26 @@ export function requireEnv(name: string): string {
   if (!v) throw new Error(`Missing ${name}; see .env.example`);
   return v;
 }
-const modelProvider = process.env.MASTRA_PROVIDER ||
-  (process.env.MASTRA_MODEL?.startsWith('openrouter/') ? 'openrouter' : 'ollama');
-const model = process.env.MASTRA_MODEL ||
-  (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+// Mastra's Google model router reads GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY.
+// Keep the project's documented Gemini-specific secret name as the source of truth.
+if (!process.env.GOOGLE_API_KEY && process.env.GEMINI_API_KEY) {
+  process.env.GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
+}
+const configuredModel = process.env.MASTRA_MODEL?.trim();
+const configuredModelName = process.env.MASTRA_MODEL_NAME?.trim();
+const inferredProvider = configuredModel?.startsWith('openrouter/') ? 'openrouter'
+  : configuredModel?.startsWith('google/') || configuredModel === 'gemini'
+    || configuredModel?.startsWith('gemini-') || configuredModelName?.startsWith('gemini-') ? 'google'
+    : 'ollama';
+const modelProvider = (process.env.MASTRA_PROVIDER?.trim() || inferredProvider).toLowerCase();
+const model = modelProvider === 'google'
+  ? configuredModel?.startsWith('google/') ? configuredModel
+    : `google/${configuredModelName || (configuredModel && configuredModel !== 'gemini' ? configuredModel : 'gemini-3.6-flash')}`
+  : configuredModel || (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+const requestedGeminiThinkingLevel = process.env.GEMINI_THINKING_LEVEL?.trim().toLowerCase();
+const geminiThinkingLevel = ['minimal', 'low', 'medium', 'high'].includes(requestedGeminiThinkingLevel || '')
+  ? requestedGeminiThinkingLevel as 'minimal' | 'low' | 'medium' | 'high'
+  : 'low';
 const modelFallback = process.env.MASTRA_FALLBACK_MODEL?.trim() || undefined;
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
 const explicitCompanyWorkspaceId = process.env.COMPANY_WORKSPACE_ID?.trim();
@@ -18,10 +34,12 @@ const companyWorkspaceId = explicitCompanyWorkspaceId
 
 export const config = {
   port: Number(process.env.PORT || 3220),
+  apiHost: process.env.API_HOST || '127.0.0.1',
   databaseUrl: process.env.DATABASE_URL || 'postgres://sitepilot:sitepilot@localhost:5444/sitepilot',
   // Company knowledge uses one existing canonical workspace. DEV_TENANT_ID
   // remains a backwards-compatible local fallback only.
   companyWorkspaceId,
+  installationOwnerUserId: process.env.INSTALLATION_OWNER_USER_ID?.trim(),
   tenantId: companyWorkspaceId || process.env.DEV_TENANT_ID || 'demo-workspace',
   ollamaUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
   embedModel: process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text',
@@ -33,6 +51,7 @@ export const config = {
     : 0.32,
   modelProvider,
   model,
+  geminiThinkingLevel,
   modelFallback,
   ollamaThink: process.env.OLLAMA_THINK === 'true',
   maxBytes: Number(process.env.MAX_FILE_BYTES || 10485760),
@@ -47,7 +66,7 @@ export const config = {
   agentTimeoutMs: Number(process.env.AGENT_REQUEST_TIMEOUT_MS || 180000),
   agentTrace: process.env.AGENT_TRACE === 'true',
   agentOrchestration: process.env.SITEPILOT_AGENT_ORCHESTRATION === 'workflow' ? 'workflow' : 'legacy',
-  conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'dev-shared-api-key',
+  conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'diagnostic-user',
   conversationHistoryMessages: Math.max(0, Number(process.env.AGENT_HISTORY_MESSAGES || 10)),
   conversationHistoryChars: Math.max(256, Number(process.env.AGENT_HISTORY_MESSAGE_CHARS || 3000)),
 };

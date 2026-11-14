@@ -7,25 +7,25 @@ import { StructuredDataService } from '../src/documents/structured-data.service.
 
 const baseUrl = `http://127.0.0.1:${config.port}`;
 const password = `S!tePilot-${randomUUID()}-secure`;
-type Account = { user: { id: string }; accessToken: string; cookie: string; tenant: { id: string; role: string } };
+type Account = { user: { id: string }; accessToken: string; cookie: string };
 
 async function json(response: Response) { return response.json() as Promise<Record<string, any>>; }
 async function bearer(accessToken: string) { return { authorization: `Bearer ${accessToken}` }; }
-async function register(email: string) {
+async function register(username: string) {
   const response = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password, displayName: 'Shared Workspace E2E' }),
+    body: JSON.stringify({ username, password, displayName: 'Shared Workspace E2E' }),
   });
   assert.equal(response.status, 201);
   const payload = await json(response);
-  assert.equal(payload.status, 'pending_workspace_membership');
-  assert.equal(response.headers.get('set-cookie'), null, 'pending users receive no authenticated session');
+  assert.equal(payload.status, 'registered');
+  assert.equal(response.headers.get('set-cookie'), null, 'registration does not issue a refresh cookie');
   return payload.user as { id: string };
 }
-async function login(email: string): Promise<Account> {
+async function login(username: string): Promise<Account> {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ username, password }),
   });
   assert.equal(response.status, 200);
   const payload = await json(response);
@@ -96,15 +96,15 @@ test('authorized company users share documents and datasets while conversations 
   timeout: 300000,
 }, async () => {
   const workspaceId = config.companyWorkspaceId;
-  assert.ok(workspaceId, 'COMPANY_WORKSPACE_ID must point at the existing company workspace');
+  assert.ok(workspaceId, 'COMPANY_WORKSPACE_ID must point at the existing installation workspace');
   const prisma = new PrismaClient();
   const suffix = randomUUID();
-  const emailX = `company-user-x-${suffix}@example.test`;
-  const emailY = `company-user-y-${suffix}@example.test`;
-  const emailUnauthorized = `company-pending-${suffix}@example.test`;
+  const usernameX = `company-user-x-${suffix}`;
+  const usernameY = `company-user-y-${suffix}`;
+  const usernameZ = `company-user-z-${suffix}`;
   let userX: { id: string } | undefined;
   let userY: { id: string } | undefined;
-  let userUnauthorized: { id: string } | undefined;
+  let userZ: { id: string } | undefined;
   let docX: { id: string; jobId: string } | undefined;
   let csvX: { id: string; jobId: string } | undefined;
   let conversationX: string | undefined;
@@ -113,25 +113,16 @@ test('authorized company users share documents and datasets while conversations 
   let accountY: Account | undefined;
   try {
     const beforeTenants = await prisma.tenant.count();
-    userX = await register(emailX);
-    userY = await register(emailY);
-    userUnauthorized = await register(emailUnauthorized);
+    userX = await register(usernameX);
+    userY = await register(usernameY);
+    userZ = await register(usernameZ);
     assert.equal(await prisma.tenant.count(), beforeTenants, 'registration must not provision per-user workspaces');
-
-    // The fixture bootstrap grants only User X admin membership in the already
-    // configured workspace. User Y is added through the authenticated admin API.
-    await prisma.membership.create({ data: { tenantId: workspaceId, userId: userX.id, role: 'TENANT_ADMIN' } });
-    accountX = await login(emailX);
-    assert.equal(accountX.tenant.id, workspaceId);
-    assert.equal(accountX.tenant.role, 'TENANT_ADMIN');
-
-    const addY = await fetch(`${baseUrl}/api/auth/members`, {
-      method: 'POST', headers: { ...(await bearer(accountX.accessToken)), 'content-type': 'application/json' },
-      body: JSON.stringify({ email: emailY, role: 'MEMBER' }),
-    });
-    assert.equal(addY.status, 201);
-    accountY = await login(emailY);
-    assert.equal(accountY.tenant.id, accountX.tenant.id, 'both users must authenticate into the same canonical workspace');
+    accountX = await login(usernameX);
+    accountY = await login(usernameY);
+    const accountZ = await login(usernameZ);
+    assert.equal('tenant' in accountX, false, 'frontend auth responses omit workspace data');
+    const hiddenGlobalSettings = await fetch(`${baseUrl}/api/llm/settings`, { headers: await bearer(accountZ.accessToken) });
+    assert.ok([403, 503].includes(hiddenGlobalSettings.status), 'ordinary users cannot access global provider settings');
 
     const existingLegacy = await prisma.appDocumentVersion.findFirst({
       where: { tenantId: workspaceId, status: 'ready', chunkingStrategy: 'legacy' },
@@ -144,11 +135,6 @@ test('authorized company users share documents and datasets while conversations 
       assert.ok(legacyHits.some(hit => hit.citation.documentId === existingLegacy.document.id && hit.citation.documentVersionId === existingLegacy.id), 'a pre-existing active legacy index remains searchable by another authorized user');
     }
 
-    const unapprovedLogin = await fetch(`${baseUrl}/api/auth/login`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: emailUnauthorized, password }),
-    });
-    assert.equal(unapprovedLogin.status, 403, 'valid credentials without company membership cannot access documents');
     const anonymous = await search(undefined, 'unauthorized access check');
     assert.equal(anonymous.status, 401, 'anonymous users cannot access company documents');
 
@@ -171,7 +157,7 @@ test('authorized company users share documents and datasets while conversations 
     assert.ok(hitsY.find(hit => hit.citation.documentId === docX!.id)?.citation.documentVersionId, 'shared result must carry a version citation');
     assert.deepEqual(hitsY.map(hit => hit.citation.documentId), hitsX.map(hit => hit.citation.documentId), 'authorized users receive the same ranked workspace result IDs');
 
-    const structured = await new StructuredDataService(prisma).lookup(rowKey, accountY.tenant.id);
+    const structured = await new StructuredDataService(prisma).lookup(rowKey, workspaceId);
     assert.ok(structured.hits.some(hit => hit.citation.documentId === csvX!.id && hit.citation.documentVersionId), 'User Y can query User X structured dataset with active-version citation in the shared workspace');
 
     const version = await uploadVersion(accountX.accessToken, docX.id, `shared-company-${suffix}.txt`, `${marker} company report now says ${newMarker} financial total.`);
@@ -198,13 +184,13 @@ test('authorized company users share documents and datasets while conversations 
 
     const wrongPassword = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: emailX, password: 'incorrect-password' }),
+      body: JSON.stringify({ username: usernameX, password: 'incorrect-password' }),
     });
     assert.equal(wrongPassword.status, 401);
   } finally {
     if (accountX && docX) await fetch(`${baseUrl}/api/documents/${docX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
     if (accountX && csvX) await fetch(`${baseUrl}/api/documents/${csvX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
-    const userIds = [userX?.id, userY?.id, userUnauthorized?.id].filter((id): id is string => Boolean(id));
+    const userIds = [userX?.id, userY?.id, userZ?.id].filter((id): id is string => Boolean(id));
     if (userIds.length) {
       await prisma.conversation.deleteMany({ where: { ownerId: { in: userIds } } }).catch(() => undefined);
       await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);

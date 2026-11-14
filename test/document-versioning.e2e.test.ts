@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import { config } from '../src/config.js';
 
 const baseUrl = process.env.DOCUMENT_E2E_URL || `http://127.0.0.1:${config.port}`;
-const apiKey = process.env.DEV_API_KEY;
-const enabled = process.env.RUN_DOCUMENT_VERSION_E2E === 'true' && !!apiKey;
-const headers = { 'x-api-key': apiKey! };
+const bearer = process.env.AGENT_E2E_BEARER;
+const enabled = process.env.RUN_DOCUMENT_VERSION_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true' && !!bearer;
+const headers: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : {};
 
 async function sendText(path: string, name: string, content: string, extra?: Record<string, string>) {
   const form = new FormData();
@@ -40,7 +40,7 @@ async function rawSearch(documentId: string, marker: string) {
 }
 
 test('versions publish atomically, preserve failed replacements, deduplicate, restore, and reindex', {
-  skip: !enabled ? 'Requires RUN_DOCUMENT_VERSION_E2E=true, DEV_API_KEY, API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
+  skip: !enabled ? 'Requires RUN_DOCUMENT_VERSION_E2E=true, CONFIRM_ISOLATED_E2E=true, AGENT_E2E_BEARER, API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
   timeout: 600000,
 }, async () => {
   const marker = randomUUID();
@@ -63,14 +63,15 @@ test('versions publish atomically, preserve failed replacements, deduplicate, re
     assert.ok(versionTwoHits.every(hit => hit.citation.documentVersionId === second.version.id && hit.content.includes('2600 x 4400 mm') && !hit.content.includes('2400 x 4400 mm')),
       'raw default search must never expose Version 1 content or citations after Version 2 publishes');
 
-    const concurrent = await Promise.all([
-      sendText(`/api/documents/${documentId}/versions`, `concurrent-a-${marker}.txt`, `Concurrent version A ${marker}. F-4 dimensions: 2700 x 4400 mm.`),
-      sendText(`/api/documents/${documentId}/versions`, `concurrent-b-${marker}.txt`, `Concurrent version B ${marker}. F-4 dimensions: 2800 x 4400 mm.`),
-    ]);
+    const variants = [{ name: 'a', dimension: '2700 x 4400 mm' }, { name: 'b', dimension: '2800 x 4400 mm' }];
+    const concurrent = await Promise.all(variants.map(async variant => ({
+      ...await sendText(`/api/documents/${documentId}/versions`, `concurrent-${variant.name}-${marker}.txt`, `Concurrent version ${variant.name} ${marker}. F-4 dimensions: ${variant.dimension}.`),
+      expectedDimension: variant.dimension,
+    })));
     assert.deepEqual(concurrent.map(item => item.version.versionNumber).sort(), [3, 4]);
     for (const item of concurrent) assert.equal((await jobUntil(item.version.jobId)).status, 'ready');
     const latestConcurrent = concurrent.sort((a, b) => b.version.versionNumber - a.version.versionNumber)[0]!;
-    const latestDimension = latestConcurrent.version.versionNumber === 3 ? '2700 x 4400 mm' : '2800 x 4400 mm';
+    const latestDimension = latestConcurrent.expectedDimension;
     const concurrentHits = await rawSearch(documentId, marker);
     assert.ok(concurrentHits.some(hit => hit.citation.documentVersionId === latestConcurrent.version.id && hit.content.includes(latestDimension)));
     assert.ok(concurrentHits.every(hit => hit.citation.documentVersionId === latestConcurrent.version.id && hit.content.includes(latestDimension)),

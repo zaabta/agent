@@ -1,0 +1,84 @@
+{
+  "baselineCommit": "3cc78e47cce4a0fc741c506f1543a224471ac0c0",
+  "baseline": {
+    "typecheck": "passed",
+    "tests": 71,
+    "passed": 56,
+    "failed": 0,
+    "skipped": 15,
+    "command": "npm run typecheck && npm test"
+  },
+  "after": {
+    "typecheck": "passed",
+    "tests": 77,
+    "passed": 62,
+    "failed": 0,
+    "skipped": 15,
+    "command": "pnpm@10.10.0 install --frozen-lockfile; prisma:generate; typecheck; test",
+    "evaluationScriptsTypecheck": "passed",
+    "prismaValidate": "passed"
+  },
+  "limitations": [
+    "Broad HTTP regression uses in-memory persistence and mocked model methods",
+    "Real CPU Ollama and Redis used separately; disposable PGlite is not native PostgreSQL16 concurrency validation",
+    "Original-main complete live quality baseline unavailable; prior final run lost with ephemeral environment",
+    "GitHub branch creation rejected403; PR not opened"
+  ],
+  "resumed": {
+    "tests": 95,
+    "passed": 80,
+    "failed": 0,
+    "skipped": 15,
+    "typecheck": "passed",
+    "evaluationScriptsTypecheck": "passed including supplemental real-Ollama fixture workflow",
+    "prismaValidate": "passed",
+    "command": "npm run prisma:generate && npm run typecheck && npm run typecheck:audit && npm test; npm exec prisma validate",
+    "dependencyNote": "Frozen pnpm 11 install downloaded locked packages but returned ERR_PNPM_IGNORED_BUILDS; Prisma generation ran explicitly. Earlier frozen pnpm10.10 install passed."
+  },
+  "finalNativeModelRuns": {
+    "mode": "real Ollama and Mastra, fixed evidence fixture; not TypeGraph/HTTP/DB E2E",
+    "initialFiveCases": {
+      "passed": 4,
+      "failed": 1,
+      "complete": true
+    },
+    "promptOnlyRecheck": {
+      "passed": 2,
+      "failed": 1,
+      "complete": true
+    },
+    "firstNarrowGuardRecheck": {
+      "passed": 0,
+      "failed": 1,
+      "complete": true
+    },
+    "finalRefusalRecheck": {
+      "passed": 1,
+      "failed": 0,
+      "complete": true
+    },
+    "allFiveRerunAfterFinalGuard": false,
+    "full33CaseRagBenchmarkCompleted": false
+  },
+  "paginationFollowup": {
+    "tests": 100,
+    "passed": 85,
+    "failed": 0,
+    "skipped": 15,
+    "typecheck": "passed",
+    "evaluationScriptsTypecheck": "passed",
+    "targetedHttpTests": {
+      "tests": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "commands": [
+      "npm run typecheck",
+      "npm run typecheck:audit",
+      "node --import tsx --test test/document-list-http.test.ts test/agent-reliability-http.test.ts",
+      "npm test",
+      "git diff --check"
+    ],
+    "scope": "Real Nest HTTP controller/guard/service, mocked session identity and in-memory Prisma. No live PostgreSQL collation/isolation proof. No inference rerun needed for list APIs."
+  }
+}

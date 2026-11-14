@@ -5,9 +5,13 @@ import { Pool } from 'pg';
 import { config } from '../config.js';
 import { EmbeddingsService } from './embeddings.service.js';
 import { typegraphConfig } from './typegraph.config.js';
+import { ollamaTypegraphLlm } from './ollama-llm.provider.js';
+import { localOllamaReranker, setLocalRerankerUsagePersistence } from './local-reranker.js';
 import type { SmartChunk } from '../documents/smart-chunker.js';
 import { repairFilenameEncoding } from '../documents/display-name.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { randomUUID } from 'node:crypto';
+import { runWithUsageContext } from '../llm-admin/usage-recorder.js';
 
 export interface DocumentSearchHit {
   content: string;
@@ -37,7 +41,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: config.databaseUrl });
   private readonly clients = new Map<string, Promise<typegraphInstance>>();
 
-  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService, @Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(@Inject(EmbeddingsService) private readonly embeddings: EmbeddingsService, @Inject(PrismaService) private readonly prisma: PrismaService) { ollamaTypegraphLlm.setUsagePersistence(prisma); setLocalRerankerUsagePersistence(prisma); }
 
   async onModuleInit(): Promise<void> {
     try {
@@ -62,7 +66,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       content: chunk.content,
       metadata: { ...document.metadata, ...chunk, chunkId: chunk.id, chunkIndex: chunk.index, chunkCount: chunks.length },
     })) : document;
-    const measured = await this.embeddings.measure(() => client.document.ingest(inputs, {
+    const measured = await runWithUsageContext({tenantId,userId,logicalRequestId:document.id,runtime:{provider:'ollama',model:config.model,ollamaThink:config.ollamaThink}},()=>this.embeddings.measure(() => client.document.ingest(inputs, {
         bucketId: 'documents',
         context: this.actor(userId),
         // SDK 0.6 resolves chunk identity from deduplicateBy. Its default is
@@ -79,7 +83,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         } } : {}),
       }), abortSignal,
       progress => onProgress?.({ phase: 'embed', done: progress.done, total: progress.total }),
-    );
+      ));
     const result = measured.result;
     const indexingDurationMs = performance.now() - startedAt;
     return {
@@ -109,7 +113,6 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteDocument(id: string, tenantId = config.tenantId, userId?: string) {
-    const client = await this.clientFor(tenantId);
     return this.deleteDocumentScope(id, undefined, tenantId, userId);
   }
 
@@ -157,11 +160,12 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     const client = await this.clientFor(tenantId);
     const candidateLimit = Math.min(Math.max(limit * 8, 16), 64);
     const activeScopes = await this.activeVersionScopes(tenantId);
-    const candidateDocumentIds = await this.activeTypegraphDocumentIds(client, userId, activeScopes, query);
+    const indexedMetadata = new Map<string, Record<string, unknown>>();
+    const candidateDocumentIds = await this.activeTypegraphDocumentIds(client, userId, activeScopes, query, indexedMetadata);
     if (!candidateDocumentIds.length) {
       return { query, hits: [], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: Math.round(performance.now() - startedAt) } };
     }
-    const measured = await this.embeddings.measure(() => client.search(query, {
+    const measured = await runWithUsageContext({tenantId,userId,logicalRequestId:randomUUID(),runtime:{provider:'ollama',model:config.model,ollamaThink:config.ollamaThink}},()=>this.embeddings.measure(() => client.search(query, {
         buckets: ['documents'],
         resources: config.typegraphGraphExtraction ? ['documents', 'entities', 'facts'] : ['documents'],
         weights: { semantic: 1, bm25: 1, graph: config.typegraphGraphExtraction ? 0.5 : false, recency: false },
@@ -181,7 +185,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         abortSignal,
       }),
       abortSignal,
-    );
+    ));
     const response = measured.result;
 
     const searchDurationMs = performance.now() - startedAt;
@@ -190,7 +194,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       query,
       // Keep retrieval inside TypeGraph, then discard weak native-ranked hits so
       // unrelated high-level matches cannot be offered as factual evidence.
-      hits: (await this.activeVersionHits(response.results.chunks, tenantId, new Set(candidateDocumentIds)))
+      hits: (await this.activeVersionHits(response.results.chunks, tenantId, new Set(candidateDocumentIds), indexedMetadata))
         .map(hit => this.toSearchHit(hit))
         .filter(hit => hit.score >= minScore)
         .slice(0, Math.min(Math.max(limit, 1), 8)),
@@ -257,7 +261,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
-  private async activeTypegraphDocumentIds(client: typegraphInstance, userId: string | undefined, active: Awaited<ReturnType<TypegraphService['activeVersionScopes']>>, query?: string) {
+  private async activeTypegraphDocumentIds(client: typegraphInstance, userId: string | undefined, active: Awaited<ReturnType<TypegraphService['activeVersionScopes']>>, query?: string, indexedMetadata?: Map<string, Record<string, unknown>>) {
     const ids: string[] = [];
     const filenameMatches: string[] = [];
     const normalizedQuery = query?.normalize('NFC').toLocaleLowerCase();
@@ -269,18 +273,16 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         if (!scope || !scope.versionId) continue;
         if (typeof document.metadata.tenantId === 'string' && document.metadata.tenantId !== scope.tenantId) continue;
         const indexedVersionId = document.metadata.documentVersionId;
-        let isActive = false;
-        if (typeof indexedVersionId === 'string') {
-          isActive = indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration;
-        } else {
-          const originalFilename = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
-          isActive = scope.legacy
+        const originalFilename = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
+        const isActive = typeof indexedVersionId === 'string'
+          ? indexedVersionId === scope.versionId && Number(document.metadata.indexGeneration ?? 1) === scope.activeGeneration
+          : scope.legacy
             && document.id === logicalId
             && document.metadata.tenantId === scope.tenantId
             && document.metadata.checksum === scope.checksum
             && originalFilename === scope.filename;
-        }
         if (isActive) {
+          indexedMetadata?.set(document.id, document.metadata);
           ids.push(document.id);
           const names = [document.name, document.metadata.originalFilename].filter((name): name is string => typeof name === 'string');
           if (normalizedQuery && names.some(name => {
@@ -308,7 +310,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     return filenameMatches.length ? [...new Set(filenameMatches)] : ids;
   }
 
-  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string, authorizedIndexIds: Set<string>) {
+  private async activeVersionHits(chunks: QueryChunkResult[], tenantId: string, authorizedIndexIds: Set<string>, indexedMetadata = new Map<string, Record<string, unknown>>()) {
     const active = await this.activeVersionScopes(tenantId);
     return chunks.flatMap(hit => {
       // Keep a second check against the IDs authorized before TypeGraph
@@ -322,11 +324,11 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
       if (!state || !state.versionId) return [];
       if (versionId) {
         return state.versionId === versionId && generation === state.activeGeneration
-          ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: versionId, indexGeneration: generation } }]
+          ? [{ ...hit, metadata: { ...hit.metadata, ...indexedMetadata.get(hit.document.id), documentId: id, documentVersionId: versionId, indexGeneration: generation } }]
           : [];
       }
       return state.legacy && hit.document.id === id
-        ? [{ ...hit, metadata: { ...hit.metadata, documentId: id, documentVersionId: state.versionId, indexGeneration: state.activeGeneration } }]
+        ? [{ ...hit, metadata: { ...hit.metadata, ...indexedMetadata.get(hit.document.id), documentId: id, documentVersionId: state.versionId, indexGeneration: state.activeGeneration } }]
         : [];
     });
   }
@@ -351,7 +353,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
 
   private toSearchHit(hit: QueryChunkResult): DocumentSearchHit {
     const filename = repairFilenameEncoding(hit.document.name);
-    const chunkIndex = hit.chunk.index;
+    const chunkIndex = Number.isInteger(hit.metadata.chunkIndex) && Number(hit.metadata.chunkIndex) >= 0 ? Number(hit.metadata.chunkIndex) : hit.chunk.index;
     const location = this.sourceLocation(hit.content, hit.metadata);
     const sourceRef = `${filename} (${location || `chunk ${chunkIndex + 1}`})`;
     return {

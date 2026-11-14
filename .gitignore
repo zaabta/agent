@@ -5,3 +5,11 @@ dist/
 coverage/
 .sitepilot-data/
 .DS_Store
+
+.env.audit
+.agents/
+.claude/
+/AGENTS.md
+/CLAUDE.md
+.gitnexus
+backups

@@ -1,0 +1,95 @@
+{
+  "mode": "live",
+  "label": "live-qwen3-8b",
+  "complete": false,
+  "totalCases": 33,
+  "results": [
+    {
+      "id": "factual-en",
+      "category": "factual",
+      "language": "en",
+      "question": "What approval is required for Orion?",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": false,
+      "actualAnswer": "The approval required for Orion is a safety review.\n\nSources: [[requirements.md (section Orion requirements)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 42570,
+      "llmCalls": 3,
+      "pass": true,
+      "status": "passed",
+      "reason": null,
+      "conversationId": "96365424-d385-4015-8ed4-f5cb7d189adf",
+      "toolsCalled": [
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "requirements.md"
+      ]
+    },
+    {
+      "id": "factual-ar",
+      "category": "factual",
+      "language": "ar",
+      "question": "ما الموافقة المطلوبة لمشروع Orion؟",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "الموافقة المطلوبة لمشروع Orion هي 4.\n\nSources: [[violations.xlsx (sheet Warnings, row 2, cells A2:C2)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 36235,
+      "llmCalls": 3,
+      "pass": false,
+      "status": "failed",
+      "reason": null,
+      "conversationId": "0aa934af-396e-4e95-8a31-fb02f8215fed",
+      "toolsCalled": [
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "violations.xlsx"
+      ]
+    },
+    {
+      "id": "factual-tr",
+      "category": "factual",
+      "language": "tr",
+      "question": "Orion için hangi onay gerekiyor?",
+      "expectedFacts": [
+        "safety review"
+      ],
+      "expectedSourceDocuments": [
+        "requirements.md"
+      ],
+      "history": [],
+      "humanReviewRequired": true,
+      "actualAnswer": "Orion için safety review onayı gerekiyor.\n\nSources: [[requirements.md (section Orion requirements)]]",
+      "retrievedDocuments": null,
+      "citationValidity": true,
+      "latencyMs": 35527,
+      "llmCalls": 3,
+      "pass": true,
+      "status": "passed",
+      "reason": null,
+      "conversationId": "5957209f-b5fa-49a6-b3b8-226d2895ba73",
+      "toolsCalled": [
+        "documentSearch"
+      ],
+      "citedDocuments": [
+        "requirements.md"
+      ]
+    }
+  ]
+}

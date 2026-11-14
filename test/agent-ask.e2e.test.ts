@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 
 const baseUrl = process.env.AGENT_E2E_URL;
-const apiKey = process.env.DEV_API_KEY;
+const bearer = process.env.AGENT_E2E_BEARER;
 
 test('synchronous ask remains compatible and stores a complete grounded turn', {
-  skip: !baseUrl || !apiKey ? 'Set AGENT_E2E_URL and DEV_API_KEY for the real local E2E test' : false,
+  skip: !baseUrl || !bearer ? 'Set AGENT_E2E_URL and AGENT_E2E_BEARER for the real local E2E test' : false,
 }, async () => {
   const response = await fetch(`${baseUrl}/api/agent/ask`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': apiKey! },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
     body: JSON.stringify({ message: 'What is the SitePilot Enterprise monthly subscription price?' }),
   });
   assert.equal(response.status, 201);
@@ -30,7 +30,7 @@ test('synchronous ask remains compatible and stores a complete grounded turn', {
 
   const followup = await fetch(`${baseUrl}/api/agent/ask`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': apiKey! },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
     body: JSON.stringify({
       conversationId: result.conversationId,
       message: 'What annual billing discount does the document specify?',
@@ -47,7 +47,7 @@ test('synchronous ask remains compatible and stores a complete grounded turn', {
   assert.ok(followupResult.sources.some(source => source.sourceRef === 'sitepilot-e2e-pricing.md (chunk 1)'));
 
   const budgetResponse = await fetch(`${baseUrl}/api/agent/ask`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': apiKey! },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
     body: JSON.stringify({ message: 'What is the approved project budget?' }),
   });
   assert.equal(budgetResponse.status, 201);
@@ -56,7 +56,7 @@ test('synchronous ask remains compatible and stores a complete grounded turn', {
   assert.doesNotMatch(budgetResult.answer, /\b(?:USD|EUR|TRY|credits?)\b|\b\d[\d,.]*\s?(?:million|billion|k|m)?\b/i);
 
   const historyResponse = await fetch(`${baseUrl}/api/agent/conversations/${result.conversationId}`, {
-    headers: { 'x-api-key': apiKey! },
+    headers: { authorization: `Bearer ${bearer}` },
   });
   const history = await historyResponse.json() as { messages: Array<{ role: string }> };
   assert.deepEqual(history.messages.map(message => message.role), ['user', 'assistant', 'user', 'assistant']);

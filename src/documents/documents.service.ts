@@ -7,10 +7,15 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { TypegraphService } from '../typegraph/typegraph.service.js';
 import { DocumentQueueService } from './document-queue.service.js';
 import { DocumentStorageService } from './document-storage.service.js';
+import { isDrawing, matchesDrawingImage } from './drawing-vision.js';
 import { SUPPORTED_EXTENSIONS } from './parser.js';
+import type { DocumentListQuery } from './document-list-query.js';
 import { safeDisplayName } from './display-name.js';
 
 const MIME_BY_EXTENSION: Record<string, string[]> = {
+  '.png': ['image/png', 'application/octet-stream'],
+  '.jpg': ['image/jpeg', 'application/octet-stream'],
+  '.jpeg': ['image/jpeg', 'application/octet-stream'],
   '.md': ['text/markdown', 'text/plain', 'application/octet-stream'],
   '.txt': ['text/plain', 'application/octet-stream'],
   '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/zip', 'application/octet-stream'],
@@ -25,6 +30,9 @@ function validateSignature(extension: string, data: Buffer) {
   const checks: Record<string, boolean> = {
     '.md': data.length > 0, '.txt': data.length > 0,
     '.docx': isZip, '.xlsx': isZip,
+    '.png': matchesDrawingImage('.png', data),
+    '.jpg': matchesDrawingImage('.jpg', data),
+    '.jpeg': matchesDrawingImage('.jpeg', data),
     '.pdf': data.subarray(0, 5).toString('ascii') === '%PDF-',
     '.xls': data[0] === 0xd0 && data[1] === 0xcf && data[2] === 0x11 && data[3] === 0xe0,
     '.csv': data.length > 0,
@@ -58,16 +66,46 @@ export class DocumentsService implements OnModuleInit {
     const live = new Set([...referenced, ...versionFiles].flatMap(item => item.storageKey ? [item.storageKey] : []));
     await Promise.all(stale.filter(file => !live.has(file.key)).map(file => this.storage.cleanup(file.key)));
   }
-  private safeDocument<T extends { fileSize: bigint | null; filename: string }>(document: T) {
-    return { ...document, filename: safeDisplayName(document.filename), fileSize: document.fileSize == null ? null : Number(document.fileSize) };
+  private safeDocument<T extends { fileSize: bigint | null; filename: string; status?: string; stage?: string | null; activeVersionId?: string | null }>(document: T) {
+    const statusPresentation = document.status === 'ready'
+      ? { label: document.activeVersionId ? 'Indexed' : 'Ready', detail: document.activeVersionId ? 'Available in document search.' : 'Processing completed.', tone: 'success' as const }
+      : document.status === 'queued'
+        ? { label: 'Queued', detail: 'Waiting for a document worker to start.', tone: 'info' as const }
+        : document.status === 'processing'
+          ? { label: 'Processing', detail: ({
+              verification: 'Checking the uploaded file.', parsing: 'Extracting document content.', smart_chunking: 'Preparing content for search.',
+              indexing: 'Adding content to the search index.', embedding: 'Creating search vectors.', publication: 'Making the index available.',
+            } as Record<string, string>)[document.stage ?? ''] ?? 'Preparing the document for search.', tone: 'info' as const }
+          : document.status === 'cancelled'
+            ? { label: 'Cancelled', detail: 'Processing stopped. This file is not available in search.', tone: 'neutral' as const }
+            : document.status === 'failed'
+              ? { label: 'Failed', detail: 'The file could not be indexed and is not available in search.', tone: 'warning' as const }
+              : { label: 'Status unavailable', detail: 'Refresh this file to get its current status.', tone: 'neutral' as const };
+    return {
+      ...document,
+      filename: safeDisplayName(document.filename),
+      fileSize: document.fileSize == null ? null : Number(document.fileSize),
+      statusPresentation,
+      versionLabel: document.activeVersionId ? 'Active version' : null,
+    };
   }
 
-  async list(tenantId = config.tenantId) {
-    const documents = await this.prisma.appDocument.findMany({
-      where: { tenantId }, orderBy: { createdAt: 'desc' }, take: 100,
+  async list(tenantId = config.tenantId, query: DocumentListQuery = { page: 1, limit: 20, search: '' }) {
+    const { page, limit, search, status, fileType } = query;
+    const where = { tenantId, ...(status ? { status } : {}), ...(fileType ? { fileType } : {}),
+      // Prisma contains uses SQL LIKE. Treat user input as a literal filename
+      // substring rather than accepting wildcard expressions.
+      ...(search ? { filename: { contains: search.replace(/[\\%_]/g, '\\$&'), mode: 'insensitive' as const } } : {}),
+    };
+    const [documents, total] = await this.prisma.$transaction([this.prisma.appDocument.findMany({
+      where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: (page - 1) * limit, take: limit,
       select: { id: true, filename: true, fileType: true, status: true, stage: true, progress: true, jobId: true, retryCount: true, failureCode: true, fileSize: true, activeVersionId: true, createdAt: true, updatedAt: true, completedAt: true },
-    });
-    return documents.map(document => this.safeDocument(document));
+    }), this.prisma.appDocument.count({ where })], { isolationLevel: 'RepeatableRead' });
+    const totalPages = Math.ceil(total / limit);
+    return { documents: documents.map(document => this.safeDocument(document)), meta: {
+      page, limit, count: documents.length, total, totalPages, hasNextPage: page < totalPages, hasPreviousPage: page > 1,
+      filters: { search, status: status ?? null, fileType: fileType ?? null },
+    } };
   }
 
   async get(id: string, tenantId = config.tenantId) {
@@ -97,6 +135,18 @@ export class DocumentsService implements OnModuleInit {
       })),
       timing: result.timing,
     };
+  }
+
+  private async recoverQueuedUpload(documentId: string, tenantId: string, userId?: string, versionId?: string) {
+    // SQL commit and Redis enqueue are separate. Re-uploading the same file can
+    // safely restore an absent queued job using BullMQ's existing stable job ID.
+    // Never restart processing, completed, failed or cancelled versions here.
+    const version = await this.prisma.appDocumentVersion.findFirst({
+      where: { documentId, tenantId, ...(versionId ? { id: versionId } : {}), status: 'queued', cancelRequested: false, document: { cancelRequested: false, deleteRequested: false } },
+      orderBy: { versionNumber: 'desc' },
+    });
+    if (!version?.jobId || !version.storageKey || !version.checksum || await this.queue.queue.getJob(version.jobId)) return;
+    await this.queue.enqueue({ documentId, versionId: version.id, tenantId, userId, storageKey: version.storageKey, filename: version.filename, checksum: version.checksum, fileSize: Number(version.fileSize) }, version.jobId);
   }
 
   async upload(file: { filename: string; originalName: string; mimetype: string; size: number; path: string }, tenantId = config.tenantId, userId?: string, existingDocumentId?: string, replacementReason?: string): Promise<{ document: Awaited<ReturnType<DocumentsService['get']>>; duplicate: boolean; version?: unknown }> {
@@ -130,17 +180,23 @@ export class DocumentsService implements OnModuleInit {
     const duplicateVersion = existingDocumentId ? await this.prisma.appDocumentVersion.findFirst({ where: { documentId: existingDocumentId, checksum } }) : null;
     if (duplicateVersion) {
       await this.storage.cleanup(file.filename);
+      if (isDrawing(duplicateVersion.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
+      await this.recoverQueuedUpload(existingDocumentId!, tenantId, userId, duplicateVersion.id);
       return { document: await this.get(existingDocumentId!, tenantId), duplicate: true, version: this.safeVersion(duplicateVersion) };
     }
     const existing = existingDocumentId ? null : await this.prisma.appDocument.findFirst({ where: { tenantId, checksum } });
     if (existing) {
       await this.storage.cleanup(file.filename);
+      if (isDrawing(existing.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
+      await this.recoverQueuedUpload(existing.id, tenantId, userId);
       return { document: await this.get(existing.id, tenantId), duplicate: true };
     }
     if (!existingDocumentId) {
       const existingVersion = await this.prisma.appDocumentVersion.findFirst({ where: { tenantId, checksum } });
       if (existingVersion) {
         await this.storage.cleanup(file.filename);
+        if (isDrawing(existingVersion.filename) !== isDrawing(filename)) throw new BadRequestException('DUPLICATE_DRAWING_MODE_MISMATCH');
+        await this.recoverQueuedUpload(existingVersion.documentId, tenantId, userId, existingVersion.id);
         return { document: await this.get(existingVersion.documentId, tenantId), duplicate: true, version: this.safeVersion(existingVersion) };
       }
     }

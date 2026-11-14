@@ -11,7 +11,7 @@ Local Redis is available through Compose at `127.0.0.1:6391`; set `REDIS_URL` if
 
 ## Upload
 
-`POST /api/documents/upload` accepts multipart field `file`. `POST /api/documents/upload-batch` accepts repeated multipart field `files`. Both require `x-api-key` and return `202 Accepted` with document/job metadata, not file bytes. The batch response contains per-file `accepted` and `rejected` lists. Reuploading the same content for the tenant returns its existing document and job.
+`POST /api/documents/upload` accepts multipart field `file`. `POST /api/documents/upload-batch` accepts repeated multipart field `files`. Both require a JWT bearer token and return `202 Accepted` with document/job metadata, not file bytes. The batch response contains per-file `accepted` and `rejected` lists. Documents retain the existing shared installation workspace behavior; conversations and usage logs remain user scoped.
 
 ```json
 {
@@ -35,6 +35,8 @@ Supported extensions: `.md`, `.txt`, `.docx`, `.pdf`, `.xlsx`, `.xls`, `.csv`. S
 - `GET /api/jobs/{jobId}/events` emits `status`, `completed`, `failed`, and `cancelled` events. Each `data` object contains only job/document IDs, state, stage, measured progress, retry count, failure code, and timestamps. No document text, private path, stack trace, or Redis payload is sent.
 - `POST /api/jobs/{jobId}/cancel` removes a waiting job or sets a cancellation request for an active job.
 - `DELETE /api/documents/{id}` cancels processing or removes the document's TypeGraph index and Prisma metadata.
+
+`GET /api/documents` and `GET /api/documents/{id}` retain the machine-readable `status` and `stage` fields and add `statusPresentation: { label, detail, tone }` for display. Render this as the primary status; render `versionLabel` separately (for example, `Active version`). A cancelled file is labelled `Cancelled`, never `Processing · cancelled`.
 
 SSE sends the latest snapshot immediately, sends a new event when it changes, uses `id` from `updatedAt`, and accepts reconnects by replaying the current snapshot. It does not retain event history; clients can always refresh from the status endpoint.
 

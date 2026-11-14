@@ -1,6 +1,7 @@
+import { isolatedAccount } from './helpers/isolated-account.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
@@ -12,7 +13,7 @@ import { StructuredDataService } from '../src/documents/structured-data.service.
 import { config } from '../src/config.js';
 
 const baseUrl = process.env.DOCUMENT_E2E_URL || `http://127.0.0.1:${config.port}`;
-const enabled = process.env.RUN_DOCUMENT_E2E === 'true';
+const enabled = process.env.RUN_DOCUMENT_E2E === 'true' && process.env.CONFIRM_ISOLATED_E2E === 'true';
 let accessToken = '';
 const authHeaders = () => ({ authorization: `Bearer ${accessToken}` });
 
@@ -77,7 +78,7 @@ async function upload(fixture: Fixture) {
   return fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: authHeaders(), body: form });
 }
 
-async function waitForJob(jobId: string, maxWaitMs = 90000) {
+async function waitForJob(jobId: string, maxWaitMs = 300000) {
   const deadline = Date.now() + maxWaitMs;
   let last: Record<string, unknown> | undefined;
   while (Date.now() < deadline) {
@@ -91,10 +92,10 @@ async function waitForJob(jobId: string, maxWaitMs = 90000) {
 }
 
 test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E for all supported formats', {
-  skip: !enabled ? 'Set RUN_DOCUMENT_E2E=true and start the API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
+  skip: !enabled ? 'Set RUN_DOCUMENT_E2E=true, CONFIRM_ISOLATED_E2E=true and start the API, worker, PostgreSQL, Redis, TypeGraph, and Ollama' : false,
   timeout: 600000,
 }, async () => {
-  const context = await NestFactory.createApplicationContext(TypegraphModule, { logger: false });
+  const context = await NestFactory.createApplicationContext(TypegraphModule, { logger: false, abortOnError: false });
   const typegraph = context.get(TypegraphService);
   const prisma = new PrismaClient();
   const structuredData = new StructuredDataService(prisma);
@@ -102,17 +103,15 @@ test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E f
   let userId: string | undefined;
   const testDocumentIds: string[] = [];
   try {
-    const suffix = randomUUID();
-    const registration = await fetch(`${baseUrl}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `documents-e2e-${suffix}@example.test`, password: `S!tePilot-${suffix}-secure`, displayName: 'Synthetic Document E2E' }) });
-    assert.equal(registration.status, 201);
-    const identity = await registration.json() as { accessToken: string; user: { id: string }; tenant: { id: string } };
+    const identity = await isolatedAccount(prisma, baseUrl, 'documents-e2e');
     accessToken = identity.accessToken;
-    tenantId = identity.tenant.id;
+    tenantId = config.companyWorkspaceId;
     userId = identity.user.id;
     const allFixtures = await fixtures;
     const initialStorage = new Set(await readdir(config.uploadDir).catch(() => []));
     const accepted: Array<{ fixture: Fixture; documentId: string; jobId: string }> = [];
     for (const fixture of allFixtures) {
+      console.info(JSON.stringify({ event: 'document-e2e-upload', filename: fixture.name }));
       const response = await upload(fixture);
       assert.equal(response.status, 202, `${fixture.name} upload should be accepted`);
       const payload = await response.json() as { document: { id: string; jobId: string; status: string; stage: string } };
@@ -126,14 +125,13 @@ test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E f
       assert.equal(progress.overallPercent, 100);
       assert.equal(progress.etaMs, null, 'ETA must remain unknown without measured throughput');
       assert.ok(progress.stages.some(stage => stage.stage === 'upload' && stage.completedUnits === stage.totalUnits && stage.stagePercent === 100), 'received upload byte count should be recorded');
-      for (const stage of ['validation', 'queued', 'verification', 'parsing', 'indexing', 'embedding', 'persisting', 'committing', 'completed']) assert.ok(progress.stages.some(item => item.stage === stage), `Missing persisted stage ${stage}`);
+      for (const stage of ['validation', 'queued', 'verification', 'parsing', 'smart_chunking', 'indexing', 'embedding', 'publication', 'completed']) assert.ok(progress.stages.some(item => item.stage === stage), `Missing persisted stage ${stage}`);
       const embedding = progress.stages.find(stage => stage.stage === 'embedding')!;
-      const storing = progress.stages.find(stage => stage.stage === 'persisting')!;
       assert.equal(embedding.unit, 'chunks');
       assert.ok(embedding.completedUnits !== null && embedding.totalUnits !== null && embedding.completedUnits === embedding.totalUnits, 'Embedding batches must report completed SDK chunks against the actual total');
-      assert.equal(storing.unit, 'chunks');
-      assert.ok(storing.completedUnits !== null && storing.totalUnits !== null && storing.completedUnits === storing.totalUnits, 'TypeGraph must report successfully persisted chunks against the actual total');
+      assert.ok(progress.stages.some(stage => stage.stage === 'publication' && stage.status === 'completed'), 'Only a committed publication may complete a versioned job');
       assert.ok((embedding.embeddingChunksPerSecond ?? 0) > 0, 'Measured embedding duration should yield actual chunk throughput');
+      console.info(JSON.stringify({ event: 'document-e2e-ready', filename: fixture.name, chunks: embedding.totalUnits }));
       accepted.push({ fixture, documentId: payload.document.id, jobId: payload.document.jobId });
     }
 
@@ -144,8 +142,8 @@ test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E f
       assert.ok(hit.content.includes(fixture.expected), `${fixture.name} retrieved chunk did not contain expected answer`);
       const expectedLocation: Record<string, string> = {
         'phase5.pdf': 'page 1', 'phase5-docx.docx': 'section Phase Five Fixture',
-        'phase5.xlsx': 'sheet Phase Five, rows 1-2', 'phase5.xls': 'sheet Phase Five, rows 1-2',
-        'phase5.csv': 'CSV row 2', 'large-progress.csv': 'CSV rows 2-', 'phase5.md': 'section Phase Five', 'phase5.txt': 'line 1',
+        'phase5.xlsx': 'sheet Phase Five, row 2', 'phase5.xls': 'sheet Phase Five, row 2',
+        'phase5.csv': 'sheet CSV, row 2', 'large-progress.csv': 'sheet CSV, rows 2-', 'phase5.md': 'section Phase Five', 'phase5.txt': 'line 1',
       };
       assert.ok(hit.sourceRef.includes(expectedLocation[fixture.name]!), `${fixture.name} citation location was not source-derived: ${hit.sourceRef}`);
     }
@@ -235,7 +233,7 @@ test('real authenticated upload -> BullMQ -> worker -> TypeGraph -> Prisma E2E f
         await typegraph.deleteDocument(id, tenantId).catch(() => undefined);
       }
       await prisma.appDocument.deleteMany({ where: { tenantId, id: { in: testDocumentIds } } }).catch(() => undefined);
-      await prisma.tenant.deleteMany({ where: { id: tenantId } }).catch(() => undefined);
+      // The workspace is shared: never delete it during per-test cleanup.
     }
     if (userId) await prisma.user.deleteMany({ where: { id: userId } }).catch(() => undefined);
     await prisma.$disconnect();

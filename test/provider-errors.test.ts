@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeProviderClientResponse, withProviderRetry } from '../src/agent/provider-errors.js';
+import { classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
 import { createSitePilotStorageExporter } from '../src/mastra/observability.js';
 
 test('provider errors map common upstream statuses to stable safe codes', () => {
@@ -55,6 +55,26 @@ test('non-retryable failures are never retried', async () => {
   assert.equal(calls, 1);
 });
 
+test('Google daily quota exhaustion is not retried and safely parses RetryInfo', async () => {
+  let calls = 0;
+  const payload = JSON.stringify({ error: { code: 429, details: [
+    { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'RATE_LIMIT_EXCEEDED', metadata: { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' } },
+    { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '86400s' },
+  ] } });
+  const error = { statusCode: 429, responseBody: payload };
+  assert.deepEqual(classifyProviderError(error), {
+    code: 'PROVIDER_DAILY_QUOTA_EXHAUSTED', retryable: false, httpStatus: 429, retryAfterMs: 86_400_000,
+  });
+  await assert.rejects(withProviderRetry(async () => { calls++; throw error; }, {
+    sleep: async () => assert.fail('daily quota exhaustion must not wait and retry'),
+  }), error => error instanceof ProviderRequestFailure && error.safe.code === 'PROVIDER_DAILY_QUOTA_EXHAUSTED');
+  assert.equal(calls, 1);
+  assert.deepEqual(safeProviderClientResponse(error), {
+    statusCode: 429,
+    body: { code: 'PROVIDER_DAILY_QUOTA_EXHAUSTED', retryable: false, retryAfterMs: 86_400_000 },
+  });
+});
+
 test('timeouts retry only to the configured bound and retain a safe timeout code', async () => {
   let calls = 0;
   await assert.rejects(withProviderRetry(async () => {
@@ -98,4 +118,10 @@ test('observability exporter starts and degrades safely when storage initializat
   const unavailableMastra = { getStorage: () => ({ getStore: async () => { throw new Error('storage unavailable'); } }) };
   await assert.doesNotReject(exporter.init({ mastra: unavailableMastra as any }));
   await exporter.shutdown();
+});
+
+test('serialized Mastra provider failures retain only allowlisted retry metadata', () => {
+  const serialized = JSON.parse(JSON.stringify(new ProviderRequestFailure({ code: 'PROVIDER_RATE_LIMITED', retryable: true, httpStatus: 503, retryAfterMs: 90000 })));
+  assert.deepEqual(safeProviderFailure(serialized), { code: 'PROVIDER_RATE_LIMITED', retryable: true, httpStatus: 503, retryAfterMs: 60000 });
+  assert.equal(safeProviderFailure({ name: 'ProviderRequestFailure', safe: { code: 'INVENTED', message: 'secret' } }), undefined);
 });

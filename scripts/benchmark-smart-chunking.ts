@@ -31,7 +31,7 @@ try {
   const chunkStart = performance.now();
   const chunks = smartChunk(parsed.text, parsed.extension, { documentId: 'benchmark', documentVersionId: 'benchmark-v1', originalFilename: filename.split('/').at(-1) }, parsed.structuredCells);
   const chunkingMs = Math.round(performance.now() - chunkStart);
-  const index = process.env.BENCHMARK_API_KEY ? await ingestThroughApi(filename, marker) : null;
+  const index = process.env.AGENT_E2E_BEARER ? await ingestThroughApi(filename, marker) : null;
   const cpu = process.cpuUsage(cpuStart);
   peakRss = Math.max(peakRss, process.resourceUsage().maxRSS * 1024);
   console.log(JSON.stringify({
@@ -49,7 +49,7 @@ try {
     cpuSystemMs: Math.round(cpu.system / 1000),
     localWallMs: Math.round(performance.now() - wallStart),
     indexingAndRetrieval: index,
-    note: index ? undefined : 'Set BENCHMARK_API_KEY and API_BASE_URL to measure Ollama embedding, TypeGraph indexing, and retrieval quality.',
+    note: index ? undefined : 'Set AGENT_E2E_BEARER and API_BASE_URL to measure Ollama embedding, TypeGraph indexing, and retrieval quality.',
   }, null, 2));
 } finally {
   clearInterval(sampleMemory);
@@ -62,12 +62,13 @@ async function ingestThroughApi(path: string, sentinel: string) {
   const bytes = await readFile(path);
   form.append('file', new Blob([bytes], { type: 'text/csv' }), path.split('/').at(-1)!);
   const startedAt = performance.now();
-  const upload = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: { 'x-api-key': process.env.BENCHMARK_API_KEY! }, body: form });
+  const authorization = { authorization: `Bearer ${process.env.AGENT_E2E_BEARER!}` };
+  const upload = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: authorization, body: form });
   if (!upload.ok) throw new Error(`Benchmark upload failed (${upload.status}): ${await upload.text()}`);
   const accepted = await upload.json() as { version: { jobId: string }; document: { id: string } };
   let job: { status: string; progressDetails?: { stages?: Array<{ stage: string; elapsedMs: number; embeddingDurationMs?: number | null }> } } | undefined;
   for (let attempt = 0; attempt < 1800; attempt++) {
-    const response = await fetch(`${baseUrl}/api/jobs/${accepted.version.jobId}`, { headers: { 'x-api-key': process.env.BENCHMARK_API_KEY! } });
+    const response = await fetch(`${baseUrl}/api/jobs/${accepted.version.jobId}`, { headers: authorization });
     if (!response.ok) throw new Error(`Benchmark job read failed (${response.status})`);
     job = await response.json() as typeof job;
     if (['ready', 'failed', 'cancelled'].includes(job!.status)) break;
@@ -77,7 +78,7 @@ async function ingestThroughApi(path: string, sentinel: string) {
   const events = job.progressDetails?.stages || [];
   const searchStart = performance.now();
   const search = await fetch(`${baseUrl}/api/documents/search`, {
-    method: 'POST', headers: { 'x-api-key': process.env.BENCHMARK_API_KEY!, 'content-type': 'application/json' },
+    method: 'POST', headers: { ...authorization, 'content-type': 'application/json' },
     body: JSON.stringify({ query: `exact reference ${sentinel} REF`, limit: 8 }),
   });
   if (!search.ok) throw new Error(`Benchmark retrieval failed (${search.status})`);

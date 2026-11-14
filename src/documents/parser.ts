@@ -3,11 +3,22 @@ import mammoth from 'mammoth';
 import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 import { PDFParse } from 'pdf-parse';
+import { configuredVisionModel, isDrawing, parseDrawing, transcribePdfPage } from './drawing-vision.js';
 import { BadRequestException } from '@nestjs/common';
+import type { ParseProgressCallback } from './parse-progress.js';
 
-export const SUPPORTED_EXTENSIONS = ['.md', '.txt', '.docx', '.pdf', '.xlsx', '.xls', '.csv'] as const;
+export const SUPPORTED_EXTENSIONS = ['.md', '.txt', '.docx', '.pdf', '.xlsx', '.xls', '.csv', '.png', '.jpg', '.jpeg'] as const;
 export interface StructuredCell { sheetName: string; rowNumber: number; address: string; columnName: string; value: string; valueType: string; formula?: string; }
 export interface ParsedDocument { extension: string; text: string; structuredCells?: StructuredCell[]; }
+
+export function extractableTextCoverage(text: string, width: number, height: number) {
+  const meaningfulChars = [...text.normalize('NFKC').matchAll(/[\p{L}\p{N}]/gu)].length;
+  const area = width > 0 && height > 0 ? width * height : 500_000;
+  const expectedChars = 500 * area / 500_000;
+  return Math.min(1, meaningfulChars / Math.max(1, expectedChars));
+}
+
+const MIN_PDF_TEXT_COVERAGE = 0.16;
 
 function decodeUtf8(buffer: Buffer): string {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, ''); }
@@ -74,9 +85,10 @@ function parseCsvDocument(text: string): { text: string; structuredCells: Struct
   return { text: lines.join('\n'), structuredCells };
 }
 
-export async function parseDocument(filename: string, buffer: Buffer): Promise<ParsedDocument> {
+export async function parseDocument(filename: string, buffer: Buffer, signal?: AbortSignal, onProgress?: ParseProgressCallback): Promise<ParsedDocument> {
   const extension = extname(filename).toLowerCase();
   if (!SUPPORTED_EXTENSIONS.includes(extension as typeof SUPPORTED_EXTENSIONS[number])) throw new BadRequestException('UNSUPPORTED_FILE_TYPE');
+  if (isDrawing(filename)) return { extension, text: await parseDrawing(filename, buffer, signal, onProgress) };
   let text: string;
   let structuredCells: StructuredCell[] | undefined;
   if (extension === '.docx') {
@@ -103,11 +115,51 @@ export async function parseDocument(filename: string, buffer: Buffer): Promise<P
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {
       const result = await parser.getText();
-      text = result.pages.map(page => ({ num: page.num, text: page.text.trim() })).filter(page => page.text)
-        .map(page => `Page ${page.num}:\n${page.text}`).join('\n\n');
-      if (!text.trim()) throw new BadRequestException('OCR_REQUIRED');
+      const info = await parser.getInfo({ parsePageInfo: true });
+      const pageInfo = new Map(info.pages.map(page => [page.pageNumber, page]));
+      const needsVision = result.pages.filter(page => {
+        const dimensions = pageInfo.get(page.num);
+        return extractableTextCoverage(page.text ?? '', dimensions?.width ?? 0, dimensions?.height ?? 0) < MIN_PDF_TEXT_COVERAGE;
+      });
+      const visionModel = needsVision.length ? configuredVisionModel() : undefined;
+      if (needsVision.length && !visionModel) {
+        throw new BadRequestException('OCR_VISION_NOT_CONFIGURED: set OLLAMA_VISION_MODEL to an installed local Ollama vision model');
+      }
+      const pageTexts: string[] = [];
+      let rendered = 0;
+      let extractedByVision = 0;
+      for (const page of result.pages) {
+        const nativeText = (page.text ?? '').trim();
+        if (!needsVision.some(item => item.num === page.num)) {
+          if (nativeText) pageTexts.push(`Page ${page.num}:\n${nativeText}`);
+          continue;
+        }
+        signal?.throwIfAborted();
+        const dimensions = pageInfo.get(page.num);
+        if (!dimensions || !(dimensions.width > 0 && dimensions.height > 0)) throw new BadRequestException('INVALID_PDF_PAGE_DIMENSIONS');
+        await onProgress?.({ stage: 'pdf_rendering', status: 'in_progress', completedUnits: rendered, totalUnits: needsVision.length, unit: 'pages' });
+        const desiredWidth = Math.max(1, Math.floor(1800 * Math.min(1, dimensions.width / dimensions.height)));
+        const screenshot = await parser.getScreenshot({ partial: [page.num], desiredWidth, imageDataUrl: false, imageBuffer: true });
+        const image = screenshot.pages[0]?.data;
+        if (!image?.length) throw new Error('PDF_PAGE_RENDER_FAILED');
+        rendered++;
+        await onProgress?.({ stage: 'pdf_rendering', status: 'in_progress', completedUnits: rendered, totalUnits: needsVision.length, unit: 'pages' });
+        await onProgress?.({ stage: 'vision_extraction', status: 'in_progress', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+        const visualText = await transcribePdfPage(image, signal);
+        extractedByVision++;
+        await onProgress?.({ stage: 'vision_extraction', status: 'in_progress', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+        const combinedText = [nativeText, visualText].filter(Boolean).join('\n');
+        if (combinedText) pageTexts.push(`Page ${page.num}:\n${combinedText}`);
+      }
+      if (needsVision.length) {
+        await onProgress?.({ stage: 'vision_extraction', status: 'completed', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+      }
+      text = pageTexts.join('\n\n');
+      if (!text.trim()) throw new BadRequestException(needsVision.length ? 'OCR_NO_READABLE_TEXT' : 'EMPTY_DOCUMENT');
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
+      if (error instanceof Error && (/^(?:OCR_VISION_|OLLAMA_VISION_)/.test(error.message)
+        || (error as Error & { retryable?: boolean }).retryable === true)) throw error;
       throw new BadRequestException('INVALID_PDF');
     } finally { await parser.destroy(); }
   } else if (extension === '.xlsx' || extension === '.xls') {

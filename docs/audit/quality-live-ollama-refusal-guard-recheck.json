@@ -1,0 +1,97 @@
+{
+  "mode": "real local Ollama / real Mastra workflow / fixed retrieval fixture; NOT TypeGraph retrieval or HTTP/database E2E",
+  "model": "qwen3:8b",
+  "complete": true,
+  "totalCases": 1,
+  "humanReviewRequired": true,
+  "results": [
+    {
+      "id": "missing-ar",
+      "question": "ما اسم شركة التأمين لمشروع Orion؟",
+      "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
+      "pass": false,
+      "sources": [],
+      "citationValidation": "fallback",
+      "outcome": "failure",
+      "timing": {
+        "planningMs": 40019,
+        "evidenceMs": 49962,
+        "finalizationMs": 0,
+        "toolExecutionMs": 2,
+        "retrievalMs": 2,
+        "typegraphRetrievalMs": 2,
+        "citationVerificationMs": 28116,
+        "llmCalls": 4,
+        "providerRetries": 0,
+        "providerErrors": 0
+      },
+      "referenceIdentityValid": true,
+      "arabicPresent": false,
+      "latencyMs": 90009,
+      "queries": [
+        "What is the name of the insurance company for project Orion?"
+      ],
+      "firstTextMs": 58547,
+      "deltaCount": 19,
+      "provisionalText": "الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.",
+      "stages": [
+        {
+          "stage": "planning",
+          "status": "in_progress",
+          "message": "Understanding your request",
+          "ms": 22
+        },
+        {
+          "stage": "planning",
+          "status": "completed",
+          "message": "Request plan is ready",
+          "ms": 40041
+        },
+        {
+          "stage": "searching",
+          "status": "in_progress",
+          "message": "Searching authorized documents",
+          "toolName": "documentSearch",
+          "ms": 40048
+        },
+        {
+          "stage": "searching",
+          "status": "completed",
+          "message": "Document search completed",
+          "toolName": "documentSearch",
+          "ms": 40051
+        },
+        {
+          "stage": "composing",
+          "status": "in_progress",
+          "message": "Writing an answer from the retrieved evidence",
+          "ms": 40052
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Draft answer is ready",
+          "ms": 61886
+        },
+        {
+          "stage": "validating",
+          "status": "in_progress",
+          "message": "Checking the answer against its evidence",
+          "ms": 61886
+        },
+        {
+          "stage": "validating",
+          "status": "completed",
+          "message": "Evidence check completed",
+          "ms": 90004
+        },
+        {
+          "stage": "composing",
+          "status": "completed",
+          "message": "Workflow response is ready",
+          "ms": 90006
+        }
+      ]
+    }
+  ]
+}
