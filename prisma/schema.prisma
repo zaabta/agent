@@ -336,3 +336,66 @@ model LlmUsage {
   @@index([provider, modelId, createdAt])
   @@map("llm_usage")
 }
+
+model CustomToolSecret {
+  id         String      @id @default(uuid()) @db.Uuid
+  ciphertext String      @db.Text
+  iv         String
+  authTag    String      @map("auth_tag")
+  createdBy  String      @map("created_by")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  tool       CustomTool?
+  @@map("custom_tool_secrets")
+}
+
+model CustomTool {
+  id                    String                @id @default(uuid()) @db.Uuid
+  name                  String                @unique
+  displayName           String                @map("display_name")
+  description           String                @db.Text
+  type                  String                @default("HTTP_GET")
+  endpointUrl           String?               @map("endpoint_url")
+  connectionProfile     String                @map("connection_profile")
+  path                  String
+  queryMappings         Json                  @default("{}") @map("query_mappings")
+  allowedResultSources Json                  @default("[]") @map("allowed_result_sources")
+  inputSchema           Json                  @map("input_schema")
+  outputSchema          Json                  @map("output_schema")
+  authHeaderName        String?               @map("auth_header_name")
+  authPrefix            String?               @map("auth_prefix")
+  authSecretId          String?               @unique @map("auth_secret_id") @db.Uuid
+  authSecret            CustomToolSecret?     @relation(fields: [authSecretId], references: [id], onDelete: SetNull)
+  enabled               Boolean               @default(false)
+  effectClassification String                @default("READ_ONLY") @map("effect_classification")
+  timeoutMs             Int                   @default(10000) @map("timeout_ms")
+  maxResponseBytes      Int                   @default(65536) @map("max_response_bytes")
+  configurationVersion Int                   @default(1) @map("configuration_version")
+  createdBy             String                @map("created_by")
+  updatedBy             String                @map("updated_by")
+  createdAt             DateTime              @default(now()) @map("created_at")
+  updatedAt             DateTime              @updatedAt @map("updated_at")
+  archivedAt            DateTime?             @map("archived_at")
+  executions            CustomToolExecution[]
+  @@index([enabled, archivedAt])
+  @@index([updatedAt(sort: Desc)])
+  @@map("custom_tools")
+}
+
+model CustomToolExecution {
+  id                String    @id @default(uuid()) @db.Uuid
+  toolId            String    @map("tool_id") @db.Uuid
+  toolVersion       Int       @map("tool_version")
+  logicalRequestId  String    @map("logical_request_id")
+  conversationId    String?   @map("conversation_id") @db.Uuid
+  userId            String?   @map("user_id")
+  latencyMs         Int       @map("latency_ms")
+  success           Boolean
+  errorCategory     String?   @map("error_category")
+  isTest            Boolean   @default(false) @map("is_test")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  tool              CustomTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  @@index([toolId, createdAt(sort: Desc)])
+  @@index([logicalRequestId])
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@map("custom_tool_executions")
+}

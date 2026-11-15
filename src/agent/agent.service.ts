@@ -466,7 +466,7 @@ export class AgentService implements OnModuleDestroy {
 
   async ask(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
     const runtime = await resolveRuntimeModel(this.prisma);
-    if (config.agentOrchestration === 'workflow') return this.askWorkflow(message, conversationId, principal, runtime);
+    if (config.agentOrchestration === 'workflow' || await this.backendTools?.hasEnabledTools(principal)) return this.askWorkflow(message, conversationId, principal, runtime);
     const startedAt = performance.now();
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
     const turn = await this.beginTurn(message, conversationId, principal);
@@ -648,7 +648,7 @@ export class AgentService implements OnModuleDestroy {
     const runSignal = AbortSignal.any([abortSignal, run.controller.signal]);
     const runWriter: EventWriter = (event, data) => write(event, event === 'status' ? { ...data, runId: run.runId } : data);
     try {
-      const result = config.agentOrchestration === 'workflow'
+      const result = config.agentOrchestration === 'workflow' || await this.backendTools?.hasEnabledTools(principal)
         ? await this.streamWorkflow(message, conversationId, runSignal, runWriter, principal, run.runId, runtime)
         : await this.streamLegacy(message, conversationId, runSignal, runWriter, principal, run.runId, runtime);
       this.activeRuns.finish(run.runId, 'completed');

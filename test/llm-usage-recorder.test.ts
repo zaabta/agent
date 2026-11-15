@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { instrumentAgent, persistUsage, type UsageContext } from '../src/llm-admin/usage-recorder.js';
+import { instrumentAgent, persistUsage, persistUsageEvent, type UsageContext } from '../src/llm-admin/usage-recorder.js';
 import type { PrismaService } from '../src/prisma/prisma.service.js';
 import { asMastraModel, resolveRuntimeModel } from '../src/mastra/runtime-model.js';
 
@@ -15,6 +15,13 @@ test('usage recorder persists provider counts and actual response model without 
 test('unavailable usage stays null and recorder persistence failures do not affect generation',async()=>{
   const {prisma,context,rows}=setup();await persistUsage(prisma,context,{status:'failed',latencyMs:5,source:'test-provider',error:new Error('failure')});assert.equal(rows[0].inputTokens,null);assert.equal(rows[0].outputTokens,null);assert.equal(rows[0].totalTokens,null);assert.equal(rows[0].accuracy,'unavailable');
   const broken={llmUsage:{create:async()=>{throw new Error('db down');}}} as unknown as PrismaService;await assert.doesNotReject(()=>persistUsage(broken,context,{status:'success',latencyMs:1,source:'test'}));
+});
+
+test('usage write failures emit a structured warning without record values',async()=>{
+  const broken={llmUsage:{create:async()=>{throw new Error('sensitive database detail');}}} as unknown as PrismaService;
+  const warnings:string[]=[];const warn=console.warn;console.warn=(message?:unknown)=>warnings.push(String(message));
+  try{await persistUsageEvent(broken,{userId:'private-user',prompt:'private prompt'});}finally{console.warn=warn;}
+  assert.deepEqual(warnings.map(value=>JSON.parse(value)),[{event:'llm_usage_persistence_failed',errorType:'Error'}]);
 });
 
 test('legacy agent generate and streamed model steps record usage once per actual model response',async()=>{

@@ -5,7 +5,7 @@ import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -35,6 +35,10 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         return 'Registered employees: 42';
       },
     });
+    const workflowTools = scenario === 'custom-independent' ? {
+      catalog: async () => [{ id: 'custom_weather', name: 'weather', description: 'Read the weather API for a city', input: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }, version: 1 }],
+      execute: async (call: any) => { assert.deepEqual(call, { id: 'custom_weather', args: { city: 'Istanbul' } }); return '22 C'; },
+    } as any : backendTools;
     const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
       const prompt = messages[0].content;
       if (this.id.startsWith('sitepilot-planner')) {
@@ -50,6 +54,10 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
           else assert.match(prompt, /Count registered employees/);
           return { object: { operation: 'backend_tool', backendCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
         }
+        if (scenario === 'custom-independent') {
+          assert.match(prompt, /Read the weather API for a city/);
+          return { object: { operation: 'custom_tool', customToolCall: { id: 'custom_weather', args: { city: 'Istanbul' } } } } as any;
+        }
         if (scenario === 'mixed-dependent') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', columnName: 'Employee', groupLimit: 2, filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?', searchRankedGroups: true } } as any;
         if (scenario === 'mixed' && !prompt.includes('Authorized schema:')) return { object: { operation: 'lookup', standaloneQuestion: 'Count violations from violations.xlsx' } } as any;
         if (scenario === 'mixed') assert.doesNotMatch(prompt, /describe report risks/);
@@ -59,6 +67,10 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario === 'same-source-chunks' || scenario === 'irrelevant-evidence' || scenario === 'mislabelled-refusal' || scenario === 'invalid-verifier-refusal') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
         if (scenario.startsWith('followup')) return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'How can I help?' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
+      }
+      if (scenario === 'custom-independent') {
+        assert.match(messages[0].content, /22 C/);
+        return { object: { answer: 'Istanbul is 22 C.' } } as any;
       }
       modelEvents.push('citation-verifier');
       const ids = [...prompt.matchAll(/(?:^|\n)(E\d+):/g)].map((m: any) => m[1]);
@@ -75,7 +87,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         modelEvents.push('model-delta-2'); yield { type: 'text-delta', payload: { text: 'fixture answer' } };
       })(), getFullOutput: async () => ({ text: 'Supported fixture answer' }) }) as any;
       return ({ fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Supported fixture answer' } }; })(), getFullOutput: async () => ({ text: 'Supported fixture answer' }) }) as any; });
-    const typegraph: any = { searchDocuments: async (query: string) => {
+    const typegraph: any = { listDocuments: async () => ({ documents: [], durationMs: 0 }), searchDocuments: async (query: string) => {
       calls.push(query);
       if (scenario === 'drawing-revisions' || scenario === 'drawing-missing-revision') {
         const name = query.endsWith('B') && scenario === 'drawing-revisions' ? 'B' : 'A';
@@ -113,7 +125,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
     try {
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', authMethod: 'jwt' }, undefined, {
         onTextDelta: async text => { if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
-      }, backendTools);
+      }, workflowTools);
       const run = await workflow.createRun();
       const followupHistory = scenario === 'followup-tr'
         ? [
@@ -128,7 +140,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const followupMessage = scenario === 'followup-ar' ? 'ماذا عن المخاطر؟'
         : scenario === 'followup-tr' ? 'Peki proje riskleri?'
           : 'What about the project risks?';
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'narrative') {
@@ -158,6 +170,11 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.ok(result.result.toolsCalled.includes('employee_count'));
         assert.ok(result.result.toolsCalled.includes('documentSearch'));
         assert.deepEqual(result.result.sources.map(source => source.filename), ['risks.md']);
+      }
+      else if (scenario === 'custom-independent') {
+        assert.match(result.result.answer, /22 C/);
+        assert.ok(result.result.toolsCalled.includes('custom_weather'));
+        assert.deepEqual(calls, []);
       }
       else if (scenario === 'backend-denied' || scenario === 'backend-missing') {
         assert.equal(result.result.outcome, 'clarification');

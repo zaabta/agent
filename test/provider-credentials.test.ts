@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BadRequestException, ForbiddenException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ServiceUnavailableException, UnauthorizedException, type Type } from '@nestjs/common';
 import { ApiAuthGuard } from '../src/auth/api-auth.guard.js';
 import { INSTALLATION_OWNER_ONLY } from '../src/auth/installation-owner.decorator.js';
 import { config } from '../src/config.js';
 import { LlmController } from '../src/llm-admin/llm.controller.js';
+import { CustomToolsController } from '../src/agent/custom-tools.controller.js';
 import { decryptCredential, encryptCredential } from '../src/llm-admin/provider-credentials.js';
 import { LlmAdminService } from '../src/llm-admin/llm-admin.service.js';
 import { asMastraModel } from '../src/mastra/runtime-model.js';
@@ -23,11 +24,12 @@ test('cloud API credentials encrypt and decrypt with AES-GCM and reject tamperin
   }
 });
 
-function guardFor(userId?: string, handler: Function = LlmController.prototype.saveCredential) {
+type RouteHandler = (...args: any[]) => any;
+function guardFor(userId?: string, handler: RouteHandler = LlmController.prototype.saveCredential, controller: Type = LlmController) {
   const request: any = { headers: { authorization: 'Bearer test' } };
-  const context: any = { switchToHttp: () => ({ getRequest: () => request }), getHandler: () => handler, getClass: () => LlmController };
+  const context: any = { switchToHttp: () => ({ getRequest: () => request }), getHandler: () => handler, getClass: () => controller };
   const auth: any = { validateAccessToken: async () => { if (!userId) throw new UnauthorizedException(); return { userId, tenantId: 'tenant', authMethod: 'jwt' }; } };
-  const reflector: any = { getAllAndOverride: (_key: string, targets: Function[]) => targets.some(target => Reflect.getMetadata(INSTALLATION_OWNER_ONLY, target)) };
+  const reflector: any = { getAllAndOverride: (_key: string, targets: object[]) => targets.some(target => Reflect.getMetadata(INSTALLATION_OWNER_ONLY, target)) };
   return new ApiAuthGuard(auth, reflector).canActivate(context);
 }
 
@@ -43,6 +45,25 @@ test('credential endpoints require a JWT from the configured installation owner'
   (config as any).installationOwnerUserId = undefined;
   await assert.rejects(guardFor('ordinary-user'), ServiceUnavailableException);
   (config as any).installationOwnerUserId = previousOwner;
+});
+
+test('custom tool management routes reject non-owner accounts', async () => {
+  const previousOwner = config.installationOwnerUserId;
+  (config as any).installationOwnerUserId = 'owner-user';
+  try {
+    const handlers = Object.getOwnPropertyNames(CustomToolsController.prototype)
+      .filter(name => name !== 'constructor')
+      .map(name => (CustomToolsController.prototype as any)[name] as RouteHandler);
+    assert.equal(handlers.length, 9);
+    for (const handler of handlers) {
+      assert.equal(Reflect.getMetadata(INSTALLATION_OWNER_ONLY, handler), true);
+      await assert.rejects(guardFor(undefined, handler, CustomToolsController), UnauthorizedException);
+      await assert.rejects(guardFor('ordinary-user', handler, CustomToolsController), ForbiddenException);
+      assert.equal(await guardFor('owner-user', handler, CustomToolsController), true);
+    }
+  } finally {
+    (config as any).installationOwnerUserId = previousOwner;
+  }
 });
 
 test('credential replacement is encrypted at rest, effective immediately, audited without the key, and excluded from runtime settings', async () => {

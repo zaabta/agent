@@ -1,0 +1,116 @@
+# SitePilot AI backend engineering audit
+
+**Scope and limits.** Reviewed the current backend source, tracked tests, local runtime configuration, available local document fixtures, GitNexus index, and the tracked PostgreSQL dump. No production service, remote database, or document index was changed. The GitNexus index is one commit behind the checkout; its results below are corroborated against source and are not treated as complete where it reports stale coverage. An index refresh was attempted but blocked by an `EPERM` writing the GitNexus lock under `/Users/ali/.gitnexus`.
+
+## Priority findings
+
+| Priority | Finding | Evidence and expected impact | Minimal recommendation |
+|---|---|---|---|
+| **Critical** | A database dump containing private workspace data is tracked in the public repository. | `backups/sitepilot-original.dump` is a 6.1 MB PostgreSQL custom dump tracked in Git (introduced in commit `39e35fe`). Safe archive inspection found 86,550 rows across 74 populated tables, including 6 users, 2 memberships, 42 app documents, 755 messages, 311 conversations, 90 audit rows, and 30 refresh sessions. Schema includes `password_hash` and refresh-token hash fields. Pattern scan found no common cloud/API credential formats, but cannot prove absence of all secrets. This is a private-data exposure even if password values are hashes. | Remove the dump from the repository’s current tree and keep it ignored; revoke/rotate any credentials that could have been included. Assess repository clones, forks, caches, and hosting exposure. History cleanup requires a coordinated, explicitly approved rewrite and force-push; none was done. `.gitignore` does not untrack an existing file. |
+| **High** | Usage-persistence failures were silent. | `src/llm-admin/usage-recorder.ts:14` caught and discarded every create failure, obscuring telemetry loss across multiple caller families. GitNexus `impact(persistUsageEvent, upstream)` reported **CRITICAL** risk, 3 direct call sites and 10 affected flows (agent, document/OCR, TypeGraph LLM, reranking); graph index is one commit stale. | Implemented a payload-free structured warning with event name and error class only. Persistence remains best-effort and does not fail model work. Added a test asserting prompt/user data is absent. Avoid logging raw exception messages or record fields. |
+| **High** | A short greeting is routed through a sizable structured planner prompt. | `src/agent/agent.service.ts:467` selects workflow mode from config; `askWorkflow` at ~602–625 begins a turn and runs `createAgentWorkflow`. In `src/agent/agent.workflow.ts:176–260`, the planner receives a long instruction string, structured operation schema, backend catalog and serialized context. The planner is unconditional (`request-context-and-plan`, ~233). Greeting rule is in planner instruction; a `respond` plan returns `plan.reply` at ~663–664 and avoids retrieval/final-answer generation. Thus one invocation is expected for the reported greeting path. | Consider a deterministic greeting fast path only after measuring behavior and preserving conversation semantics. First remove duplicated planner guidance/schema wording and measure prompt bytes/tokens before and after. Do not bypass the planner for ambiguous or workspace-dependent text. No prompt behavior was changed in this audit. |
+| **Medium** | Agent service and workflow combine several responsibilities. | `agent.service.ts` is ~1,450 lines; it owns both legacy/direct orchestration and workflow execution, turn/history loading, streaming, recovery, persistence, and citations. `agent.workflow.ts` is ~916 lines and combines planning, evidence routing, tool execution, grounding, and finalization. `mastra/factory.ts` contains a second general assistant instruction set and tool assembly. This raises review and isolated-testing cost; code inspection did not establish a correctness defect from size alone. | Keep Mastra. A gradual boundary is: `AgentTurnContext` (history/memory/evidence load), `AgentWorkflow` (existing Mastra steps and routing), `AgentResponsePersistence` (assistant save/citations), `RuntimeModelResolver` (existing resolver), and `UsageRecorder` (existing recorder). Move one coherent responsibility at a time; do not add another orchestration layer. |
+| **Medium** | Usage counts are provider-reported values, not locally recomputed values. | `usage-recorder.ts:7–25` extracts provider/Mastra usage and persists integer `inputTokens`, `outputTokens`, and `totalTokens`; if total is absent it sums input+output. Accuracy is `provider-reported` when any count exists. Direct generation and stream instrumentation record per step; workflow wraps model calls and records usage. This preserves provider accounting, but providers may omit or define counters differently. | Keep raw provider counts authoritative and retain `usageSource`/provider/model. Add per-provider contract tests for response shapes and stream step/retry behavior. Mark absent usage unavailable; do not label a locally estimated count provider-reported. |
+| **Low** | Token estimation in chunking is heuristic. | `src/documents/smart-chunker.ts` estimates tokens by character/word-piece heuristics rather than the active model tokenizer. It is used to bound chunks, not to report LLM usage. | Preserve the heuristic unless a supported tokenizer is already installed and a measured bound failure is found. Do not confuse chunk estimate with provider usage. |
+
+## `Hi` token-consumption trace
+
+The supplied report is **649 input + 24 output = 673 total**, with one Ollama invocation. The arithmetic is internally consistent. The matching local usage row could not be confirmed: the available development DB query was unavailable, and safe inspection of the tracked dump found no matching Ollama usage record. Therefore the exact event and provider response were not independently reproduced; the numeric report is user-supplied evidence, not independently verified provider output.
+
+The selected runtime is resolved per request by `src/mastra/runtime-model.ts`; database runtime settings can override `.env`. The local `.env` says `SITEPILOT_AGENT_ORCHESTRATION=workflow`, but it says Gemini as the default provider/model, so it does **not** establish which runtime settings produced the reported Ollama request. Local Ollama had `qwen3:8b` installed; this is consistent with, but does not prove, the reported model.
+
+For workflow mode, source shows the one-call path:
+
+1. `POST /api/agent/ask` calls `AgentService.ask` (`src/agent/agent.controller.ts`, `src/agent/agent.service.ts:467`).
+2. `ask` resolves the runtime and branches to `askWorkflow` when orchestration is `workflow`.
+3. `beginTurn` loads bounded prior messages (default 10, each capped at 3,000 chars), user memories, evidence references, entity context, summary, and selection. A new conversation has little or no prior context; “Hi” in an existing conversation can still carry history/context.
+4. `createAgentWorkflow` always invokes its separate `SitePilotPlanner` for `request-context-and-plan`. The planner has no attached workspace tools. Its request includes planner instructions, a structured output schema, backend catalog, current request, and serialized context (history/summary/memories/references/selection where present).
+5. If the plan is `respond`, evidence/tool execution is skipped and finalization uses `plan.reply` (fallback “How can I help?”). No second answer-generation call is needed. The six workspace tool schemas built by `createSitePilotAgent` in `src/mastra/factory.ts` are **not** the planner’s tool definitions. For this path, structured-output schema and backend catalog are the relevant schema/catalog overhead.
+
+The likely avoidable prompt cost is repeated semantic guidance: planner instructions explain operation selection, and operation/schema descriptions repeat part of that guidance. The exact serialized prompt/token breakdown cannot be reconstructed without the exact runtime config, request context, Ollama model/template and provider request capture. Do not infer that 649 is accounting corruption solely because the input is `Hi`; the planner schema and system prompt are sent on even a fresh greeting. `AGENT_TRACE` is unset locally and traces intentionally redact prompt/content.
+
+**Direct Ollama comparison.** A local direct call to `ollama run qwen3:8b --think=false --hidethinking --verbose "Hi"` reported prompt-eval count 17 and output-eval count 12. That is not apples-to-apples with SitePilot: direct inference omitted SitePilot planner instructions, structured output schema, backend catalog, and application context, and Ollama’s model template still contributes its own prompt. It demonstrates the overhead is in the SitePilot request path, but does not establish what portion of the reported 649 comes from each component.
+
+## Architecture and execution details
+
+- `AgentService.ask` supports a legacy/direct branch and a workflow branch. The legacy path can call `classifyUnresolvedRequest` after the agent call; workflow `respond` avoids that extra classification. Runtime/environment selection can therefore change invocation count.
+- The workflow planner has a long system instruction and a discriminated operation schema whose fields carry detailed descriptions. Structured output itself is appropriate for validated routing, but repeated instruction/schema content is a prompt-size target.
+- `mastra/factory.ts`’s general `SitePilot` instructions apply to direct/legacy agent usage. They are not the workflow planner instructions. Workflow grounding calls use a separate grounding instruction. This is not proof all prompt strings are sent on one request; treat the three prompt surfaces separately.
+- The runtime resolver centralizes provider/model/fallback selection. Avoid reimplementing routing in `AgentService`; keep provider selection in `src/mastra/runtime-model.ts`.
+- Usage recording has distinct wrappers for direct `generate`, `stream` step events, and workflow calls. Streaming fallback can record an invocation without usage if no step usage arrives. Verify provider-specific retries and stream termination semantics with fixture responses; no live retry/stream-provider matrix was run.
+- `src/agent/agent.workflow.ts` and service currently duplicate some orchestration/response concerns, but replacing the existing workflow or adding a framework is not justified.
+
+### Suggested module boundaries (incremental)
+
+```text
+agent.service.ts              HTTP-facing turn orchestration; legacy path during migration
+agent/turn-context.service.ts history, memory, evidence and selection loading
+agent/agent.workflow.ts       existing Mastra workflow and step coordination
+agent/response-persistence.ts assistant message and conversation-context persistence
+mastra/runtime-model.ts       runtime model resolution (keep existing)
+mastra/factory.ts             direct-agent construction and tool registration (keep existing)
+llm-admin/usage-recorder.ts   provider result normalization and best-effort persistence
+documents/smart-chunker.ts   format-aware chunk creation and provenance metadata
+```
+
+This is a proposal, not a broad refactor request. Start only when a change needs the boundary; retain current behavior and test the relevant callers.
+
+## Smart Chunker and ingestion
+
+The document processor parses PDF/DOCX/XLSX/CSV, calls `smartChunk`, stores `chunkingStrategy: 'structure-aware'` and `CHUNKER_VERSION='smart-1'`, then passes those chunks into TypeGraph ingestion. `TypegraphService.ingestDocument` assigns version/generation/chunk-derived IDs, spreads chunk metadata, and configures SDK chunking at 2,400 characters with zero overlap. Tested custom chunks were under that size, so the SDK’s second pass did not split them.
+
+The current chunker preserves page number, heading path, DOCX paragraph range, workbook/sheet, row span, cell range, deterministic chunk ID and content hash. Spreadsheet logic groups row/cell content with header/key-column context. These are application retrieval contracts. Replacing the custom chunker with generic splitting would lose some of these unless equivalent metadata enrichment remains.
+
+| Option | What it provides | Fit and cost for this repository |
+|---|---|---|
+| TypeGraph SDK native chunking (`@typegraph-ai/sdk@0.6.0`) | Paragraph/sentence/word-aware character splitting and no new dependency. TypeGraph documents built-in configurable chunking ([official docs](https://typegraph.ai/docs)). | Good for generic text and already used downstream. It does not produce this app’s page/heading/sheet/row/cell provenance. On tested custom chunks, it did not split further; native-only input produced larger/fewer chunks and loses structure-aware grouping. |
+| LangChain JS text splitters | Recursive character and token-oriented splitters; structural separators for Markdown and code ([official docs](https://github.com/langchain-ai/docs/blob/main/src/oss/integrations/splitters/index.mdx)). | Not installed. Generic text splitting could replace some paragraph/heading mechanics but requires retaining custom parser metadata and spreadsheet path. Adds dependency cost without demonstrated equivalent behavior. |
+| Unstructured | Element-aware/basic/by-title splitting, page boundary options, table isolation and table chunks ([official docs](https://unstructured.readthedocs.io/en/latest/core/chunking.html)). | Python-oriented and not installed. Potentially useful if ingestion moves to an Unstructured service; introducing a second runtime now is disproportionate. Its table metadata would still need to map to current row/cell identifiers and document versions. |
+| LlamaIndex TS | Sentence splitter with chunk size/overlap and metadata support ([official docs](https://jsr.io/@llamaindex/core/doc)). | Not installed. General text splitting does not demonstrate parity for current workbook row/cell references or versioned IDs; adds dependency without a measured win. |
+| Current Smart Chunker | Format-aware metadata plus deterministic IDs, currently tested against fixture-level PDF/DOCX/XLSX/CSV cases. | Best fit for preserving existing retrieval contracts. Keep it for now; target unit tests and narrow maintenance, not a replacement. |
+
+**Fixture comparison performed.** Used local authorized PDF, two DOCX files, and tracked CSV `agent_benchmark.csv`; parsed/chunked in memory and compared against the installed TypeGraph SDK native character chunker (2,400 chars, zero overlap). No content was printed in comparison output; no ingestion/reindex was performed. Summary:
+
+| Fixture | Parsed characters | Custom chunks | TypeGraph native chunks | Custom max chars | Metadata observed |
+|---|---:|---:|---:|---:|---|
+| PDF | 4,970 | 5 | 3 | 1,278 | page numbers |
+| DOCX A | 35,151 | 33 | 17 | 1,527 | paragraph ranges |
+| DOCX B | 20,980 | 90 | 10 | 777 | heading paths and paragraph ranges |
+| CSV | 70,550 | 59 | 30 | 797 | sheet, row and cell references on all 59 chunks |
+
+Counts indicate different granularity, not retrieval accuracy. Native chunks are larger and fewer; no retrieval relevance benchmark was run. No standalone XLS/XLSX fixture existed in local authorized files; synthetic XLSX behavior is covered by `test/smart-chunking.test.ts` (8/8 passed). The native splitter is not a substitute based on this comparison. No persisted chunks were migrated.
+
+## Observability and accounting
+
+Provider usage fields are persisted as supplied; `totalTokens` falls back to input + output only when the provider omits it. `accuracy` reports provider-reported when integer counts are present, otherwise unavailable. It does not locally tokenize prompts, which is correct for provider accounting. One caveat: a synthesized total should remain distinguishable from an upstream total if analytics needs to audit the distinction; the current row does not mark that field-level distinction.
+
+**Implemented low-risk fix:** usage persistence failure now emits one JSON warning with `event` and exception class only; no tenant/user IDs, IDs, prompts, documents, secrets or error messages. The existing “analytics must not fail generation” behavior remains. Added a regression test with fake private values to verify they are not logged. Targeted usage recorder tests passed (5/5).
+
+Safe follow-up diagnostics should continue to use allowlisted fields and redacted telemetry. Add provider contract tests for: response usage shapes, missing total/input/output, direct generate, each stream `step-finish`, stream ending without usage, thrown provider errors, retries, and provider/model switches. Confirm one persisted usage record per actual provider invocation and avoid counting a logical workflow as a single call when it made multiple model calls.
+
+## Security review: tracked dump
+
+`backups/sitepilot-original.dump` is a PostgreSQL custom-format dump, and Git tracks it despite the `backups` ignore rule. It was added in commit `39e35fe`; the message does not mention a database dump, so accidental broad staging is plausible but not proven. It contains private application records and password/session hashes. Automated pattern screening found no common credential formats; screening is not a guarantee that no other secret exists.
+
+**Remediation:** remove the file from the current repository and ensure it is ignored; replace the repository artifact with a synthetic fixture if a database fixture is needed. Coordinate with repository owners to assess exposure and rotate any related credentials. If the remote repository has already received this object, deleting it in a later commit does not remove historical copies. History rewriting and force-pushing are not automatic here; agree on an impact window, coordinate collaborators, then use an approved history-cleanup process and verify clones/caches. Do not restore or publish the dump as a test fixture.
+
+## Regression plan
+
+1. Preserve and run `test/llm-usage-recorder.test.ts` for redaction and failure isolation (done: 5/5).
+2. Run `test/smart-chunking.test.ts` for heading/page/table/row/cell metadata and stable identifiers (done: 8/8).
+3. Add mock-based planner prompt tests that assert greeting behavior is one planner invocation, no evidence tool call, and correct response; capture counts/lengths only, never prompt text in logs.
+4. Compare prompt token counts using the same Ollama model/version/options and identical SitePilot context before/after any prompt simplification; record provider-reported usage and raw request tokenization in a protected local test harness, not normal diagnostics.
+5. Add provider contract tests for direct, workflow, streaming, retries and provider switching; assert actual invocation count and usage persistence.
+6. Build authorized XLSX and CSV fixtures with multiple sheets, formulas, empty cells, long rows, Unicode, headings, and duplicate values. Validate metadata, deterministic IDs, chunk bounds, and retrieval citation/source references. Compare retrieval outcomes, not only chunk counts, before considering a replacement.
+7. If any future chunk format or ID algorithm changes, retain current document-version compatibility and test old/new version retrieval before a separately approved reindex.
+8. Remove the tracked database dump from current history only with repository-owner coordination and an explicitly approved history rewrite.
+
+## Verification and unresolved items
+
+- Usage recorder targeted tests: **5 passed**.
+- Smart chunking tests: **8 passed**.
+- Real fixture parse/chunk comparison: PDF, two DOCX, CSV; metadata/counts summarized above; no reindex.
+- Local direct Ollama baseline: Qwen3 8B reported 17 prompt-eval and 12 eval tokens; not equivalent to SitePilot request.
+- Dump inspection: archive listing and aggregate/schema/pattern scan only; no row content printed.
+- **Unverified:** exact SitePilot provider request for the reported `Hi`, matching persisted usage row, runtime DB override at time of request, stream/retry accounting against live providers, retrieval quality comparison, and real XLSX fixture behavior.
+- **GitNexus:** indexed repo `agent` was registered; impact analysis for `persistUsageEvent` showed critical downstream reach. Index was one commit stale and could not be refreshed due to lock permission error. Changes should be re-analyzed after resolving GitNexus lock permissions; stale/unknown results are not a clean risk verdict.

@@ -11,7 +11,7 @@ export function reportedUsage(value:any){
   const usage=value?.totalUsage??value?.usage??value?.payload?.output?.usage??value?.output?.usage;
   return usage&&typeof usage==='object'?usage:undefined;
 }
-export async function persistUsageEvent(prisma:PrismaService,record:Record<string,unknown>){try{await prisma.llmUsage.create({data:record as any});}catch{/* Analytics persistence cannot fail generation. */}}
+export async function persistUsageEvent(prisma:PrismaService,record:Record<string,unknown>){try{await prisma.llmUsage.create({data:record as any});}catch(error){console.warn(JSON.stringify({event:'llm_usage_persistence_failed',errorType:error instanceof Error?error.name:'unknown'}));}}
 export async function persistUsage(prisma:PrismaService,context:UsageContext,detail:{invocationId?:string;usage?:any;status:'success'|'failed';latencyMs:number|null;source:string;actualModel?:string;error?:unknown}){
   const usage=detail.usage;
   const hasCounts=!!usage&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','cachedTokens','reasoningTokens'].some(key=>Number.isInteger(usage[key]));

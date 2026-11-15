@@ -32,7 +32,7 @@ test('Nemotron planner JSON Schema omits propertyNames while preserving arbitrar
 test('planner schema retains every operation and runtime backend validation stays unchanged', () => {
   const schema = z.toJSONSchema(planLLMSchema) as { oneOf: Array<{ properties: Record<string, any> }> };
   const operations = schema.oneOf.map(branch => branch.properties.operation.const).sort();
-  assert.deepEqual(operations, ['aggregate', 'backend_tool', 'discover', 'list', 'lookup', 'respond', 'retrieve']);
+  assert.deepEqual(operations, ['aggregate', 'backend_tool', 'custom_tool', 'discover', 'list', 'lookup', 'respond', 'retrieve']);
 
   assert.equal(backendCallSchema.safeParse({ id: 'Invalid-ID', args: {} }).success, false);
   assert.equal(backendCallSchema.safeParse({ id: 'valid_id', args: { x: true } }).success, true);

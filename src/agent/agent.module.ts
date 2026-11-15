@@ -6,5 +6,6 @@ import { AgentController } from './agent.controller.js';
 import { AgentService } from './agent.service.js';
 import { ConversationContextService } from './conversation-context.service.js';
 import { UserMemoryService } from './user-memory.service.js';
-@Module({imports:[DocumentsModule, TypegraphModule],controllers:[AgentController],providers:[AgentService, BackendTools, ConversationContextService, UserMemoryService],exports:[BackendTools]})
+import { CustomToolsController } from './custom-tools.controller.js';
+@Module({imports:[DocumentsModule, TypegraphModule],controllers:[AgentController, CustomToolsController],providers:[AgentService, BackendTools, ConversationContextService, UserMemoryService],exports:[BackendTools]})
 export class AgentModule {}
