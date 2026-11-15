@@ -32,6 +32,20 @@ type ToolDefinition = {
 const DEFAULT_OUTPUT_SCHEMA = { type: 'object', properties: {}, required: [], additionalProperties: true };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOOL_ID = (id: string) => 'custom_' + id.replaceAll('-', '');
+const SENSITIVE_ARGUMENT_KEY = /(?:password|secret|token|authorization|cookie|api[_-]?key|credential|private[_-]?key)/i;
+const redactArguments = (value: unknown, credential: string, depth = 0): unknown => {
+  if (typeof value === 'string') return value
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[redacted]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,})\b/g, '[redacted]')
+    .replace(credential ? new RegExp(credential.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g') : /$^/, '[redacted]');
+  if (Array.isArray(value)) return depth < 8 ? value.map(item => redactArguments(item, credential, depth + 1)) : '[redacted]';
+  if (value && typeof value === 'object') {
+    if (depth >= 8) return '[redacted]';
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SENSITIVE_ARGUMENT_KEY.test(key) ? '[redacted]' : redactArguments(item, credential, depth + 1)]));
+  }
+  return value;
+};
 const idFromCall = (id: string) => id.startsWith('custom_') && /^[0-9a-f]{32}$/i.test(id.slice(7))
   ? id.slice(7).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5') : undefined;
 
@@ -125,6 +139,7 @@ export class BackendTools {
     let success = false;
     let errorCategory: string | null = null;
     let credential = '';
+    let safeArguments: unknown;
     try {
       const headers: Record<string, string> = {};
       if (row.authHeaderName) {
@@ -136,6 +151,7 @@ export class BackendTools {
         profile, path, queryMappings: row.queryMappings as Record<string, string>,
         inputSchema: row.inputSchema, outputSchema: row.outputSchema, args: call.args, headers,
         timeoutMs: row.timeoutMs, maxResponseBytes: row.maxResponseBytes, signal,
+        onValidatedArgs: args => { safeArguments = redactArguments(args, credential); },
       });
       success = true;
       return this.redactCredential(result.output, credential);
@@ -147,6 +163,7 @@ export class BackendTools {
         toolId: row.id, toolVersion: row.configurationVersion, logicalRequestId: context.logicalRequestId ?? randomUUID(),
         conversationId: context.conversationId ?? null, userId: principal.userId,
         latencyMs: Math.max(0, Math.round(performance.now() - started)), success, errorCategory,
+        arguments: safeArguments,
         isTest: context.isTest ?? false,
       } }).catch((error: unknown) => console.warn(JSON.stringify({ event: 'custom_tool_execution_log_failed', errorType: error instanceof Error ? error.name : 'unknown' })));
     }

@@ -386,6 +386,7 @@ model CustomToolExecution {
   toolId            String    @map("tool_id") @db.Uuid
   toolVersion       Int       @map("tool_version")
   logicalRequestId  String    @map("logical_request_id")
+  arguments         Json?
   conversationId    String?   @map("conversation_id") @db.Uuid
   userId            String?   @map("user_id")
   latencyMs         Int       @map("latency_ms")

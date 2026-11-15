@@ -60,8 +60,37 @@ test('custom execution rechecks enabled/version and logs only bounded metadata o
     assert.equal(history.length, 1);
     assert.equal(history[0].success, false);
     assert.equal(history[0].errorCategory, 'INVALID_ARGUMENTS');
+    assert.equal(history[0].arguments, undefined);
     assert.equal('args' in history[0], false);
     assert.equal('output' in history[0], false);
+  } finally {
+    if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
+    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
+  }
+});
+
+test('custom execution persists only schema-validated, redacted arguments with the request id', async () => {
+  const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
+  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({ crm: { baseUrl: 'https://api.example.com/v1', allowedHosts: ['api.example.com'] } });
+  const row = { ...dbTool(), inputSchema: {
+    type: 'object', properties: {
+      q: { type: 'string', maxLength: 100 }, apiKey: { type: 'string' }, contact: { type: 'string' },
+    }, required: ['q', 'apiKey', 'contact'], additionalProperties: false,
+  }, queryMappings: { q: 'q' }, path: '/../invalid', authSecretId: null };
+  const history: any[] = [];
+  const prisma = {
+    customTool: { findUnique: async () => row },
+    customToolExecution: { create: async ({ data }: any) => history.push(data) },
+  };
+  try {
+    const tools = new BackendTools(prisma as unknown as PrismaService);
+    const query = 'ابحث عن cafés في İstanbul';
+    const call = { id: 'custom_f9237c7864ae40df91c721e0915d2f15', args: { q: query, apiKey: 'private-key-value', contact: 'user@example.com' } };
+    await assert.rejects(tools.execute(call, principal, undefined, undefined, { logicalRequestId: 'request-ar-1' }), /INVALID_PATH/);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].logicalRequestId, 'request-ar-1');
+    assert.deepEqual(history[0].arguments, { q: query, apiKey: '[redacted]', contact: '[redacted]' });
+    assert.equal(JSON.stringify(history[0]).includes('private-key-value'), false);
   } finally {
     if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
     else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
