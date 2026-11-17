@@ -5,7 +5,6 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { TypegraphService } from "../typegraph/typegraph.service.js";
 import { StructuredDataService } from "../documents/structured-data.service.js";
-import { modelWithExplicitFallback } from "../agent/provider-errors.js";
 import type { RuntimeModelSnapshot } from './runtime-model.js';
 import { asMastraModel } from './runtime-model.js';
 
@@ -139,8 +138,7 @@ export function createSitePilotAgent(
   });
 
   const snapshot = runtime ?? { provider: config.modelProvider, model: config.model, fallback: config.modelFallback, ollamaThink: config.ollamaThink };
-  const { primary: primaryModel, fallback: fallbackModel } = asMastraModel(snapshot);
-  const model = modelWithExplicitFallback(primaryModel, fallbackModel, snapshot.provider);
+  const { primary: model } = asMastraModel(snapshot);
   return new Agent({
     id: "sitepilot-agent",
     name: "SitePilot RAG Agent",

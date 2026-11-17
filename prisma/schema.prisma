@@ -337,6 +337,23 @@ model LlmUsage {
   @@map("llm_usage")
 }
 
+model PlannerDiagnostic {
+  requestId                       String   @id @map("request_id") @db.VarChar(36)
+  tenantId                        String   @map("tenant_id")
+  availableToolIds                Json     @default("[]") @map("available_tool_ids")
+  selectedOperation               String   @map("selected_operation") @db.VarChar(40)
+  selectedToolId                  String?  @map("selected_tool_id") @db.VarChar(120)
+  schemaValidationOutcome         String   @map("schema_validation_outcome") @db.VarChar(24)
+  argumentSchemaValidationOutcome String?  @map("argument_schema_validation_outcome") @db.VarChar(24)
+  fallbackReason                  String?  @map("fallback_reason") @db.VarChar(80)
+  validationIssues                Json?    @map("validation_issues")
+  createdAt                       DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([createdAt])
+  @@map("planner_diagnostics")
+}
+
 model CustomToolSecret {
   id         String      @id @default(uuid()) @db.Uuid
   ciphertext String      @db.Text

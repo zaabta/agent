@@ -32,7 +32,7 @@ export class LlmAdminService implements OnModuleInit {
       if(!(key in defaults)||typeof value!=='string'||value.length>300) throw new BadRequestException('INVALID_RUNTIME_SETTING');
       if(key==='MASTRA_PROVIDER'&&!['google','ollama','openrouter','openai'].includes(value)) throw new BadRequestException('INVALID_PROVIDER');
       if(key==='OLLAMA_THINK'&&!['true','false'].includes(value)) throw new BadRequestException('INVALID_BOOLEAN_SETTING');
-      if(['AGENT_HISTORY_MESSAGES','AGENT_HISTORY_MESSAGE_CHARS','AGENT_REQUEST_TIMEOUT_MS','TYPEGRAPH_MIN_SCORE'].includes(key)){const n=Number(value);if(!Number.isFinite(n)||(key==='TYPEGRAPH_MIN_SCORE'&&(n<0||n>1))||(key!=='TYPEGRAPH_MIN_SCORE'&&n<1))throw new BadRequestException('INVALID_NUMERIC_SETTING');}
+      if(['AGENT_HISTORY_MESSAGES','AGENT_HISTORY_MESSAGE_CHARS','AGENT_REQUEST_TIMEOUT_MS','TYPEGRAPH_MIN_SCORE'].includes(key)){const n=Number(value);if(!Number.isFinite(n)||(key==='TYPEGRAPH_MIN_SCORE'&&(n<0||n>1))||(key==='AGENT_REQUEST_TIMEOUT_MS'&&(n<1000||n>600000))||(key!=='TYPEGRAPH_MIN_SCORE'&&key!=='AGENT_REQUEST_TIMEOUT_MS'&&n<1))throw new BadRequestException('INVALID_NUMERIC_SETTING');}
       const old=await this.prisma.runtimeSetting.findUnique({where:{key}});
       writes.push(this.prisma.runtimeSettingAudit.create({data:{key,oldValue:old?.value??null,newValue:value,updatedBy:userId}}));
       writes.push(this.prisma.runtimeSetting.upsert({where:{key},create:{key,value,updatedBy:userId},update:{value,updatedBy:userId}}));

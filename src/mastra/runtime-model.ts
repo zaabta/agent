@@ -4,12 +4,12 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { effectiveCredential, type CloudProvider } from '../llm-admin/provider-credentials.js';
 
-export interface RuntimeModelSnapshot { provider:string; model:string; fallback?:string; ollamaThink:boolean; apiKey?:string; }
+export interface RuntimeModelSnapshot { provider:string; model:string; fallback?:string; ollamaThink:boolean; apiKey?:string; requestTimeoutMs?:number; }
 
 /** Read authoritative settings for every logical request; never cache across requests/instances. */
 export async function resolveRuntimeModel(prisma:PrismaService):Promise<RuntimeModelSnapshot>{
-  if(!(prisma as any).runtimeSetting||!(prisma as any).registeredModel)return {provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink};
-  const rows=await prisma.runtimeSetting.findMany({where:{key:{in:['MASTRA_PROVIDER','MASTRA_MODEL','MASTRA_FALLBACK_MODEL','OLLAMA_THINK']}}});
+  if(!(prisma as any).runtimeSetting||!(prisma as any).registeredModel)return {provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink,requestTimeoutMs:config.agentTimeoutMs};
+  const rows=await prisma.runtimeSetting.findMany({where:{key:{in:['MASTRA_PROVIDER','MASTRA_MODEL','MASTRA_FALLBACK_MODEL','OLLAMA_THINK','AGENT_REQUEST_TIMEOUT_MS']}}});
   const v=Object.fromEntries(rows.map(r=>[r.key,r.value]));
   const provider=v.MASTRA_PROVIDER??config.modelProvider; const model=v.MASTRA_MODEL??config.model;
   const registered=await prisma.registeredModel.findUnique({where:{provider_modelId:{provider,modelId:model}}});
@@ -19,7 +19,7 @@ export async function resolveRuntimeModel(prisma:PrismaService):Promise<RuntimeM
   const apiKey = ['google','openrouter','openai'].includes(provider)
     ? (await effectiveCredential(prisma, provider as CloudProvider)).key
     : undefined;
-  return {provider,model,fallback,ollamaThink:(v.OLLAMA_THINK??String(config.ollamaThink))==='true',apiKey};
+  return {provider,model,fallback,ollamaThink:(v.OLLAMA_THINK??String(config.ollamaThink))==='true',apiKey,requestTimeoutMs:Number(v.AGENT_REQUEST_TIMEOUT_MS??config.agentTimeoutMs)};
 }
 
 function providerModel(provider:string,id:string,apiKey?:string) {

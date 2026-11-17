@@ -19,6 +19,7 @@ type ReadTool = {
   id: string;
   description: string;
   inputSchema: object;
+  validateArgs: (args: unknown) => boolean;
   authorize: (principal: AuthPrincipal) => boolean;
   execute: (args: unknown, principal: AuthPrincipal, signal: AbortSignal) => Promise<string>;
 };
@@ -54,7 +55,7 @@ export class BackendTools {
   private readonly tools = new Map<string, ReadTool>();
   constructor(@Optional() @Inject(PrismaService) private readonly prisma?: PrismaService) {}
 
-  register<T extends z.ZodType>(tool: Omit<ReadTool, 'inputSchema' | 'execute'> & {
+  register<T extends z.ZodType>(tool: Omit<ReadTool, 'inputSchema' | 'execute' | 'validateArgs'> & {
     input: T;
     execute: (args: z.output<T>, principal: AuthPrincipal, signal: AbortSignal) => Promise<string>;
   }) {
@@ -63,34 +64,29 @@ export class BackendTools {
     if (this.tools.has(tool.id) || this.tools.size >= 16) throw new Error('BACKEND_TOOL_REGISTRATION_REJECTED');
     const inputSchema = z.toJSONSchema(tool.input);
     if (JSON.stringify(inputSchema).length > 2000) throw new Error('BACKEND_TOOL_SCHEMA_TOO_LARGE');
-    this.tools.set(tool.id, { id: tool.id, authorize: tool.authorize, description, inputSchema,
+    this.tools.set(tool.id, { id: tool.id, authorize: tool.authorize, description, inputSchema, validateArgs: args => tool.input.safeParse(args).success,
       execute: (args, principal, signal) => tool.execute(tool.input.parse(args) as z.output<T>, principal, signal) });
   }
 
-  async catalog(principal: AuthPrincipal, query = '') {
+  async catalog(principal: AuthPrincipal) {
     const built = [...this.tools.values()].filter(tool => tool.authorize(principal)).map(tool => ({ id: tool.id, description: tool.description, input: tool.inputSchema }));
     if (!this.prisma) return built;
     let profiles: ReturnType<typeof connectionProfiles> = {};
     try { profiles = connectionProfiles(); } catch { /* Direct endpoints do not use server profiles. */ }
     const rows = principal.userId && principal.authMethod === 'jwt'
-      ? await (this.prisma as any).customTool.findMany({ where: { enabled: true, archivedAt: null }, orderBy: { name: 'asc' } }) : [];
-    const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? [])].slice(0, 50);
+      ? await (this.prisma as any).customTool.findMany({ where: { enabled: true, archivedAt: null }, orderBy: { name: 'asc' }, take: 1000 }) : [];
     const candidates = rows.filter((row: any) => row.endpointUrl || profiles[row.connectionProfile]).map((row: any) => ({
       id: TOOL_ID(row.id), name: row.name, displayName: row.displayName, description: row.description, input: row.inputSchema,
       version: row.configurationVersion,
     }));
-    candidates.sort((a: any, b: any) => {
-      const score = (tool: any) => terms.reduce((sum, term) => sum + (String(tool.name + ' ' + tool.displayName + ' ' + tool.description).toLowerCase().includes(term) ? 1 : 0), 0);
-      return score(b) - score(a) || a.name.localeCompare(b.name);
-    });
-    const selected = candidates.slice(0, 12);
     const bounded: any[] = [];
     let promptSize = 0;
-    for (const tool of selected) {
-      const size = JSON.stringify(tool).length;
-      if (promptSize + size <= 24000 || bounded.length === 0) { bounded.push(tool); promptSize += size; }
+    for (const tool of [...built, ...candidates]) {
+      if (bounded.length >= 48) break;
+      const size = Buffer.byteLength(JSON.stringify(tool), 'utf8');
+      if (size <= 24000 && promptSize + size <= 24000) { bounded.push(tool); promptSize += size; }
     }
-    return [...built, ...bounded];
+    return bounded;
   }
 
   async hasEnabledTools(principal: AuthPrincipal) {
@@ -103,10 +99,11 @@ export class BackendTools {
     } catch { return false; }
   }
 
-  async execute(call: z.infer<typeof backendCallSchema>, principal: AuthPrincipal, parentSignal?: AbortSignal, onStart?: () => Promise<void>, context: { logicalRequestId?: string; conversationId?: string; snapshotVersion?: number; isTest?: boolean; allowDisabled?: boolean } = {}): Promise<unknown> {
+  async execute(call: z.infer<typeof backendCallSchema>, principal: AuthPrincipal, parentSignal?: AbortSignal, onStart?: () => Promise<void>, context: { logicalRequestId?: string; conversationId?: string; snapshotVersion?: number; isTest?: boolean; allowDisabled?: boolean; onSchemaValidation?: (outcome: 'valid' | 'invalid') => void } = {}): Promise<unknown> {
     const tool = this.tools.get(call.id);
     if (tool) {
       if (!tool.authorize(principal)) return undefined;
+      context.onSchemaValidation?.(tool.validateArgs(call.args) ? 'valid' : 'invalid');
       const timeout = AbortSignal.timeout(15_000);
       const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
       signal.throwIfAborted();
@@ -151,6 +148,7 @@ export class BackendTools {
         profile, path, queryMappings: row.queryMappings as Record<string, string>,
         inputSchema: row.inputSchema, outputSchema: row.outputSchema, args: call.args, headers,
         timeoutMs: row.timeoutMs, maxResponseBytes: row.maxResponseBytes, signal,
+        onInputValidation: context.onSchemaValidation,
         onValidatedArgs: args => { safeArguments = redactArguments(args, credential); },
       });
       success = true;

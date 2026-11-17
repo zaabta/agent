@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 import { Agent } from '@mastra/core/agent';
 import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
+import { readLocalWorkflowDiagnostic } from '../src/mastra/observability.js';
+import { safeAgentFailure } from '../src/agent/provider-errors.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -35,9 +37,20 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         return 'Registered employees: 42';
       },
     });
-    const workflowTools = scenario === 'custom-independent' ? {
-      catalog: async () => [{ id: 'custom_weather', name: 'weather', description: 'Read the weather API for a city', input: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }, version: 1 }],
-      execute: async (call: any) => { assert.deepEqual(call, { id: 'custom_weather', args: { city: 'Istanbul' } }); return '22 C'; },
+    const dynamicCatalog = [
+      { id: 'custom_11111111111141118111111111111111', name: 'weather_feed', displayName: 'Weather feed', description: 'Return current weather for a city, including temperature and conditions.', input: { type: 'object', properties: { city: { type: 'string', description: 'City name' } }, required: ['city'], additionalProperties: false }, version: 1 },
+      { id: 'custom_22222222222242228222222222222222', name: 'fx_rates', displayName: 'Foreign exchange rates', description: 'Return the latest exchange rate between two ISO currency codes.', input: { type: 'object', properties: { base: { type: 'string' }, quote: { type: 'string' } }, required: ['base', 'quote'], additionalProperties: false }, version: 3 },
+      { id: 'custom_33333333333343338333333333333333', name: 'air_quality', displayName: 'Air quality', description: 'Return current outdoor air quality index and pollutant levels for a city.', input: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }, version: 2 },
+    ];
+    const dynamicScenarios = ['custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-repair'];
+    const workflowTools = dynamicScenarios.includes(scenario) ? {
+      catalog: async () => dynamicCatalog,
+      execute: async (call: any, _principal: any, _signal: any, _onStart: any, context: any) => {
+        context?.onSchemaValidation?.('valid');
+        if (scenario === 'custom-independent' || scenario === 'custom-ar') assert.deepEqual(call, { id: dynamicCatalog[0]!.id, args: { city: 'Istanbul' } });
+        if (scenario === 'custom-en') assert.deepEqual(call, { id: dynamicCatalog[1]!.id, args: { base: 'EUR', quote: 'JPY' } });
+        return scenario === 'custom-en' ? { rate: 160.25 } : { temperatureC: 22, condition: 'clear' };
+      },
     } as any : backendTools;
     const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
       const prompt = messages[0].content;
@@ -52,11 +65,29 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario.startsWith('backend-')) {
           if (scenario === 'backend-denied') assert.doesNotMatch(prompt, /Count registered employees/);
           else assert.match(prompt, /Count registered employees/);
-          return { object: { operation: 'backend_tool', backendCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
+          return { object: { operation: 'tool_call', toolCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
         }
-        if (scenario === 'custom-independent') {
-          assert.match(prompt, /Read the weather API for a city/);
-          return { object: { operation: 'custom_tool', customToolCall: { id: 'custom_weather', args: { city: 'Istanbul' } } } } as any;
+        if (scenario === 'custom-independent' || scenario === 'custom-ar') {
+          assert.match(prompt, /Return current weather for a city/);
+          assert.match(prompt, /Return the latest exchange rate/);
+          assert.match(prompt, /Return current outdoor air quality/);
+          return { object: { operation: 'tool_call', toolCall: { id: dynamicCatalog[0]!.id, args: { city: 'Istanbul' } } } } as any;
+        }
+        if (scenario === 'custom-en') {
+          assert.match(prompt, /Return the latest exchange rate between two ISO currency codes/);
+          assert.match(prompt, /"base":\s*\{\s*"type":"string"/);
+          return { object: { operation: 'tool_call', toolCall: { id: dynamicCatalog[1]!.id, args: { base: 'EUR', quote: 'JPY' } } } } as any;
+        }
+        if (scenario === 'custom-ambiguous') return { object: { operation: 'clarify', reply: 'Do you mean weather or air quality?' } } as any;
+        if (scenario === 'custom-irrelevant') return { object: { operation: 'retrieve', retrievalQuery: 'evacuation instructions in the safety handbook' } } as any;
+        if (scenario === 'planner-invalid') return { object: { operation: 'invalid_operation' } } as any;
+        if (scenario === 'planner-repair') {
+          if (prompt.includes('Validation findings from the previous plan:')) {
+            assert.match(prompt, /toolCall/);
+            assert.doesNotMatch(prompt, /invalid id/i);
+            return { object: { operation: 'tool_call', toolCall: { id: dynamicCatalog[0]!.id, args: { city: 'Oslo' } } } } as any;
+          }
+          return { object: { operation: 'tool_call', toolCall: { id: 'invalid id', args: { city: 'Oslo' } } } } as any;
         }
         if (scenario === 'mixed-dependent') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', columnName: 'Employee', groupLimit: 2, filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?', searchRankedGroups: true } } as any;
         if (scenario === 'mixed' && !prompt.includes('Authorized schema:')) return { object: { operation: 'lookup', standaloneQuestion: 'Count violations from violations.xlsx' } } as any;
@@ -68,9 +99,10 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario.startsWith('followup')) return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'How can I help?' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
       }
-      if (scenario === 'custom-independent') {
-        assert.match(messages[0].content, /22 C/);
-        return { object: { answer: 'Istanbul is 22 C.' } } as any;
+      if (dynamicScenarios.includes(scenario) && scenario !== 'custom-irrelevant') {
+        if (scenario === 'custom-en') { assert.match(messages[0].content, /160.25/); return { object: { answer: 'The EUR to JPY rate is 160.25.' } } as any; }
+        assert.match(messages[0].content, /temperatureC/);
+        return { object: { answer: scenario === 'custom-ar' ? 'درجة الحرارة في إسطنبول 22 مئوية.' : 'Istanbul is 22 C.' } } as any;
       }
       modelEvents.push('citation-verifier');
       const ids = [...prompt.matchAll(/(?:^|\n)(E\d+):/g)].map((m: any) => m[1]);
@@ -140,7 +172,13 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const followupMessage = scenario === 'followup-ar' ? 'ماذا عن المخاطر؟'
         : scenario === 'followup-tr' ? 'Peki proje riskleri?'
           : 'What about the project risks?';
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : scenario === 'planner-repair' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      if (scenario === 'planner-invalid') {
+        assert.equal(result.status, 'failed');
+        assert.equal(safeAgentFailure(result.error)?.code, 'INVALID_MODEL_OUTPUT');
+        assert.equal(calls.length, 0);
+        return;
+      }
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
       if (scenario === 'narrative') {
@@ -171,11 +209,27 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.ok(result.result.toolsCalled.includes('documentSearch'));
         assert.deepEqual(result.result.sources.map(source => source.filename), ['risks.md']);
       }
-      else if (scenario === 'custom-independent') {
-        assert.match(result.result.answer, /22 C/);
-        assert.ok(result.result.toolsCalled.includes('custom_weather'));
+      else if (['custom-independent', 'custom-en', 'custom-ar'].includes(scenario)) {
+        const expectedId = scenario === 'custom-en' ? dynamicCatalog[1]!.id : dynamicCatalog[0]!.id;
+        assert.ok(result.result.toolsCalled.includes(expectedId));
         assert.deepEqual(calls, []);
+        const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
+        assert.deepEqual(diagnostic?.availableToolIds, dynamicCatalog.map(tool => tool.id));
+        assert.equal(diagnostic?.selectedOperation, 'tool_call');
+        assert.equal(diagnostic?.selectedToolId, expectedId);
+        assert.equal(diagnostic?.schemaValidationOutcome, 'valid');
+        assert.equal(diagnostic?.argumentSchemaValidationOutcome, 'valid');
+        assert.ok(Number(diagnostic?.catalogEstimatedTokens) > 0);
       }
+      else if (scenario === 'planner-repair') {
+        const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
+        assert.ok(result.result.toolsCalled.includes(dynamicCatalog[0]!.id));
+        assert.equal(modelEvents.filter(event => event === 'planner').length, 2);
+        assert.equal(diagnostic?.schemaValidationOutcome, 'valid');
+        assert.deepEqual(diagnostic?.validationIssues, [{ attempt: 1, branch: 'tool_call', path: 'toolCall.id', code: 'invalid_format' }]);
+      }
+      else if (scenario === 'custom-ambiguous') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(result.result.toolsCalled, []); assert.deepEqual(calls, []); }
+      else if (scenario === 'custom-irrelevant') { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.toolsCalled.some((id: string) => dynamicCatalog.some(tool => tool.id === id)), false); }
       else if (scenario === 'backend-denied' || scenario === 'backend-missing') {
         assert.equal(result.result.outcome, 'clarification');
         assert.deepEqual(result.result.toolsCalled, []);

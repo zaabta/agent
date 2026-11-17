@@ -7,8 +7,7 @@ import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
 import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InstallationOwnerOnly } from '../auth/installation-owner.decorator.js';
-import { readTenantTrace } from '../mastra/observability.js';
-import { safeProviderClientResponse, safeProviderFailure } from './provider-errors.js';
+import { safeAgentClientResponse, safeAgentErrorMessage, safeAgentFailure } from './provider-errors.js';
 import { AgentRunCancelledError, AgentRunCapacityError } from './active-run-registry.js';
 
 interface AgentBody {
@@ -34,9 +33,9 @@ export class AgentController {
     try {
       return await this.agent.ask(message, conversationId, principal);
     } catch (error) {
-      const provider = safeProviderClientResponse(error);
-      if (!provider) throw error;
-      throw new HttpException(provider.body, provider.statusCode);
+      const failure = safeAgentClientResponse(error);
+      if (!failure) throw error;
+      throw new HttpException(failure.body, failure.statusCode);
     }
   }
 
@@ -95,18 +94,18 @@ export class AgentController {
         return;
       }
       if (!response.destroyed && !response.writableEnded && !controller.signal.reason?.message?.includes('CLIENT_DISCONNECTED')) {
-        const provider = safeProviderFailure(error);
+        const failure = safeAgentFailure(error);
         const modelFailure = error instanceof Error && error.message === 'MODEL_STREAM_FAILED';
         const capacity = error instanceof AgentRunCapacityError ? error : undefined;
         await write('error', {
-          code: timedOut ? 'REQUEST_TIMEOUT' : capacity?.code ?? provider?.code ?? (modelFailure ? 'MODEL_ERROR' : 'AGENT_REQUEST_FAILED'),
-          message: timedOut ? 'The request timed out.' : provider?.code === 'PROVIDER_DAILY_QUOTA_EXHAUSTED'
-            ? 'The AI service has reached its daily request limit. Please try again after the quota resets.'
-            : capacity?.message ?? 'The agent request could not be completed.',
-          recoverable: provider?.retryable ?? Boolean(capacity),
-          ...(provider ? { retryable: provider.retryable } : {}),
+          code: timedOut ? 'TIMEOUT' : capacity?.code ?? failure?.code ?? (modelFailure ? 'CONNECTION_FAILED' : 'AGENT_REQUEST_FAILED'),
+          message: timedOut ? safeAgentErrorMessage('TIMEOUT') : failure ? safeAgentErrorMessage(failure.code) : capacity?.message ?? 'The agent request could not be completed.',
+          recoverable: failure?.retryable ?? Boolean(capacity),
+          ...(failure ? { retryable: failure.retryable } : {}),
           ...(capacity ? { retryable: true, retryAfterMs: 1000 } : {}),
-          ...(provider?.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}),
+          ...(failure?.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
+          ...(failure?.requestId ? { requestId: failure.requestId } : {}),
+          ...(failure?.telemetry ? { telemetry: failure.telemetry } : failure ? { telemetry: { providerErrors: failure.code === 'INVALID_MODEL_OUTPUT' || failure.code === 'TOOL_EXECUTION_FAILED' ? 0 : 1 } } : {}),
           discardProvisional: true,
         }, true);
         response.end();
@@ -230,7 +229,7 @@ export class AgentController {
   @ApiNotFoundResponse({ description: 'TRACE_NOT_FOUND.' })
   async trace(@Param('traceId') traceId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!/^[a-f0-9]{32}$/i.test(traceId)) throw new NotFoundException('TRACE_NOT_FOUND');
-    const result = await readTenantTrace(traceId, principal.tenantId);
+    const result = await this.agent.readTrace(traceId, principal.tenantId);
     if (!result) throw new NotFoundException('TRACE_NOT_FOUND');
     return result;
   }

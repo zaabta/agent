@@ -125,13 +125,15 @@ export function safeToolPath(baseUrl: URL, path: string) {
 export async function executeHttpTool(input: {
   profile: ConnectionProfile; path: string; queryMappings: Record<string, string>; inputSchema: unknown;
   outputSchema: unknown; args: unknown; headers?: Record<string, string>; timeoutMs: number; maxResponseBytes: number; signal?: AbortSignal;
+  onInputValidation?: (outcome: 'valid' | 'invalid') => void;
   onValidatedArgs?: (args: Record<string, unknown>) => void;
 }) {
   const inputValidator = jsonSchema(input.inputSchema);
   const outputValidator = jsonSchema(input.outputSchema);
   const inputProperties = (input.inputSchema as any).properties as Record<string, unknown>;
   let args: Record<string, unknown>;
-  try { args = inputValidator.parse(input.args) as Record<string, unknown>; input.onValidatedArgs?.(args); } catch { throw new CustomToolError('INVALID_ARGUMENTS'); }
+  try { args = inputValidator.parse(input.args) as Record<string, unknown>; input.onInputValidation?.('valid'); input.onValidatedArgs?.(args); }
+  catch { input.onInputValidation?.('invalid'); throw new CustomToolError('INVALID_ARGUMENTS'); }
   const url = safeToolPath(input.profile.baseUrl, input.path);
   for (const [parameter, key] of Object.entries(input.queryMappings)) {
     if (!/^[A-Za-z0-9_.~-]{1,80}$/.test(parameter) || !Object.hasOwn(inputProperties, key)) throw new CustomToolError('INVALID_QUERY_MAPPING');

@@ -16,20 +16,24 @@ const dbTool = () => ({
 });
 const principal = { userId: 'user-1', tenantId: 'tenant-1', authMethod: 'jwt' as const };
 
-test('custom catalog is dynamic, bounded, and excludes built-in Agent tools', async () => {
+test('custom catalog discovers enabled integrations independently of request keywords', async () => {
   const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
   process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({ crm: { baseUrl: 'https://api.example.com/v1', allowedHosts: ['api.example.com'] } });
-  const rows = [dbTool(), { ...dbTool(), id: '11111111-1111-4111-8111-111111111111', name: 'disabled_tool', enabled: false }];
+  const rows = [
+    dbTool(),
+    { ...dbTool(), id: '11111111-1111-4111-8111-111111111111', name: 'disabled_tool', enabled: false },
+    { ...dbTool(), id: '22222222-2222-4222-8222-222222222222', name: 'exchange_rate', description: 'Retrieve foreign exchange rates between currency codes.' },
+  ];
   const prisma = { customTool: { findMany: async ({ where }: any) => rows.filter(row => (!where.enabled || row.enabled) && (!where.archivedAt || !row.archivedAt)) } };
   try {
     const tools = new BackendTools(prisma as unknown as PrismaService);
-    const catalog = await tools.catalog(principal, 'search customer records');
-    assert.deepEqual(catalog.map(item => item.id), ['custom_f9237c7864ae40df91c721e0915d2f15']);
+    const catalog = await tools.catalog(principal);
+    assert.deepEqual(catalog.map(item => item.id), ['custom_f9237c7864ae40df91c721e0915d2f15', 'custom_22222222222242228222222222222222']);
     assert.equal((catalog[0] as any).version, 4);
     assert.equal(JSON.stringify(catalog).includes('secret-ref'), false);
     assert.equal(await tools.hasEnabledTools(principal), true);
     rows[1]!.enabled = true;
-    assert.equal((await tools.catalog(principal, 'disabled')).length, 2);
+    assert.equal((await tools.catalog(principal)).length, 3);
     const empty = new BackendTools({ customTool: { findMany: async () => [] } } as unknown as PrismaService);
     assert.deepEqual(await empty.catalog(principal), []);
   } finally {
@@ -54,9 +58,12 @@ test('custom execution rechecks enabled/version and logs only bounded metadata o
     assert.equal(await tools.execute(call, principal), undefined);
     row.enabled = true;
     await assert.rejects(tools.execute(call, principal, undefined, undefined, { snapshotVersion: 3 }), /TOOL_CONFIGURATION_CHANGED/);
+    const validation: string[] = [];
     await assert.rejects(tools.execute(call, principal, undefined, undefined, {
       logicalRequestId: 'request-1', conversationId: '00000000-0000-4000-8000-000000000001', snapshotVersion: 4,
+      onSchemaValidation: outcome => validation.push(outcome),
     }), /INVALID_ARGUMENTS/);
+    assert.deepEqual(validation, ['invalid']);
     assert.equal(history.length, 1);
     assert.equal(history[0].success, false);
     assert.equal(history[0].errorCategory, 'INVALID_ARGUMENTS');
@@ -147,4 +154,15 @@ test('direct endpoint tools remain discoverable without connection-profile confi
     if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
     else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
   }
+});
+
+test('tool catalogs stay within entry and UTF-8 prompt-size bounds', async () => {
+  const rows = Array.from({ length: 100 }, (_, index) => ({
+    ...dbTool(), id: `a${String(index).padStart(7, '0')}-1111-4111-8111-111111111111`,
+    name: `tool_${String(index).padStart(3, '0')}`, endpointUrl: 'https://api.example.com/test', connectionProfile: 'direct',
+  }));
+  const tools = new BackendTools({ customTool: { findMany: async () => rows } } as unknown as PrismaService);
+  const catalog = await tools.catalog(principal);
+  assert.ok(catalog.length <= 48);
+  assert.ok(Buffer.byteLength(JSON.stringify(catalog), 'utf8') <= 24_000);
 });

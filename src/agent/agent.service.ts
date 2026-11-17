@@ -13,9 +13,9 @@ import type { StructuredSource } from '../documents/structured-data.service.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { isDocumentInventoryIntent } from './request-fast-path.js';
 import { z } from 'zod';
-import { createAgentWorkflow } from './agent.workflow.js';
-import { recordWorkflowDiagnostic } from '../mastra/observability.js';
-import { safeProviderFailure } from './provider-errors.js';
+import { createAgentWorkflow, type PlannerRoutingDiagnostic } from './agent.workflow.js';
+import { persistPlannerDiagnostic, readTenantTrace, recordWorkflowDiagnostic } from '../mastra/observability.js';
+import { AgentRequestFailure, safeAgentFailure, withProviderRetry } from './provider-errors.js';
 import { ActiveAgentRunRegistry, AgentRunCancelledError } from './active-run-registry.js';
 import { ConversationContextService } from './conversation-context.service.js';
 import { conversationEntitiesSchema, conversationEvidenceReferencesSchema } from './conversation-context.js';
@@ -198,9 +198,36 @@ export class AgentService implements OnModuleDestroy {
     await this.activeRuns.shutdown();
   }
 
+  private withProviderHandling<T extends object>(agent: T, runtime: RuntimeModelSnapshot): T {
+    const timeoutMs = Math.max(1_000, Math.min(60_000, Number.isFinite(runtime.requestTimeoutMs) ? runtime.requestTimeoutMs! : config.agentTimeoutMs));
+    return new Proxy(agent, {
+      get: (target, property) => {
+        if (property === 'generate') return (messages: unknown, options: Record<string, unknown> = {}) => withProviderRetry(
+          signal => (Reflect.get(target, property, target) as (...args: any[]) => Promise<unknown>).call(target, messages, { ...options, abortSignal: signal, maxRetries: 0 }),
+          { signal: options.abortSignal as AbortSignal | undefined, timeoutMs },
+        );
+        if (property === 'stream') return (...args: any[]) => {
+          const options = (args[1] ?? {}) as Record<string, unknown>;
+          const timeoutSignal = AbortSignal.timeout(timeoutMs);
+          args[1] = { ...options, abortSignal: options.abortSignal instanceof AbortSignal ? AbortSignal.any([options.abortSignal, timeoutSignal]) : timeoutSignal, maxRetries: 0 };
+          return (Reflect.get(target, property, target) as (...args: any[]) => unknown).apply(target, args);
+        };
+        return Reflect.get(target, property, target);
+      },
+    });
+  }
+
   private trace(event: string, detail: Record<string, unknown>) {
     if (!config.agentTrace) return;
     console.info(JSON.stringify({ type: 'sitepilot-agent-trace', event, ...detail }));
+  }
+
+  private persistPlannerDiagnostic(diagnostic: PlannerRoutingDiagnostic) {
+    void persistPlannerDiagnostic(this.prisma, diagnostic);
+  }
+
+  readTrace(traceId: string, tenantId: string) {
+    return readTenantTrace(traceId, tenantId, this.prisma);
   }
 
   private traceArgs(value: unknown): unknown {
@@ -485,7 +512,7 @@ export class AgentService implements OnModuleDestroy {
         timing: { retrievalMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) } };
     }
 
-    const agent = instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 2, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime});
+    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime);
     if (config.agentTrace) {
       this.trace('tool-catalog', { modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
     }
@@ -595,6 +622,8 @@ export class AgentService implements OnModuleDestroy {
     };
     } catch (error) {
       await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      const failure = safeAgentFailure(error);
+      if (failure) throw new AgentRequestFailure(failure.code, { requestId: turn.assistantMessageId, retryable: failure.retryable, retryAfterMs: failure.retryAfterMs, telemetry: failure.telemetry });
       throw error;
     }
   }
@@ -602,7 +631,7 @@ export class AgentService implements OnModuleDestroy {
   private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal, runtime: RuntimeModelSnapshot) {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
-    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs), {}, this.backendTools, runtime, record => persistUsageEvent(this.prisma,record), turn.conversationId);
+    const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs), { onPlannerDiagnostic: diagnostic => this.persistPlannerDiagnostic(diagnostic) }, this.backendTools, runtime, record => persistUsageEvent(this.prisma,record), turn.conversationId);
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
     try {
       const run = await workflow.createRun();
@@ -617,9 +646,10 @@ export class AgentService implements OnModuleDestroy {
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
     } catch (error) {
-      const provider = safeProviderFailure(error);
+      const provider = safeAgentFailure(error);
       recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'workflow-execution', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: 'failure' });
       await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, 'failed').catch(() => undefined);
+      if (provider) throw new AgentRequestFailure(provider.code, { requestId, retryable: provider.retryable, retryAfterMs: provider.retryAfterMs, telemetry: provider.telemetry });
       throw error;
     }
   }
@@ -643,6 +673,7 @@ export class AgentService implements OnModuleDestroy {
     write: EventWriter,
     principal: AuthPrincipal,
   ): Promise<AgentStreamResult> {
+    const startedAt = performance.now();
     const runtime = await resolveRuntimeModel(this.prisma);
     const run = this.activeRuns.create(principal);
     const runSignal = AbortSignal.any([abortSignal, run.controller.signal]);
@@ -659,6 +690,13 @@ export class AgentService implements OnModuleDestroy {
         throw new AgentRunCancelledError(run.runId, Math.max(0, Date.now() - (run.cancelRequestedAtMs ?? Date.now())));
       }
       this.activeRuns.finish(run.runId, 'failed');
+      const failure = safeAgentFailure(error);
+      if (failure && !failure.requestId) throw new AgentRequestFailure(failure.code, {
+        requestId: run.runId,
+        retryable: failure.retryable,
+        retryAfterMs: failure.retryAfterMs,
+        telemetry: failure.code === 'INVALID_MODEL_OUTPUT' || failure.code === 'TOOL_EXECUTION_FAILED' ? undefined : { providerErrors: 1, totalMs: Math.round(performance.now() - startedAt) },
+      });
       throw error;
     }
   }
@@ -721,7 +759,7 @@ export class AgentService implements OnModuleDestroy {
       return result;
     }
 
-    const agent = instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 2, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime});
+    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime);
     if (config.agentTrace) {
       this.trace('tool-catalog', { mode: 'stream', modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
     }
@@ -749,6 +787,7 @@ export class AgentService implements OnModuleDestroy {
     let embeddingMs = 0;
     let retrievalMs = 0;
     let nativeError = false;
+    let nativeFailure: unknown;
     let nativeFinishSeen = false;
     let stepNumber = 0;
     const streamedText: string[] = [];
@@ -849,12 +888,14 @@ export class AgentService implements OnModuleDestroy {
         }
         case 'error':
           nativeError = true;
+          nativeFailure = chunk.payload.error;
           break;
         case 'finish':
           nativeFinishSeen = true;
           break;
         case 'abort':
           nativeError = true;
+          nativeFailure = chunk.payload?.error;
           break;
         // Reasoning, raw provider payloads, prompt/request chunks and arbitrary
         // custom events are intentionally never forwarded to the client.
@@ -866,7 +907,7 @@ export class AgentService implements OnModuleDestroy {
     if (abortSignal.aborted) throw abortSignal.reason ?? new Error('REQUEST_ABORTED');
     let fullOutput = await output.getFullOutput();
     if (fullOutput.error) throw fullOutput.error;
-    if (nativeError) throw new Error('MODEL_STREAM_FAILED');
+    if (nativeError) throw nativeFailure ?? new Error('MODEL_STREAM_FAILED');
     let finalToolResults = fullOutput.toolResults;
     let finalText = this.removeThinkingContent(
       fullOutput.text || streamedText.join(''),
@@ -920,7 +961,7 @@ export class AgentService implements OnModuleDestroy {
         finalText = 'The indexed documents do not provide evidence to answer this question.';
       } else {
         suppressTextAfterNoEvidence = false;
-        const grounded = await instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 2, runtime),this.prisma,{tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}).stream(
+        const grounded = await this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime),this.prisma,{tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime).stream(
           withRetrievedEvidence(prompt, message, search.hits),
           { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime) },
         );
@@ -957,11 +998,12 @@ export class AgentService implements OnModuleDestroy {
             nativeFinishSeen = true;
           } else if (chunk.type === 'error' || chunk.type === 'abort') {
             nativeError = true;
+            nativeFailure = chunk.payload?.error;
           }
         }
         const groundedOutput = await grounded.getFullOutput();
         if (groundedOutput.error) throw groundedOutput.error;
-        if (nativeError) throw new Error('MODEL_STREAM_FAILED');
+        if (nativeError) throw nativeFailure ?? new Error('MODEL_STREAM_FAILED');
         fullOutput = groundedOutput;
         finalText = this.removeThinkingContent(groundedOutput.text || groundedText.join(''), { hidden: false, pending: '' });
       }
@@ -1131,7 +1173,10 @@ export class AgentService implements OnModuleDestroy {
     const timeToFirstStatusMs = Math.round(performance.now() - startedAt);
     let streamedAnswer = false;
     let timeToFirstTextMs: number | null = null;
+    let providerTelemetry: { providerErrors: number; providerRetries: number; llmCalls: number; llmLatencyMs: number; code: string } | undefined;
     const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal, {
+      onPlannerDiagnostic: diagnostic => this.persistPlannerDiagnostic(diagnostic),
+      onProviderTelemetry: telemetry => { providerTelemetry = telemetry; return write('telemetry', telemetry); },
       onProgress: async progress => {
         await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, progress.stage);
         await write('stage', { ...progress });
@@ -1200,9 +1245,17 @@ export class AgentService implements OnModuleDestroy {
       await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
       return result;
     } catch (error) {
-      const provider = safeProviderFailure(error);
+      const provider = safeAgentFailure(error);
       recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'sse-workflow', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: abortSignal.aborted ? 'cancelled' : 'failure' });
       await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      if (provider) throw new AgentRequestFailure(provider.code, {
+        requestId,
+        retryable: provider.retryable,
+        retryAfterMs: provider.retryAfterMs,
+        telemetry: provider.telemetry ?? (provider.code !== 'INVALID_MODEL_OUTPUT' && provider.code !== 'TOOL_EXECUTION_FAILED' && providerTelemetry
+          ? { providerErrors: providerTelemetry.providerErrors, providerRetries: providerTelemetry.providerRetries, llmCalls: providerTelemetry.llmCalls, llmLatencyMs: providerTelemetry.llmLatencyMs }
+          : undefined),
+      });
       throw error;
     } finally {
       if (abort) abortSignal.removeEventListener('abort', abort);

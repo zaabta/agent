@@ -106,7 +106,7 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     const before = await (await request(`conversations/${id}`)).json() as any;
     assert.equal(before.messages.length, 12);
     limited = true;
-    assert.equal((await request('ask', { message: 'Failed request', conversationId: id })).status, 503);
+    assert.equal((await request('ask', { message: 'Failed request', conversationId: id })).status, 429);
     const after = await (await request(`conversations/${id}`)).json() as any;
     assert.equal(after.messages.length, 14);
     assert.deepEqual(after.messages.slice(0, 12), before.messages);
@@ -123,7 +123,10 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     const failedStream = await request('stream', { message: 'Rate limited stream', conversationId: id });
     const failedFrames = await failedStream.text();
     assert.match(failedFrames, /event: error/);
-    assert.match(failedFrames, /PROVIDER_RATE_LIMITED/);
+    assert.match(failedFrames, /RATE_LIMITED/);
+    assert.match(failedFrames, /temporarily rate limiting/);
+    assert.match(failedFrames, /"providerErrors":1/);
+    assert.match(failedFrames, /"requestId":/);
     assert.doesNotMatch(failedFrames, /event: done/);
     assert.equal((await (await request(`conversations/${id}`)).json() as any).messages.at(-1).status, 'failed');
     limited = false;
@@ -191,7 +194,7 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.match((await ranked.json() as any).answer, /E1: 6/);
     assert.deepEqual(db.messages.at(-1).structuredSelection, selection);
     limited = true;
-    assert.equal((await request('ask', { message: 'Provider failure', conversationId: id })).status, 503);
+    assert.equal((await request('ask', { message: 'Provider failure', conversationId: id })).status, 429);
     limited = false;
     analyticsMode = 'followup';
     const followup = await request('ask', { message: 'How many violations do they have?', conversationId: id });
