@@ -7,9 +7,7 @@ export function localGenerationOptions(runtime?:RuntimeModelSnapshot): { provide
   if (provider === 'google' && model.toLowerCase().replace(/^google\//,'') === 'gemini-3.6-flash') {
     return { providerOptions: { google: { thinkingConfig: { thinkingLevel: config.geminiThinkingLevel, includeThoughts: false } } } };
   }
-  if (provider === 'ollama' && model.toLowerCase().startsWith('qwen3') && !ollamaThink) {
-    // Mastra's OpenAI-compatible adapter serializes this camelCase option as
-    // reasoning_effort on the Ollama HTTP wire.
+  if (provider === 'ollama' && !ollamaThink) {
     return { providerOptions: { ollama: { reasoningEffort: 'none' } } };
   }
   return {};

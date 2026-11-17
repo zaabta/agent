@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { z } from 'zod';
 import { backendCallLLMSchema, backendCallSchema } from '../src/agent/backend-tools.js';
 import { planLLMSchema, planLLMSchemaWithoutTools, plannerGenerationOptions, summarizePlannerValidationIssues } from '../src/agent/agent.workflow.js';
+import { resolveRuntimeModels } from '../src/mastra/runtime-model.js';
 
 function containsKey(value: unknown, key: string): boolean {
   if (Array.isArray(value)) return value.some(item => containsKey(item, key));
@@ -56,4 +57,18 @@ test('planner validation diagnostics hide dynamic argument keys and values', () 
   assert.deepEqual(summarizePlannerValidationIssues({ issues: [
     { path: ['toolCall', 'args', 'customer_api_key'], code: 'invalid_type' },
   ] }, 'tool_call', 1), [{ attempt: 1, branch: 'tool_call', path: 'toolCall.args.*', code: 'invalid_type' }]);
+});
+
+test('Planner output budget resolves from existing runtime settings and is isolated from ANSWER', async () => {
+  const values = [
+    { key: 'PLANNER_PROVIDER', value: 'ollama' }, { key: 'PLANNER_MODEL', value: 'lfm2.5-thinking:1.2b' },
+    { key: 'ANSWER_PROVIDER', value: 'ollama' }, { key: 'ANSWER_MODEL', value: 'qwen3:8b' },
+    { key: 'PLANNER_MAX_OUTPUT_TOKENS', value: '1024' },
+  ];
+  const runtime = await resolveRuntimeModels({
+    runtimeSetting: { findMany: async () => values },
+    registeredModel: { findUnique: async () => ({ enabled: true, available: true, compatible: true }) },
+  } as any);
+  assert.equal(runtime.planner.maxOutputTokens, 1024);
+  assert.equal(runtime.answer.maxOutputTokens, undefined);
 });

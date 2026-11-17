@@ -158,7 +158,7 @@ export function classifyProviderError(value: unknown, now = Date.now()): SafePro
 
 export async function withProviderRetry<T>(
   operation: (signal?: AbortSignal) => Promise<T>,
-  options: { maxRetries?: number; timeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure) => Promise<void> } = {},
+  options: { maxRetries?: number; timeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; shouldRetry?: (failure: SafeProviderFailure) => boolean; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure) => Promise<void> } = {},
 ): Promise<T> {
   const maxRetries = Math.max(0, Math.min(1, options.maxRetries ?? 1));
   const timeoutMs = Math.max(1, Math.min(60_000, options.timeoutMs ?? 60_000));
@@ -190,7 +190,7 @@ export async function withProviderRetry<T>(
       const safe = classifyProviderError(error, options.now?.() ?? Date.now());
       if (!safe) throw error;
       await options.onFailure?.(safe);
-      if (!safe.retryable || attempt >= maxRetries || (safe.retryAfterMs ?? 0) > 2_000) throw new ProviderRequestFailure(safe);
+      if (!safe.retryable || options.shouldRetry?.(safe) === false || attempt >= maxRetries || (safe.retryAfterMs ?? 0) > 2_000) throw new ProviderRequestFailure(safe);
       const exponential = Math.min(4_000, 250 * 2 ** attempt);
       const jittered = Math.round(exponential * (0.5 + Math.max(0, Math.min(1, random()))));
       const delay = safe.retryAfterMs === undefined ? jittered : Math.max(jittered, safe.retryAfterMs);

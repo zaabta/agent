@@ -21,7 +21,7 @@ import { ConversationContextService } from './conversation-context.service.js';
 import { conversationEntitiesSchema, conversationEvidenceReferencesSchema } from './conversation-context.js';
 import { UserMemoryService } from './user-memory.service.js';
 import { isEvidenceFollowUp } from './retrieval-policy.js';
-import { resolveRuntimeModel, type RuntimeModelSnapshot } from '../mastra/runtime-model.js';
+import { modelForRole, resolveRuntimeModels, type RuntimeModelInput, type RuntimeModelSnapshot } from '../mastra/runtime-model.js';
 import { instrumentAgent, persistUsageEvent } from '../llm-admin/usage-recorder.js';
 
 export interface VerifiedSource {
@@ -492,7 +492,7 @@ export class AgentService implements OnModuleDestroy {
   }
 
   async ask(message: string, conversationId: string | undefined, principal: AuthPrincipal) {
-    const runtime = await resolveRuntimeModel(this.prisma);
+    const runtime = await resolveRuntimeModels(this.prisma);
     if (config.agentOrchestration === 'workflow' || await this.backendTools?.hasEnabledTools(principal)) return this.askWorkflow(message, conversationId, principal, runtime);
     const startedAt = performance.now();
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
@@ -512,12 +512,14 @@ export class AgentService implements OnModuleDestroy {
         timing: { retrievalMs: listing.durationMs, totalMs: Math.round(performance.now() - startedAt) } };
     }
 
-    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime);
+    const plannerRuntime=modelForRole(runtime,'PLANNER'); const answerRuntime=modelForRole(runtime,'ANSWER');
+    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, plannerRuntime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime:plannerRuntime}), plannerRuntime);
+    const answerAgent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, answerRuntime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime:answerRuntime}), answerRuntime);
     if (config.agentTrace) {
       this.trace('tool-catalog', { modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
     }
     const response = await agent.generate(prompt, {
-      maxSteps: 4, abortSignal, ...this.ollamaGenerationOptions(runtime),
+      maxSteps: 4, abortSignal, ...this.ollamaGenerationOptions(plannerRuntime),
     });
     let toolResults = response.toolResults;
     const toolNames = response.toolCalls.map(call => this.publicToolName(call.payload.toolName));
@@ -539,7 +541,7 @@ export class AgentService implements OnModuleDestroy {
       : inventoryOnly
         ? 'DOCUMENT'
       : unresolvedWithoutTool || needsWorkspaceRecovery(toolResults)
-        ? await this.classifyUnresolvedRequest(agent, message, answer, abortSignal, runtime)
+        ? await this.classifyUnresolvedRequest(agent, message, answer, abortSignal, plannerRuntime)
       : 'GENERAL';
     const resolvedRoute = route;
     if (structuredFailure) this.trace('fallback-classification', { requestHash, output: resolvedRoute, reason: 'structured-tool-execution-failed' });
@@ -551,8 +553,8 @@ export class AgentService implements OnModuleDestroy {
       toolNames.push('documentSearch');
       toolResults = [...toolResults, { payload: { toolName: 'document-search', result: search } } as typeof toolResults[number]];
       if (search.hits.length === 0) answer = 'I could not find matching evidence in the documents available to you.';
-      else answer = (await agent.generate(withRetrievedEvidence(prompt, message, search.hits), {
-        maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime),
+      else answer = (await answerAgent.generate(withRetrievedEvidence(prompt, message, search.hits), {
+        maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime),
       })).text;
     } else if (resolvedRoute === 'SCHEMA') {
       const schemaResult = { datasets: await this.structuredData.discoverDatasets(principal.tenantId) };
@@ -573,13 +575,13 @@ export class AgentService implements OnModuleDestroy {
         const schemaPrompt = [...prompt];
         const last = schemaPrompt.at(-1);
         if (last?.role === 'user') schemaPrompt[schemaPrompt.length - 1] = { role: 'user', content: `${last.content}\n\nAuthorized dataset schema (JSON): ${JSON.stringify(datasets).slice(0, 10000)}\nChoose and call the appropriate structured data tool. Do not infer values from schema.` };
-        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions(runtime) });
+        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions(plannerRuntime) });
         this.trace('recovery-model-step', { requestHash, stepCount: analytic.steps?.length, finishReason: analytic.finishReason, toolCalls: analytic.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })), toolResults: this.traceToolResults(analytic.toolResults) });
         toolResults = [...toolResults, ...analytic.toolResults];
         toolNames.push(...analytic.toolCalls.map(call => this.publicToolName(call.payload.toolName)));
         if (!hasStructuredQueryResult(analytic.toolResults)) answer = 'I inspected the authorized dataset schema but could not complete the requested structured operation. Please clarify the dataset or operation.';
-        else answer = (await agent.generate(withStructuredEvidence(prompt, message, analytic.toolResults), {
-          maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime),
+        else answer = (await answerAgent.generate(withStructuredEvidence(prompt, message, analytic.toolResults), {
+          maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime),
         })).text;
         }
       }
@@ -589,6 +591,7 @@ export class AgentService implements OnModuleDestroy {
       const output = item.payload.result as { hits?: unknown[]; sources?: unknown[] } | undefined;
       return !(Array.isArray(output?.hits) && output.hits.length === 0 && (!Array.isArray(output.sources) || output.sources.length === 0));
     });
+    if (resolvedRoute === 'GENERAL') answer=(await answerAgent.generate(prompt,{maxSteps:1,toolChoice:'none',abortSignal,...this.ollamaGenerationOptions(answerRuntime)})).text;
     const structuredResult = this.deterministicStructuredFinalization(toolResults);
     answer = structuredResult?.answer ?? answer;
     let result = structuredResult
@@ -598,7 +601,7 @@ export class AgentService implements OnModuleDestroy {
       const hits = this.documentHits(toolResults);
       if (hits.length) {
         try {
-          const retry = await agent.generate(withCitationRepair(prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime) });
+          const retry = await answerAgent.generate(withCitationRepair(prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime) });
           this.trace('citation-retry', { mode: 'generate', requestHash, stepCount: retry.steps?.length, finishReason: retry.finishReason, toolResults: this.traceToolResults(retry.toolResults), draft: { length: retry.text.length, citationCount: [...retry.text.matchAll(/\[\[([^\]]+)\]\]/g)].length, content: '[redacted]' } });
           answer = retry.text;
           result = this.validateAnswer(answer, toolResults, [...new Set(toolNames)]);
@@ -628,7 +631,7 @@ export class AgentService implements OnModuleDestroy {
     }
   }
 
-  private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal, runtime: RuntimeModelSnapshot) {
+  private async askWorkflow(message: string, conversationId: string | undefined, principal: AuthPrincipal, runtime: RuntimeModelInput) {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
     const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, AbortSignal.timeout(config.agentTimeoutMs), { onPlannerDiagnostic: diagnostic => this.persistPlannerDiagnostic(diagnostic) }, this.backendTools, runtime, record => persistUsageEvent(this.prisma,record), turn.conversationId);
@@ -674,7 +677,7 @@ export class AgentService implements OnModuleDestroy {
     principal: AuthPrincipal,
   ): Promise<AgentStreamResult> {
     const startedAt = performance.now();
-    const runtime = await resolveRuntimeModel(this.prisma);
+    const runtime = await resolveRuntimeModels(this.prisma);
     const run = this.activeRuns.create(principal);
     const runSignal = AbortSignal.any([abortSignal, run.controller.signal]);
     const runWriter: EventWriter = (event, data) => write(event, event === 'status' ? { ...data, runId: run.runId } : data);
@@ -723,7 +726,7 @@ export class AgentService implements OnModuleDestroy {
     write: EventWriter,
     principal: AuthPrincipal,
     runId: string,
-    runtime: RuntimeModelSnapshot,
+    runtime: RuntimeModelInput,
   ): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const requestHash = createHash('sha256').update(message).digest('hex').slice(0, 12);
@@ -759,7 +762,9 @@ export class AgentService implements OnModuleDestroy {
       return result;
     }
 
-    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime);
+    const plannerRuntime=modelForRole(runtime,'PLANNER'); const answerRuntime=modelForRole(runtime,'ANSWER');
+    const agent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, plannerRuntime), this.prisma, {tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime:plannerRuntime}), plannerRuntime);
+    const answerAgent = this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, answerRuntime),this.prisma,{tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime:answerRuntime}),answerRuntime);
     if (config.agentTrace) {
       this.trace('tool-catalog', { mode: 'stream', modelProvider: config.modelProvider, model: config.model, tools: await this.traceToolCatalog(agent) });
     }
@@ -767,7 +772,7 @@ export class AgentService implements OnModuleDestroy {
       maxSteps: 4,
       abortSignal,
       eagerToolExecution: true,
-      ...this.ollamaGenerationOptions(runtime),
+      ...this.ollamaGenerationOptions(plannerRuntime),
     });
     const allowedTools = new Set(['documentSearch', 'listDocuments', 'structuredDataLookup', 'structuredDataAnalytics', 'datasetDiscovery', 'structuredRowLookup']);
     const toolsCalled = new Set<string>();
@@ -930,7 +935,7 @@ export class AgentService implements OnModuleDestroy {
       : inventoryOnly
         ? 'DOCUMENT'
       : unresolvedWithoutTool || needsWorkspaceRecovery(fullOutput.toolResults)
-        ? await this.classifyUnresolvedRequest(agent, message, finalText, abortSignal, runtime)
+        ? await this.classifyUnresolvedRequest(agent, message, finalText, abortSignal, plannerRuntime)
       : 'GENERAL';
     const resolvedRecoveryRoute = recoveryRoute;
     if (structuredFailure) this.trace('fallback-classification', { requestHash, mode: 'stream', output: resolvedRecoveryRoute, reason: 'structured-tool-execution-failed' });
@@ -961,9 +966,9 @@ export class AgentService implements OnModuleDestroy {
         finalText = 'The indexed documents do not provide evidence to answer this question.';
       } else {
         suppressTextAfterNoEvidence = false;
-        const grounded = await this.withProviderHandling(instrumentAgent(createSitePilotAgent(this.typegraph, this.structuredData, principal.tenantId, principal.userId, 0, runtime),this.prisma,{tenantId:principal.tenantId,userId:principal.userId,conversationId:turn.conversationId,logicalRequestId:turn.assistantMessageId,runtime}), runtime).stream(
+        const grounded = await answerAgent.stream(
           withRetrievedEvidence(prompt, message, search.hits),
-          { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime) },
+          { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime) },
         );
         const groundedText: string[] = [];
         const groundedReasoningFilter = { hidden: false, pending: '' };
@@ -1042,7 +1047,7 @@ export class AgentService implements OnModuleDestroy {
         const schemaPrompt = [...prompt];
         const last = schemaPrompt.at(-1);
         if (last?.role === 'user') schemaPrompt[schemaPrompt.length - 1] = { role: 'user', content: `${last.content}\n\nAuthorized dataset schema (JSON): ${JSON.stringify(datasets).slice(0, 10000)}\nChoose and call the appropriate structured data tool. Do not infer values from schema.` };
-        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions(runtime) });
+        const analytic = await agent.generate(schemaPrompt, { maxSteps: 1, toolChoice: 'required', abortSignal, ...this.ollamaGenerationOptions(plannerRuntime) });
         this.trace('recovery-model-step', { requestHash, mode: 'stream', stepCount: analytic.steps?.length, finishReason: analytic.finishReason, toolCalls: analytic.toolCalls.map(call => ({ name: call.payload.toolName, args: this.traceArgs(call.payload.args) })), toolResults: this.traceToolResults(analytic.toolResults) });
         finalToolResults = [...fullOutput.toolResults, ...analytic.toolResults];
         for (const call of analytic.toolCalls) {
@@ -1063,8 +1068,8 @@ export class AgentService implements OnModuleDestroy {
           if (structuredSources.length) await emit('sources', { sources: structuredSources });
           for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
           for (const call of analytic.toolCalls) await emit('tool-finish', { toolName: this.publicToolName(call.payload.toolName), recovery: true, sourceCount: structuredSources.length });
-          const grounded = await agent.generate(withStructuredEvidence(prompt, message, analytic.toolResults), {
-            maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime),
+          const grounded = await answerAgent.generate(withStructuredEvidence(prompt, message, analytic.toolResults), {
+            maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime),
           });
           finalText = grounded.text;
           if (finalText) {
@@ -1075,6 +1080,17 @@ export class AgentService implements OnModuleDestroy {
         }
         }
       }
+    } else if (resolvedRecoveryRoute === 'GENERAL') {
+      bufferedText.length = 0;
+      const final = await answerAgent.stream(prompt,{maxSteps:1,toolChoice:'none',abortSignal,...this.ollamaGenerationOptions(answerRuntime)});
+      const answerParts:string[]=[];
+      for await(const chunk of final.fullStream){
+        if(chunk.type==='step-start'){modelCallCount++;await emit('step-start',{step:modelCallCount,recovery:'answer'});}
+        else if(chunk.type==='step-finish'){const usage=chunk.payload.output.usage;if(typeof usage.inputTokens==='number')promptTokens=(promptTokens??0)+usage.inputTokens;if(typeof usage.outputTokens==='number')completionTokens=(completionTokens??0)+usage.outputTokens;await emit('step-finish',{step:modelCallCount,recovery:'answer',promptTokens:usage.inputTokens??null,completionTokens:usage.outputTokens??null});}
+        else if(chunk.type==='text-delta'&&chunk.payload.text){answerParts.push(chunk.payload.text);streamedText.push(chunk.payload.text);if(ttftMs===null)ttftMs=Math.round(performance.now()-startedAt);await emit('text-delta',{text:chunk.payload.text,verification:'provisional'});}
+        else if(chunk.type==='error'||chunk.type==='abort')throw chunk.payload?.error??new Error('MODEL_STREAM_FAILED');
+      }
+      const completed=await final.getFullOutput();if(completed.error)throw completed.error;finalText=completed.text||answerParts.join('');
     } else if (bufferedText.length > 0) {
       for (const text of bufferedText.splice(0)) {
         streamedText.push(text);
@@ -1102,7 +1118,7 @@ export class AgentService implements OnModuleDestroy {
         try {
           const retryStep = modelCallCount + 1;
           await emit('step-start', { step: retryStep, recovery: 'citation' });
-          const retry = await agent.generate(withCitationRepair(prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(runtime) });
+          const retry = await answerAgent.generate(withCitationRepair(prompt, message, hits), { maxSteps: 1, toolChoice: 'none', abortSignal, ...this.ollamaGenerationOptions(answerRuntime) });
           modelCallCount += retry.steps?.length ?? 1;
           const usage = retry.totalUsage;
           if (typeof usage.inputTokens === 'number') promptTokens = (promptTokens ?? 0) + usage.inputTokens;
@@ -1165,7 +1181,7 @@ export class AgentService implements OnModuleDestroy {
     }
   }
 
-  private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal, runId: string, runtime: RuntimeModelSnapshot): Promise<AgentStreamResult> {
+  private async streamWorkflow(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal, runId: string, runtime: RuntimeModelInput): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
     this.activeRuns.bindConversation(runId, turn.conversationId);

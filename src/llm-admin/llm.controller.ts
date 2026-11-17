@@ -34,6 +34,8 @@ export class LlmController {
   @Patch('models/:id') @InstallationOwnerOnly() @ApiOperation({ summary: 'Enable or disable a registered model' }) patch(@Param('id') id: string, @Body() body: { enabled?: boolean }) { return this.service.patchModel(id, body); }
   @Post('models/:id/test') @InstallationOwnerOnly() @ApiOperation({ summary: 'Check provider listing or local installation without generating text' }) testModel(@Param('id') id: string) { return this.service.testModel(id); }
   @Get('active-model') @InstallationOwnerOnly() @ApiOperation({ summary: 'Get the active database-backed model selection' }) active() { return this.service.activeModel(); }
+  @Get('role-configurations') @InstallationOwnerOnly() @ApiOperation({ summary: 'Get independent Planner and Answer model selections' }) roleConfigurations() { return this.service.roleConfigurations(); }
+  @Put('role-configurations/:role') @InstallationOwnerOnly() @ApiOperation({ summary: 'Select a provider and model for Planner or Answer' }) updateRoleConfiguration(@Param('role') role:string,@Body() body:{provider?:unknown;modelId?:unknown},@CurrentPrincipal() p:AuthPrincipal) { return this.service.updateRoleConfiguration(role,body??{},p.userId); }
   @Put('active-model') @InstallationOwnerOnly() @ApiOperation({ summary: 'Select a registered model for new invocations immediately' }) setActive(@Body() body: { provider?: string; modelId?: string }, @CurrentPrincipal() p: AuthPrincipal) {
     if (!body.provider || !body.modelId) throw new BadRequestException('PROVIDER_AND_MODEL_ID_REQUIRED');
     return this.service.setActive(body.provider, body.modelId, p.userId);
@@ -44,13 +46,15 @@ export class LlmController {
   @Get('usage/logs') @ApiOperation({ summary: 'Paginated user-scoped invocation records; prompt contents are never stored' }) logs(@Query() q: any, @CurrentPrincipal() p: AuthPrincipal) {
     const from = q.from ? new Date(q.from) : undefined, to = q.to ? new Date(q.to) : undefined;
     if ((from && !Number.isFinite(from.getTime())) || (to && !Number.isFinite(to.getTime())) || (from && to && from >= to)) throw new BadRequestException('INVALID_DATE_RANGE');
-    return this.service.logs(p.userId, { from, to, provider: q.provider, modelId: q.modelId, conversationId: q.conversationId, limit: Math.min(100, Math.max(1, Number(q.limit) || 50)), offset: Math.max(0, Number(q.offset) || 0) });
+    const role=this.validateRoleFilter(q.role);
+    return this.service.logs(p.userId, { from, to, provider: q.provider, modelId: q.modelId, conversationId: q.conversationId, role, limit: Math.min(100, Math.max(1, Number(q.limit) || 50)), offset: Math.max(0, Number(q.offset) || 0) });
   }
   private analytics(q: any, p: AuthPrincipal, grouping: string, periodBuckets = false) {
     const now = new Date(); let from: Date; let to = now;
     if (q.from || q.to) { if (!q.from || !q.to) throw new BadRequestException('FROM_AND_TO_REQUIRED'); from = new Date(q.from); to = new Date(q.to); }
     else { const days = q.period === 'weekly' ? 7 : q.period === 'monthly' ? 30 : 1; if (q.period && !['daily', 'weekly', 'monthly'].includes(q.period)) throw new BadRequestException('INVALID_PERIOD'); from = new Date(now.getTime() - days * 86400000); }
     const selectedGroup = q.groupBy && ['date','week','month','provider','model'].includes(q.groupBy) ? q.groupBy : periodBuckets && q.period === 'weekly' ? 'week' : periodBuckets && q.period === 'monthly' ? 'month' : grouping;
-    return this.service.analytics(p.userId, from!, to, selectedGroup, q.provider, q.modelId, q.conversationId);
+    return this.service.analytics(p.userId, from!, to, selectedGroup, q.provider, q.modelId, q.conversationId,this.validateRoleFilter(q.role));
   }
+  private validateRoleFilter(role?:string){if(role===undefined)return undefined;if(!['PLANNER','ANSWER'].includes(role))throw new BadRequestException('INVALID_LLM_ROLE');return role;}
 }

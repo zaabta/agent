@@ -313,6 +313,7 @@ model ProviderCredential {
 
 model LlmUsage {
   id                String   @id @default(uuid()) @db.Uuid
+  role              String?  @db.VarChar(12)
   provider          String
   configuredModelId String?  @map("configured_model_id")
   modelId           String   @map("model_id")
@@ -334,6 +335,7 @@ model LlmUsage {
   createdAt         DateTime @default(now()) @map("created_at")
   @@index([tenantId, createdAt])
   @@index([provider, modelId, createdAt])
+  @@index([tenantId, role, createdAt])
   @@map("llm_usage")
 }
 

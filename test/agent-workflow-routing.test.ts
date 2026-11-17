@@ -7,12 +7,16 @@ import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 import { readLocalWorkflowDiagnostic } from '../src/mastra/observability.js';
 import { safeAgentFailure } from '../src/agent/provider-errors.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
     const calls: string[] = [];
     const modelEvents: string[] = [];
+    const plannerOptions: any[] = [];
+    const providerEvents: any[] = [];
+    const customExecutions: any[] = [];
+    const selectedModels: Array<{ role:string; model:any }> = [];
     const datasets = [
       { documentId: '11111111-1111-4111-8111-111111111111', filename: 'items.csv', sheets: [{ sheetName: 'CSV', columns: ['Project', 'Item', 'Cost'] }] },
       { documentId: '22222222-2222-4222-8222-222222222222', filename: 'violations.xlsx', sheets: [{ sheetName: 'Warnings', columns: ['Project', 'Warning', 'Year', 'Employee'] }] },
@@ -42,20 +46,24 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       { id: 'custom_22222222222242228222222222222222', name: 'fx_rates', displayName: 'Foreign exchange rates', description: 'Return the latest exchange rate between two ISO currency codes.', input: { type: 'object', properties: { base: { type: 'string' }, quote: { type: 'string' } }, required: ['base', 'quote'], additionalProperties: false }, version: 3 },
       { id: 'custom_33333333333343338333333333333333', name: 'air_quality', displayName: 'Air quality', description: 'Return current outdoor air quality index and pollutant levels for a city.', input: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }, version: 2 },
     ];
-    const dynamicScenarios = ['custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-repair'];
+    const dynamicScenarios = ['custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired'];
     const workflowTools = dynamicScenarios.includes(scenario) ? {
       catalog: async () => dynamicCatalog,
       execute: async (call: any, _principal: any, _signal: any, _onStart: any, context: any) => {
+        customExecutions.push(call);
         context?.onSchemaValidation?.('valid');
         if (scenario === 'custom-independent' || scenario === 'custom-ar') assert.deepEqual(call, { id: dynamicCatalog[0]!.id, args: { city: 'Istanbul' } });
         if (scenario === 'custom-en') assert.deepEqual(call, { id: dynamicCatalog[1]!.id, args: { base: 'EUR', quote: 'JPY' } });
         return scenario === 'custom-en' ? { rate: 160.25 } : { temperatureC: 22, condition: 'clear' };
       },
     } as any : backendTools;
-    const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any) {
+    const generate = mock.method(Agent.prototype, 'generate', async function(this: Agent, messages: any, options: any) {
       const prompt = messages[0].content;
       if (this.id.startsWith('sitepilot-planner')) {
+        plannerOptions.push(options);
+        selectedModels.push({role:'PLANNER',model:(this as any).model});
         modelEvents.push('planner');
+        if (scenario === 'planner-timeout') throw Object.assign(new Error('private provider timeout'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
         if (prompt.startsWith('Decide whether')) return { object: scenario === 'narrative' ? { mode: 'retrieve', retrievalQueries: ['project budget', 'project risks'] } : { mode: 'structured' } } as any;
         if (cohortQuestions[scenario]) {
           if (!prompt.includes('Authorized schema:')) assert.match(prompt, /"values":\["E1","E2"\]/);
@@ -65,6 +73,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario.startsWith('backend-')) {
           if (scenario === 'backend-denied') assert.doesNotMatch(prompt, /Count registered employees/);
           else assert.match(prompt, /Count registered employees/);
+          if (scenario === 'backend-denied') return { object: { operation: 'clarify', reply: 'I cannot use that capability for this request.' } } as any;
           return { object: { operation: 'tool_call', toolCall: { id: scenario === 'backend-missing' ? 'missing' : 'employee_count', args: { department: 'Safety' } }, documentQuestion: 'What risks are in the safety reports?' } } as any;
         }
         if (scenario === 'custom-independent' || scenario === 'custom-ar') {
@@ -89,6 +98,13 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
           }
           return { object: { operation: 'tool_call', toolCall: { id: 'invalid id', args: { city: 'Oslo' } } } } as any;
         }
+        if (scenario === 'planner-unknown-id-repair' || scenario === 'planner-unknown-id-unrepaired') {
+          if (prompt.includes('Validation findings from the previous plan:')) {
+            assert.match(prompt, /unknown_tool_id/);
+            return { object: { operation: 'tool_call', toolCall: { id: scenario === 'planner-unknown-id-repair' ? dynamicCatalog[0]!.id : 'conflict_resolution', args: { city: 'Oslo' } } } } as any;
+          }
+          return { object: { operation: 'tool_call', toolCall: { id: 'conflict_resolution', args: { city: 'Oslo' } } } } as any;
+        }
         if (scenario === 'mixed-dependent') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', columnName: 'Employee', groupLimit: 2, filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?', searchRankedGroups: true } } as any;
         if (scenario === 'mixed' && !prompt.includes('Authorized schema:')) return { object: { operation: 'lookup', standaloneQuestion: 'Count violations from violations.xlsx' } } as any;
         if (scenario === 'mixed') assert.doesNotMatch(prompt, /describe report risks/);
@@ -99,6 +115,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario.startsWith('followup')) return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'How can I help?' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
       }
+      selectedModels.push({role:'ANSWER',model:(this as any).model});
       if (dynamicScenarios.includes(scenario) && scenario !== 'custom-irrelevant') {
         if (scenario === 'custom-en') { assert.match(messages[0].content, /160.25/); return { object: { answer: 'The EUR to JPY rate is 160.25.' } } as any; }
         assert.match(messages[0].content, /temperatureC/);
@@ -155,9 +172,14 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       },
     };
     try {
+      const runtime = ['custom-independent', 'planner-repair', 'planner-invalid', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout'].includes(scenario) ? {
+        planner: { provider: scenario === 'planner-invalid' ? 'google' : 'ollama', model: 'planner-model', ollamaThink: false },
+        answer: { provider: scenario === 'custom-independent' ? 'google' : 'ollama', model: 'answer-model', ollamaThink: false },
+      } : undefined;
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', authMethod: 'jwt' }, undefined, {
         onTextDelta: async text => { if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
-      }, workflowTools);
+        onProviderTelemetry: async telemetry => { providerEvents.push(telemetry); },
+      }, workflowTools, runtime as any);
       const run = await workflow.createRun();
       const followupHistory = scenario === 'followup-tr'
         ? [
@@ -172,11 +194,26 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const followupMessage = scenario === 'followup-ar' ? 'ماذا عن المخاطر؟'
         : scenario === 'followup-tr' ? 'Peki proje riskleri?'
           : 'What about the project risks?';
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : scenario === 'planner-repair' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : ['planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired'].includes(scenario) ? 'What is the weather in Oslo?' : scenario === 'planner-timeout' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
       if (scenario === 'planner-invalid') {
         assert.equal(result.status, 'failed');
         assert.equal(safeAgentFailure(result.error)?.code, 'INVALID_MODEL_OUTPUT');
+        assert.equal(plannerOptions.length, 2);
+        assert.ok(plannerOptions.every(option => option.structuredOutput?.schema && option.structuredOutput.errorStrategy === 'strict'));
+        assert.equal(plannerOptions[0].providerOptions.google.structuredOutputs, false);
         assert.equal(calls.length, 0);
+        return;
+      }
+      if (scenario === 'planner-unknown-id-unrepaired' || scenario === 'planner-timeout') {
+        assert.equal(result.status, 'failed');
+        assert.equal(safeAgentFailure(result.error)?.code, scenario === 'planner-timeout' ? 'TIMEOUT' : 'INVALID_MODEL_OUTPUT');
+        assert.deepEqual(customExecutions, []);
+        if (scenario === 'planner-timeout') {
+          assert.equal(plannerOptions.length, 1);
+          assert.equal(providerEvents.length, 1);
+          assert.equal(providerEvents[0].code, 'TIMEOUT');
+          assert.equal(providerEvents[0].providerRetries, 0);
+        } else assert.equal(plannerOptions.length, 2);
         return;
       }
       assert.equal(result.status, 'success');
@@ -187,6 +224,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.equal(typeof result.result.timing.promptTokens, 'number');
         assert.equal(typeof result.result.timing.completionTokens, 'number');
       }
+      if (scenario === 'custom-independent') { assert.equal((selectedModels.find(item=>item.role==='PLANNER')?.model as any).modelId,'planner-model');assert.equal(selectedModels.find(item=>item.role==='ANSWER')?.model,'google/answer-model'); }
       if (scenario === 'same-source-chunks') {
         assert.equal(result.result.timing.llmCalls, 3, 'one planner request, one answer stream, and one citation verification request');
         assert.deepEqual(modelEvents, ['planner', 'model-delta-1', 'sse-delta-1', 'model-delta-2', 'sse-delta-2', 'citation-verifier']);
@@ -222,11 +260,22 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         assert.ok(Number(diagnostic?.catalogEstimatedTokens) > 0);
       }
       else if (scenario === 'planner-repair') {
+        assert.equal(plannerOptions.length, 2);
+        assert.ok(plannerOptions.every(option => option.structuredOutput?.schema && option.structuredOutput.errorStrategy === 'strict'));
+        assert.ok(plannerOptions.every(option => option.providerOptions?.google === undefined));
         const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
         assert.ok(result.result.toolsCalled.includes(dynamicCatalog[0]!.id));
         assert.equal(modelEvents.filter(event => event === 'planner').length, 2);
         assert.equal(diagnostic?.schemaValidationOutcome, 'valid');
         assert.deepEqual(diagnostic?.validationIssues, [{ attempt: 1, branch: 'tool_call', path: 'toolCall.id', code: 'invalid_format' }]);
+      }
+      else if (scenario === 'planner-unknown-id-repair') {
+        assert.equal(plannerOptions.length, 2);
+        assert.ok(result.result.toolsCalled.includes(dynamicCatalog[0]!.id));
+        assert.deepEqual(customExecutions, [{ id: dynamicCatalog[0]!.id, args: { city: 'Oslo' } }]);
+        const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
+        assert.equal(diagnostic?.selectedToolId, dynamicCatalog[0]!.id);
+        assert.deepEqual(diagnostic?.validationIssues, [{ attempt: 1, branch: 'tool_call', path: 'toolCall.id', code: 'unknown_tool_id' }]);
       }
       else if (scenario === 'custom-ambiguous') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(result.result.toolsCalled, []); assert.deepEqual(calls, []); }
       else if (scenario === 'custom-irrelevant') { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.toolsCalled.some((id: string) => dynamicCatalog.some(tool => tool.id === id)), false); }

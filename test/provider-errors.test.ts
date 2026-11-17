@@ -89,6 +89,17 @@ test('timeouts retry only to the configured bound and retain a safe timeout code
   assert.equal(calls, 2);
 });
 
+test('provider retry policy can suppress timeouts while retaining their safe error category', async () => {
+  let calls = 0;
+  let failures = 0;
+  await assert.rejects(withProviderRetry(async () => {
+    calls++;
+    throw Object.assign(new Error('private timeout detail'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+  }, { shouldRetry: failure => failure.code !== 'TIMEOUT', onFailure: async failure => { assert.equal(failure.code, 'TIMEOUT'); failures++; }, sleep: async () => assert.fail('must not wait') }), error => error instanceof ProviderRequestFailure && error.safe.code === 'TIMEOUT');
+  assert.equal(calls, 1);
+  assert.equal(failures, 1);
+});
+
 test('Gemini quota, temporary rate limit, Ollama connection, missing model, and stalled inference are classified safely', async () => {
   const quota = { statusCode: 429, responseBody: JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaMetric: 'generate_requests_per_day' }] }] } }) };
   assert.equal(classifyProviderError(quota)?.code, 'QUOTA_EXCEEDED');
