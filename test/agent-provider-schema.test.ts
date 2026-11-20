@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { backendCallLLMSchema, backendCallSchema } from '../src/agent/backend-tools.js';
-import { planLLMSchema, planLLMSchemaWithoutTools, plannerGenerationOptions, summarizePlannerValidationIssues } from '../src/agent/agent.workflow.js';
+import { buildPlannerPrompt, planLLMSchema, planLLMSchemaWithoutTools, plannerGenerationOptions, summarizePlannerValidationIssues } from '../src/agent/agent.workflow.js';
 import { resolveRuntimeModels } from '../src/mastra/runtime-model.js';
 
 function containsKey(value: unknown, key: string): boolean {
@@ -51,6 +51,22 @@ test('Gemini planner uses validated JSON mode for dynamic tool arguments', () =>
   assert.deepEqual(options.providerOptions?.google?.thinkingConfig, { thinkingLevel: 'low', includeThoughts: false });
   assert.equal(plannerGenerationOptions({ provider: 'gemini', model: 'gemini-3.6-flash', ollamaThink: false }).providerOptions?.google?.structuredOutputs, false);
   assert.deepEqual(plannerGenerationOptions({ provider: 'openrouter', model: 'model', ollamaThink: false }), {});
+});
+
+test('Planner prompt keeps schema text for Gemini and omits its duplicate for constrained-output providers', () => {
+  const input = {
+    schema: planLLMSchema, retrievalLanguage: 'Preserve the user language.', conversationSummary: '', history: [],
+    contextEntities: [], userMemories: [], evidenceRefs: [], catalog: [{ id: 'custom_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'museumSearch', displayName: 'Museum Search', description: 'Check museum opening hours', input: { type: 'object', properties: { city: { type: 'string' } } } }],
+    message: 'Is the museum open on Monday?',
+  };
+  const ollama = buildPlannerPrompt({ ...input, provider: 'ollama' });
+  const gemini = buildPlannerPrompt({ ...input, provider: 'google' });
+  const schemaText = JSON.stringify(z.toJSONSchema(planLLMSchema));
+  assert.equal(ollama.includes(schemaText), false);
+  assert.equal(gemini.includes(schemaText), true);
+  assert.match(ollama, /Check museum opening hours/);
+  assert.doesNotMatch(ollama, /museumSearch|Museum Search/);
+  assert.match(ollama, /authorized capability catalog/i);
 });
 
 test('planner validation diagnostics hide dynamic argument keys and values', () => {

@@ -7,7 +7,7 @@ import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 import { readLocalWorkflowDiagnostic } from '../src/mastra/observability.js';
 import { safeAgentFailure } from '../src/agent/provider-errors.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal'] as const) {
+for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal', 'oversized-evidence'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
@@ -107,10 +107,11 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         }
         if (scenario === 'mixed-dependent') return { object: { operation: 'aggregate', aggregate: 'GROUP_BY', columnName: 'Employee', groupLimit: 2, filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?', searchRankedGroups: true } } as any;
         if (scenario === 'mixed' && !prompt.includes('Authorized schema:')) return { object: { operation: 'lookup', standaloneQuestion: 'Count violations from violations.xlsx' } } as any;
-        if (scenario === 'mixed') assert.doesNotMatch(prompt, /describe report risks/);
+        if (scenario === 'mixed') assert.match(prompt, /describe report risks in safety\.md/i);
         if (scenario === 'mixed') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }], documentQuestion: 'What risks are in the safety reports?' } } as any;
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
+        if (scenario === 'oversized-evidence') return { object: { operation: 'retrieve', retrievalQuery: 'large report' } } as any;
         if (scenario === 'same-source-chunks' || scenario === 'irrelevant-evidence' || scenario === 'mislabelled-refusal' || scenario === 'invalid-verifier-refusal') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
         if (scenario.startsWith('followup')) return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'How can I help?' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
@@ -143,6 +144,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         return { query, hits: [{ score: 0.8, content: 'Unverified dimension', sourceRef: `${name}.drawing.pdf (page 1)`, metadata: {}, citation: { documentId: name, filename: `${name}.drawing.pdf`, bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } };
       }
       if (scenario === 'same-source-chunks') { const first = query.startsWith('first'); return { query, hits: [{ score: 0.8, content: first ? 'First fact 17' : 'Second fact 29', sourceRef: 'shared.pdf (page 1)', metadata: {}, citation: { documentId: 'shared', filename: 'shared.pdf', bucketId: 'documents', chunkIndex: first ? 0 : 1, chunkCount: 2 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } }; }
+      if (scenario === 'oversized-evidence') return { query, hits: [{ score: 0.8, content: 'x'.repeat(101), sourceRef: 'large.pdf (page 1)', metadata: {}, citation: { documentId: 'large', filename: 'large.pdf', bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } };
       const id = query.includes('budget') ? 'budget' : 'risks';
       return { query, hits: [{ score: 0.7, content: `Project ${id} facts`, sourceRef: id, metadata: {}, citation: { documentId: id, filename: `${id}.md`, bucketId: 'documents', chunkIndex: 0, chunkCount: 1 } }], timing: { embeddingMs: 0, retrievalMs: 0, searchMs: 0 } };
     } };
@@ -172,9 +174,9 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       },
     };
     try {
-      const runtime = ['custom-independent', 'planner-repair', 'planner-invalid', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout'].includes(scenario) ? {
+      const runtime = ['custom-independent', 'planner-repair', 'planner-invalid', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'oversized-evidence'].includes(scenario) ? {
         planner: { provider: scenario === 'planner-invalid' ? 'google' : 'ollama', model: 'planner-model', ollamaThink: false },
-        answer: { provider: scenario === 'custom-independent' ? 'google' : 'ollama', model: 'answer-model', ollamaThink: false },
+        answer: { provider: scenario === 'custom-independent' ? 'google' : 'ollama', model: 'answer-model', ollamaThink: false, ...(scenario === 'oversized-evidence' ? { maxContextChars: 100, maxOutputTokens: 128 } : {}) },
       } : undefined;
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', authMethod: 'jwt' }, undefined, {
         onTextDelta: async text => { if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
@@ -194,7 +196,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const followupMessage = scenario === 'followup-ar' ? 'ماذا عن المخاطر؟'
         : scenario === 'followup-tr' ? 'Peki proje riskleri?'
           : 'What about the project risks?';
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : ['planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired'].includes(scenario) ? 'What is the weather in Oslo?' : scenario === 'planner-timeout' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : scenario === 'oversized-evidence' ? 'Summarize the large report' : ['planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired'].includes(scenario) ? 'What is the weather in Oslo?' : scenario === 'planner-timeout' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
       if (scenario === 'planner-invalid') {
         assert.equal(result.status, 'failed');
         assert.equal(safeAgentFailure(result.error)?.code, 'INVALID_MODEL_OUTPUT');
@@ -216,8 +218,22 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         } else assert.equal(plannerOptions.length, 2);
         return;
       }
+      if (scenario === 'backend-missing') {
+        assert.equal(result.status, 'failed');
+        assert.equal(safeAgentFailure((result as any).error)?.code, 'INVALID_MODEL_OUTPUT');
+        assert.deepEqual((result as any).result?.toolsCalled ?? [], []);
+        assert.deepEqual(calls, []);
+        return;
+      }
       assert.equal(result.status, 'success');
       if (result.status !== 'success') return;
+      if (scenario === 'oversized-evidence') {
+        assert.equal(result.result.outcome, 'clarification');
+        assert.match(result.result.answer, /too large to verify safely/);
+        assert.equal(modelEvents.filter(event => event === 'citation-verifier').length, 0);
+        assert.equal(modelEvents.length, 1, 'only the planner runs when retrieved evidence exceeds the cap');
+        return;
+      }
       if (scenario === 'narrative') {
         assert.equal(result.result.timing.llmCalls, 5, 'this multi-document route performs three planning requests, one answer stream, and one citation verification request');
         assert.equal(typeof result.result.timing.llmLatencyMs, 'number');
@@ -279,7 +295,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       }
       else if (scenario === 'custom-ambiguous') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(result.result.toolsCalled, []); assert.deepEqual(calls, []); }
       else if (scenario === 'custom-irrelevant') { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.toolsCalled.some((id: string) => dynamicCatalog.some(tool => tool.id === id)), false); }
-      else if (scenario === 'backend-denied' || scenario === 'backend-missing') {
+      else if (scenario === 'backend-denied') {
         assert.equal(result.result.outcome, 'clarification');
         assert.deepEqual(result.result.toolsCalled, []);
         assert.deepEqual(calls, []);
@@ -301,7 +317,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       else if (scenario === 'mixed') {
         assert.match(result.result.answer, /21/);
         assert.match(result.result.answer, /Supported fixture answer/);
-        assert.deepEqual(calls, ['describe report risks in safety.md']);
+        assert.deepEqual(calls, ['What risks are in the safety reports?']);
         assert.deepEqual(result.result.sources.map(source => source.filename).sort(), ['risks.md', 'violations.xlsx']);
       }
       else if (scenario === 'aggregate-year') { assert.match(result.result.answer, /21/); assert.deepEqual(calls, []); }

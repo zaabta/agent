@@ -65,6 +65,8 @@ export const config = {
   documentJobAttempts: Math.min(5, Math.max(1, Number(process.env.DOCUMENT_JOB_ATTEMPTS || 3))),
   agentTimeoutMs: Number(process.env.AGENT_REQUEST_TIMEOUT_MS || 180000),
   plannerMaxOutputTokens: 1024,
+  answerMaxOutputTokens: 512,
+  answerMaxContextChars: 12000,
   agentTrace: process.env.AGENT_TRACE === 'true',
   agentOrchestration: process.env.SITEPILOT_AGENT_ORCHESTRATION === 'workflow' ? 'workflow' : 'legacy',
   conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'diagnostic-user',

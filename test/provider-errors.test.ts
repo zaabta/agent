@@ -125,6 +125,21 @@ test('provider backoff exits immediately when an active run is cancelled', async
   await assert.rejects(request, /AGENT_RUN_CANCELLED/);
 });
 
+test('provider timeout honors a measured stage budget above the former 60-second cap', async () => {
+  const originalTimeout = AbortSignal.timeout;
+  let configuredTimeout = 0;
+  AbortSignal.timeout = ((milliseconds: number) => {
+    configuredTimeout = milliseconds;
+    return new AbortController().signal;
+  }) as typeof AbortSignal.timeout;
+  try {
+    assert.equal(await withProviderRetry(async () => 'ok', { timeoutMs: 128_778, maxRetries: 0 }), 'ok');
+    assert.equal(configuredTimeout, 128_778);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
 test('model fallback is opt-in and cannot cross provider or Local AI Only boundaries', () => {
   assert.equal(modelWithExplicitFallback('openrouter/google/a', undefined, 'openrouter'), 'openrouter/google/a');
   assert.deepEqual(modelWithExplicitFallback('openrouter/google/a', 'openrouter/google/b', 'openrouter'), [

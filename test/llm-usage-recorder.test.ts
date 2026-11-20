@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { instrumentAgent, persistUsage, persistUsageEvent, type UsageContext } from '../src/llm-admin/usage-recorder.js';
 import type { PrismaService } from '../src/prisma/prisma.service.js';
-import { asMastraModel, modelForRole, resolveRuntimeModel, resolveRuntimeModels } from '../src/mastra/runtime-model.js';
+import { asMastraModel, modelForRole, modelRequestTimeoutMs, resolveRuntimeModel, resolveRuntimeModels } from '../src/mastra/runtime-model.js';
 
 function setup(){const rows:any[]=[];const prisma={llmUsage:{create:async({data}:any)=>{rows.push(data);return data;}}} as unknown as PrismaService;const context:UsageContext={tenantId:'tenant-a',userId:'user-a',conversationId:'00000000-0000-4000-8000-000000000001',logicalRequestId:'request-a',runtime:{provider:'openrouter',model:'provider/model:free',ollamaThink:false}};return{prisma,context,rows};}
 
@@ -39,9 +39,9 @@ test('runtime resolver observes a new database model snapshot on the next reques
 });
 
 test('runtime resolver selects planner and answer models independently and keeps a request snapshot',async()=>{
-  const values:any={MASTRA_PROVIDER:'ollama',MASTRA_MODEL:'shared',PLANNER_PROVIDER:'google',PLANNER_MODEL:'gemini-test',ANSWER_PROVIDER:'ollama',ANSWER_MODEL:'answer-v1'};
+  const values:any={MASTRA_PROVIDER:'ollama',MASTRA_MODEL:'shared',PLANNER_PROVIDER:'google',PLANNER_MODEL:'gemini-test',ANSWER_PROVIDER:'ollama',ANSWER_MODEL:'answer-v1',ANSWER_MAX_OUTPUT_TOKENS:'384',ANSWER_MAX_CONTEXT_CHARS:'8000',AGENT_REQUEST_TIMEOUT_MS:'180000'};
   const prisma:any={runtimeSetting:{findMany:async()=>Object.entries(values).map(([key,value])=>({key,value}))},registeredModel:{findUnique:async({where}:any)=>({enabled:true,available:true,compatible:true,provider:where.provider_modelId.provider,modelId:where.provider_modelId.modelId})}};
-  const snapshot=await resolveRuntimeModels(prisma);assert.equal(snapshot.planner.provider,'google');assert.equal(snapshot.planner.model,'gemini-test');assert.equal(snapshot.answer.provider,'ollama');assert.equal(snapshot.answer.model,'answer-v1');assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(modelForRole(snapshot,'ANSWER').model,'answer-v1');assert.equal((asMastraModel(snapshot.planner).primary as any).modelId,'gemini-test');
+  const snapshot=await resolveRuntimeModels(prisma);assert.equal(snapshot.planner.provider,'google');assert.equal(snapshot.planner.model,'gemini-test');assert.equal(snapshot.answer.provider,'ollama');assert.equal(snapshot.answer.model,'answer-v1');assert.equal(snapshot.answer.maxOutputTokens,384);assert.equal(snapshot.answer.maxContextChars,8000);assert.equal(modelRequestTimeoutMs(snapshot.answer),100334);assert.equal(modelRequestTimeoutMs(snapshot.planner),60000);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(modelForRole(snapshot,'ANSWER').model,'answer-v1');assert.equal((asMastraModel(snapshot.planner).primary as any).modelId,'gemini-test');
   values.PLANNER_MODEL='gemini-next';const next=await resolveRuntimeModels(prisma);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(next.planner.model,'gemini-next');
   delete values.PLANNER_PROVIDER;delete values.PLANNER_MODEL;delete values.ANSWER_PROVIDER;delete values.ANSWER_MODEL;const legacy=await resolveRuntimeModels(prisma);assert.equal(legacy.planner.provider,'ollama');assert.equal(legacy.answer.model,'shared');
 });

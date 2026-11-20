@@ -21,7 +21,7 @@ import { ConversationContextService } from './conversation-context.service.js';
 import { conversationEntitiesSchema, conversationEvidenceReferencesSchema } from './conversation-context.js';
 import { UserMemoryService } from './user-memory.service.js';
 import { isEvidenceFollowUp } from './retrieval-policy.js';
-import { modelForRole, resolveRuntimeModels, type RuntimeModelInput, type RuntimeModelSnapshot } from '../mastra/runtime-model.js';
+import { modelForRole, modelRequestTimeoutMs, resolveRuntimeModels, type RuntimeModelInput, type RuntimeModelSnapshot } from '../mastra/runtime-model.js';
 import { instrumentAgent, persistUsageEvent } from '../llm-admin/usage-recorder.js';
 
 export interface VerifiedSource {
@@ -199,7 +199,7 @@ export class AgentService implements OnModuleDestroy {
   }
 
   private withProviderHandling<T extends object>(agent: T, runtime: RuntimeModelSnapshot): T {
-    const timeoutMs = Math.max(1_000, Math.min(60_000, Number.isFinite(runtime.requestTimeoutMs) ? runtime.requestTimeoutMs! : config.agentTimeoutMs));
+    const timeoutMs = modelRequestTimeoutMs(runtime);
     return new Proxy(agent, {
       get: (target, property) => {
         if (property === 'generate') return (messages: unknown, options: Record<string, unknown> = {}) => withProviderRetry(

@@ -22,18 +22,49 @@ test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correc
   Object.assign(config, { modelProvider: 'ollama', model: 'qwen3:8b', ollamaThink: false, ollamaUrl: `http://127.0.0.1:${(server.address() as any).port}` });
   try {
     const agent = createSitePilotAgent({} as any, {} as any);
-    const result = await agent.generate('Say hello', { maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions, activeTools: [], ...localGenerationOptions() });
+    const answerRuntime = { provider: 'ollama', model: 'qwen3:8b', ollamaThink: true, role: 'ANSWER' as const, maxOutputTokens: 384 };
+    const result = await agent.generate('Say hello', { maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions, activeTools: [], ...localGenerationOptions(answerRuntime) });
     assert.equal(result.text, 'Hello');
     assert.equal(received.length, 1);
     assert.equal(received[0].reasoning_effort, 'none');
+    assert.equal(received[0].max_tokens, 384);
     assert.equal(received[0].tools, undefined);
     assert.equal(received[0].messages[0].content, workflowGroundingInstructions);
     assert.ok(!received[0].messages[0].content.includes('Only cite exact sourceRef values returned by the tools'));
+    assert.deepEqual(localGenerationOptions({ ...answerRuntime, role: 'PLANNER', ollamaThink: true }), { modelSettings: { maxOutputTokens: 384 } });
     config.ollamaThink = true;
     assert.deepEqual(localGenerationOptions(), {});
     config.ollamaThink = false; config.modelProvider = 'openrouter';
     assert.deepEqual(localGenerationOptions(), {});
   } finally { Object.assign(config, previous); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('Ollama Answer streaming also sends no-thinking and bounded output options', async () => {
+  const previousUrl = config.ollamaUrl;
+  const received: any[] = [];
+  const server = createServer(async (request, response) => {
+    let raw = ''; for await (const chunk of request) raw += chunk;
+    received.push(JSON.parse(raw));
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.write(`data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 0, model: 'qwen3:8b', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }] })}\n\n`);
+    response.write(`data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 0, model: 'qwen3:8b', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
+    response.end('data: [DONE]\n\n');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  config.ollamaUrl = `http://127.0.0.1:${(server.address() as any).port}`;
+  try {
+    const runtime = { provider: 'ollama', model: 'qwen3:8b', ollamaThink: true, role: 'ANSWER' as const, maxOutputTokens: 256 };
+    const agent = new Agent({ id: 'ollama-answer-stream-test', name: 'Answer', instructions: workflowGroundingInstructions, model: asMastraModel(runtime).primary as any });
+    const result = await agent.stream('Say hello', { maxSteps: 1, toolChoice: 'none', activeTools: [], ...localGenerationOptions(runtime) });
+    for await (const _chunk of result.fullStream) { /* Consume the provider stream. */ }
+    assert.equal(received.length, 1);
+    assert.equal(received[0].stream, true);
+    assert.equal(received[0].reasoning_effort, 'none');
+    assert.equal(received[0].max_tokens, 256);
+  } finally {
+    config.ollamaUrl = previousUrl;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
 
 test('Planner structured output sends the full dynamic-tool schema to Ollama', async () => {

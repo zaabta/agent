@@ -161,7 +161,7 @@ export async function withProviderRetry<T>(
   options: { maxRetries?: number; timeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; shouldRetry?: (failure: SafeProviderFailure) => boolean; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure) => Promise<void> } = {},
 ): Promise<T> {
   const maxRetries = Math.max(0, Math.min(1, options.maxRetries ?? 1));
-  const timeoutMs = Math.max(1, Math.min(60_000, options.timeoutMs ?? 60_000));
+  const timeoutMs = Math.max(1, Math.min(600_000, options.timeoutMs ?? 60_000));
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const random = options.random ?? Math.random;
   for (let attempt = 0; ; attempt++) {
