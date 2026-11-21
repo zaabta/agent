@@ -5,7 +5,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { effectiveCredential, type CloudProvider } from '../llm-admin/provider-credentials.js';
 
 export type LlmRole = 'PLANNER' | 'ANSWER';
-export interface RuntimeModelSnapshot { provider:string; model:string; fallback?:string; ollamaThink:boolean; apiKey?:string; requestTimeoutMs?:number; maxOutputTokens?:number; maxContextChars?:number; role?:LlmRole; }
+export interface RuntimeModelSnapshot { provider:string; model:string; fallback?:string; ollamaThink:boolean; apiKey?:string; requestTimeoutMs?:number; maxOutputTokens?:number; maxContextChars?:number; maxStreamDurationMs?:number; role?:LlmRole; }
 export interface RuntimeModelRolesSnapshot { planner:RuntimeModelSnapshot; answer:RuntimeModelSnapshot; }
 export type RuntimeModelInput = RuntimeModelSnapshot | RuntimeModelRolesSnapshot;
 
@@ -13,9 +13,9 @@ export type RuntimeModelInput = RuntimeModelSnapshot | RuntimeModelRolesSnapshot
 export async function resolveRuntimeModel(prisma:PrismaService):Promise<RuntimeModelSnapshot>{ return (await resolveRuntimeModels(prisma)).planner; }
 
 export async function resolveRuntimeModels(prisma:PrismaService):Promise<RuntimeModelRolesSnapshot>{
-  const fallback={provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink,requestTimeoutMs:config.agentTimeoutMs,maxOutputTokens:config.plannerMaxOutputTokens,maxContextChars:config.answerMaxContextChars};
+  const fallback={provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink,requestTimeoutMs:config.agentTimeoutMs,maxOutputTokens:config.plannerMaxOutputTokens,maxContextChars:config.answerMaxContextChars,maxStreamDurationMs:config.answerStreamMaxDurationMs};
   if(!(prisma as any).runtimeSetting||!(prisma as any).registeredModel)return {planner:{...fallback,role:'PLANNER'},answer:{...fallback,maxOutputTokens:config.answerMaxOutputTokens,role:'ANSWER'}};
-  const rows=await prisma.runtimeSetting.findMany({where:{key:{in:['MASTRA_PROVIDER','MASTRA_MODEL','MASTRA_FALLBACK_MODEL','OLLAMA_THINK','AGENT_REQUEST_TIMEOUT_MS','PLANNER_PROVIDER','PLANNER_MODEL','ANSWER_PROVIDER','ANSWER_MODEL','PLANNER_MAX_OUTPUT_TOKENS','ANSWER_MAX_OUTPUT_TOKENS','ANSWER_MAX_CONTEXT_CHARS']}}});
+  const rows=await prisma.runtimeSetting.findMany({where:{key:{in:['MASTRA_PROVIDER','MASTRA_MODEL','MASTRA_FALLBACK_MODEL','OLLAMA_THINK','AGENT_REQUEST_TIMEOUT_MS','PLANNER_PROVIDER','PLANNER_MODEL','ANSWER_PROVIDER','ANSWER_MODEL','PLANNER_MAX_OUTPUT_TOKENS','ANSWER_MAX_OUTPUT_TOKENS','ANSWER_MAX_CONTEXT_CHARS','ANSWER_STREAM_MAX_DURATION_MS']}}});
   const v=Object.fromEntries(rows.map(r=>[r.key,r.value]));
   const sharedProvider=v.MASTRA_PROVIDER??config.modelProvider, sharedModel=v.MASTRA_MODEL??config.model;
   const make=async(role:LlmRole):Promise<RuntimeModelSnapshot>=>{
@@ -26,14 +26,14 @@ export async function resolveRuntimeModels(prisma:PrismaService):Promise<Runtime
     const fallback=provider===sharedProvider&&model===sharedModel?(v.MASTRA_FALLBACK_MODEL||undefined):undefined;
     if(fallback){const row=await prisma.registeredModel.findUnique({where:{provider_modelId:{provider,modelId:fallback}}});if(!row?.available||!row.compatible)throw new Error('FALLBACK_MODEL_UNAVAILABLE');}
     const apiKey=['google','openrouter','openai'].includes(provider)?(await effectiveCredential(prisma,provider as CloudProvider)).key:undefined;
-    return {provider,model,fallback,ollamaThink:(v.OLLAMA_THINK??String(config.ollamaThink))==='true',apiKey,requestTimeoutMs:Number(v.AGENT_REQUEST_TIMEOUT_MS??config.agentTimeoutMs),...(role==='PLANNER'?{maxOutputTokens:Number(v.PLANNER_MAX_OUTPUT_TOKENS??config.plannerMaxOutputTokens)}:{maxOutputTokens:Number(v.ANSWER_MAX_OUTPUT_TOKENS??config.answerMaxOutputTokens),maxContextChars:Number(v.ANSWER_MAX_CONTEXT_CHARS??config.answerMaxContextChars)}),role};
+    return {provider,model,fallback,ollamaThink:(v.OLLAMA_THINK??String(config.ollamaThink))==='true',apiKey,requestTimeoutMs:Number(v.AGENT_REQUEST_TIMEOUT_MS??config.agentTimeoutMs),...(role==='PLANNER'?{maxOutputTokens:Number(v.PLANNER_MAX_OUTPUT_TOKENS??config.plannerMaxOutputTokens)}:{maxOutputTokens:Number(v.ANSWER_MAX_OUTPUT_TOKENS??config.answerMaxOutputTokens),maxContextChars:Number(v.ANSWER_MAX_CONTEXT_CHARS??config.answerMaxContextChars),maxStreamDurationMs:Number(v.ANSWER_STREAM_MAX_DURATION_MS??config.answerStreamMaxDurationMs)}),role};
   };
   const [planner,answer]=await Promise.all([make('PLANNER'),make('ANSWER')]); return {planner,answer};
 }
 
 export function modelForRole(runtime:RuntimeModelInput|undefined,role:LlmRole):RuntimeModelSnapshot {
   if(runtime&&'planner' in runtime)return role==='PLANNER'?runtime.planner:runtime.answer;
-  return {...(runtime??{provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink,maxOutputTokens:role==='PLANNER'?config.plannerMaxOutputTokens:config.answerMaxOutputTokens,maxContextChars:config.answerMaxContextChars}),role};
+  return {...(runtime??{provider:config.modelProvider,model:config.model,fallback:config.modelFallback,ollamaThink:config.ollamaThink,maxOutputTokens:role==='PLANNER'?config.plannerMaxOutputTokens:config.answerMaxOutputTokens,maxContextChars:config.answerMaxContextChars,maxStreamDurationMs:config.answerStreamMaxDurationMs}),role};
 }
 
 export function modelRequestTimeoutMs(runtime:RuntimeModelSnapshot):number {

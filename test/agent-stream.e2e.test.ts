@@ -236,7 +236,7 @@ for (const target of ['planning', 'searching', 'model'] as const) {
   }, () => cancelAtWorkflowPoint(target));
 }
 
-test('disconnecting the chat stream leaves the backend turn running and persists its final answer', {
+test('disconnecting the chat stream interrupts the turn without completing a partial answer', {
   skip: !baseUrl || !bearerToken ? 'Set AGENT_E2E_URL and AGENT_E2E_BEARER from an existing valid development session' : false,
 }, async () => {
   const conversationResponse = await fetch(`${baseUrl}/api/agent/conversations`, {
@@ -270,8 +270,8 @@ test('disconnecting the chat stream leaves the backend turn running and persists
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   assert.deepEqual(stored?.messages.map(message => message.role), ['user', 'assistant']);
-  assert.equal(stored?.messages.at(-1)?.status, 'completed');
-  assert.match(stored?.messages.at(-1)?.content ?? '', /249/);
+  assert.equal(stored?.messages.at(-1)?.status, 'interrupted');
+  assert.equal(stored?.messages.at(-1)?.content, '');
   assert.equal(stored?.messages.at(-1)?.stage, null);
 
   const listResponse = await fetch(`${baseUrl}/api/agent/conversations`, { headers });

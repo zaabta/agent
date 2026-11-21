@@ -8,7 +8,7 @@ export type ProviderErrorCode =
   | 'PROVIDER_AUTH_FAILED'
   | 'PROVIDER_CREDITS_EXHAUSTED';
 
-export type AgentErrorCategory = ProviderErrorCode | 'INVALID_MODEL_OUTPUT' | 'TOOL_EXECUTION_FAILED';
+export type AgentErrorCategory = ProviderErrorCode | 'INVALID_MODEL_OUTPUT' | 'OUTPUT_TRUNCATED' | 'TOOL_EXECUTION_FAILED';
 
 export interface SafeProviderFailure {
   code: ProviderErrorCode;
@@ -157,8 +157,8 @@ export function classifyProviderError(value: unknown, now = Date.now()): SafePro
 }
 
 export async function withProviderRetry<T>(
-  operation: (signal?: AbortSignal) => Promise<T>,
-  options: { maxRetries?: number; timeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; shouldRetry?: (failure: SafeProviderFailure) => boolean; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure) => Promise<void> } = {},
+  operation: (signal?: AbortSignal, onProgress?: () => void) => Promise<T>,
+  options: { maxRetries?: number; timeoutMs?: number; firstTokenTimeoutMs?: number; idleTimeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; shouldRetry?: (failure: SafeProviderFailure) => boolean; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure, timeoutSource?: 'request-deadline' | 'first-token' | 'idle' | 'stage-deadline' | 'provider') => Promise<void> } = {},
 ): Promise<T> {
   const maxRetries = Math.max(0, Math.min(1, options.maxRetries ?? 1));
   const timeoutMs = Math.max(1, Math.min(600_000, options.timeoutMs ?? 60_000));
@@ -167,8 +167,21 @@ export async function withProviderRetry<T>(
   for (let attempt = 0; ; attempt++) {
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('REQUEST_ABORTED');
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+    const idleController = new AbortController();
+    const signal = AbortSignal.any([timeoutSignal, idleController.signal, ...(options.signal ? [options.signal] : [])]);
+    let progressObserved = false;
     let onAbort: (() => void) | undefined;
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutError = () => Object.assign(new Error('Provider stream timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    if (options.firstTokenTimeoutMs !== undefined && options.idleTimeoutMs !== undefined) {
+      inactivityTimer = setTimeout(() => idleController.abort(timeoutError()), Math.max(1, options.firstTokenTimeoutMs));
+    }
+    const onProgress = () => {
+      progressObserved = true;
+      if (options.idleTimeoutMs === undefined || idleController.signal.aborted) return;
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => idleController.abort(timeoutError()), Math.max(1, options.idleTimeoutMs));
+    };
     try {
       const aborted = new Promise<never>((_, reject) => {
         onAbort = () => reject(options.signal?.aborted
@@ -176,20 +189,23 @@ export async function withProviderRetry<T>(
           : Object.assign(new Error('Provider request timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' }));
         signal.addEventListener('abort', onAbort, { once: true });
       });
-      return await Promise.race([Promise.resolve().then(() => operation(signal)), aborted]);
+      return await Promise.race([Promise.resolve().then(() => operation(signal, onProgress)), aborted]);
     } catch (error) {
+      const timeoutSource = options.signal?.aborted ? 'request-deadline'
+        : idleController.signal.aborted ? progressObserved ? 'idle' : 'first-token'
+          : timeoutSignal.aborted ? 'stage-deadline' : 'provider';
       if (options.signal?.aborted) {
         const reason = options.signal.reason ?? error;
         const abortedFailure = classifyProviderError(reason, options.now?.() ?? Date.now());
         if (abortedFailure?.code === 'TIMEOUT') {
-          await options.onFailure?.(abortedFailure);
+          await options.onFailure?.(abortedFailure, timeoutSource);
           throw new ProviderRequestFailure(abortedFailure);
         }
         throw reason;
       }
       const safe = classifyProviderError(error, options.now?.() ?? Date.now());
       if (!safe) throw error;
-      await options.onFailure?.(safe);
+      await options.onFailure?.(safe, safe.code === 'TIMEOUT' ? timeoutSource : undefined);
       if (!safe.retryable || options.shouldRetry?.(safe) === false || attempt >= maxRetries || (safe.retryAfterMs ?? 0) > 2_000) throw new ProviderRequestFailure(safe);
       const exponential = Math.min(4_000, 250 * 2 ** attempt);
       const jittered = Math.round(exponential * (0.5 + Math.max(0, Math.min(1, random()))));
@@ -220,6 +236,7 @@ export async function withProviderRetry<T>(
         });
       }
     } finally {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
       if (onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
@@ -251,7 +268,7 @@ export function safeProviderFailure(value: unknown): SafeProviderFailure | undef
 export function safeAgentFailure(value: unknown): { code: AgentErrorCategory; retryable: boolean; retryAfterMs?: number; requestId?: string; telemetry?: Record<string, number> } | undefined {
   if (value instanceof AgentRequestFailure) return { code: value.category, retryable: value.context.retryable ?? false, ...(value.context.retryAfterMs !== undefined ? { retryAfterMs: value.context.retryAfterMs } : {}), ...(value.context.requestId ? { requestId: value.context.requestId } : {}), ...(value.context.telemetry ? { telemetry: value.context.telemetry } : {}) };
   for (const error of errorChain(value)) {
-    if (error.name === 'AgentRequestFailure' && Object.hasOwn({ INVALID_MODEL_OUTPUT: true, TOOL_EXECUTION_FAILED: true, QUOTA_EXCEEDED: true, RATE_LIMITED: true, TIMEOUT: true, CONNECTION_FAILED: true, MODEL_UNAVAILABLE: true, PROVIDER_UNAVAILABLE: true, PROVIDER_AUTH_FAILED: true, PROVIDER_CREDITS_EXHAUSTED: true }, String(error.category))) {
+    if (error.name === 'AgentRequestFailure' && Object.hasOwn({ INVALID_MODEL_OUTPUT: true, OUTPUT_TRUNCATED: true, TOOL_EXECUTION_FAILED: true, QUOTA_EXCEEDED: true, RATE_LIMITED: true, TIMEOUT: true, CONNECTION_FAILED: true, MODEL_UNAVAILABLE: true, PROVIDER_UNAVAILABLE: true, PROVIDER_AUTH_FAILED: true, PROVIDER_CREDITS_EXHAUSTED: true }, String(error.category))) {
       const context = record(error.context);
       return { code: error.category as AgentErrorCategory, retryable: context?.retryable === true, ...(typeof context?.retryAfterMs === 'number' ? { retryAfterMs: context.retryAfterMs } : {}), ...(typeof context?.requestId === 'string' ? { requestId: context.requestId } : {}), ...(record(context?.telemetry) ? { telemetry: record(context?.telemetry) as Record<string, number> } : {}) };
     }
@@ -271,6 +288,7 @@ export function safeAgentErrorMessage(code: AgentErrorCategory): string {
     CONNECTION_FAILED: 'Could not connect to the selected AI provider. Check that it is reachable and try again.',
     MODEL_UNAVAILABLE: 'The selected model is unavailable. Check the selected model and provider.',
     INVALID_MODEL_OUTPUT: 'The model returned output that did not match the required format. Please retry.',
+    OUTPUT_TRUNCATED: 'The model response reached its output limit before the answer was complete. Narrow the request and try again.',
     TOOL_EXECUTION_FAILED: 'The selected capability could not be completed.',
     PROVIDER_UNAVAILABLE: 'The selected AI provider is temporarily unavailable. Please retry shortly.',
     PROVIDER_AUTH_FAILED: 'The selected AI provider rejected its configured credentials.',

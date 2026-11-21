@@ -12,7 +12,7 @@ export function reportedUsage(value:any){
   return usage&&typeof usage==='object'?usage:undefined;
 }
 export async function persistUsageEvent(prisma:PrismaService,record:Record<string,unknown>){try{await prisma.llmUsage.create({data:record as any});}catch(error){console.warn(JSON.stringify({event:'llm_usage_persistence_failed',errorType:error instanceof Error?error.name:'unknown'}));}}
-export async function persistUsage(prisma:PrismaService,context:UsageContext,detail:{invocationId?:string;usage?:any;status:'success'|'failed';latencyMs:number|null;source:string;actualModel?:string;error?:unknown}){
+export async function persistUsage(prisma:PrismaService,context:UsageContext,detail:{invocationId?:string;usage?:any;status:'success'|'failed';latencyMs:number|null;source:string;actualModel?:string;error?:unknown;errorCategory?:string|null;finishReason?:string|null;maxOutputTokens?:number|null}){
   const usage=detail.usage;
   const hasCounts=!!usage&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','cachedTokens','reasoningTokens'].some(key=>Number.isInteger(usage[key]));
   await persistUsageEvent(prisma,{
@@ -24,7 +24,8 @@ export async function persistUsage(prisma:PrismaService,context:UsageContext,det
     cachedTokens:Number.isInteger(usage?.cachedInputTokens)?usage.cachedInputTokens:Number.isInteger(usage?.cachedTokens)?usage.cachedTokens:null,
     reasoningTokens:Number.isInteger(usage?.reasoningTokens)?usage.reasoningTokens:null,
     usageSource:usage?detail.source:null,accuracy:hasCounts?'provider-reported':'unavailable',status:detail.status,latencyMs:detail.latencyMs===null?null:Math.max(0,Math.round(detail.latencyMs)),
-    errorCategory:detail.status==='failed'?(detail.error instanceof Error?detail.error.name:'LLM_ERROR'):null,
+    errorCategory:detail.status==='failed'?(detail.errorCategory??(detail.error instanceof Error?detail.error.name:'LLM_ERROR')):null,
+    finishReason:detail.finishReason??null,maxOutputTokens:detail.maxOutputTokens??context.runtime.maxOutputTokens??null,
   });
 }
 
@@ -40,9 +41,9 @@ export function instrumentAgent<T extends object>(agent:T,prisma:PrismaService,c
       }
     };
     if(property==='stream'&&typeof original==='function')return async (...args:any[])=>{
-      const streamId=randomUUID();const streamStarted=performance.now();let stream:any;try{stream=await original.apply(target,args);}catch(error){await persistUsage(prisma,context,{invocationId:streamId,usage:reportedUsage(error),status:'failed',latencyMs:performance.now()-streamStarted,source:'mastra-stream',error});throw error;}
+      const streamId=randomUUID();const streamStarted=performance.now();const requestedBudget=Number.isInteger(args[1]?.modelSettings?.maxOutputTokens)?args[1].modelSettings.maxOutputTokens:context.runtime.maxOutputTokens;let stream:any;try{stream=await original.apply(target,args);}catch(error){await persistUsage(prisma,context,{invocationId:streamId,usage:reportedUsage(error),status:'failed',latencyMs:performance.now()-streamStarted,source:'mastra-stream',error,maxOutputTokens:requestedBudget});throw error;}
       const full=stream.fullStream;let wrapped=false;
-      return new Proxy(stream,{get(s,p,r){if(p==='fullStream'&&!wrapped){wrapped=true;return (async function*(){let currentId=streamId;let currentStart=performance.now();let settled=false;try{for await(const chunk of full){if(chunk.type==='step-start'){currentId=randomUUID();currentStart=performance.now();settled=false;}if(chunk.type==='step-finish'){const output=chunk.payload?.output;await persistUsage(prisma,context,{invocationId:currentId,usage:reportedUsage(output),status:output?.error?'failed':'success',latencyMs:performance.now()-currentStart,source:'mastra-stream-step',actualModel:output?.response?.modelId,error:output?.error});settled=true;}yield chunk;}if(!settled)await persistUsage(prisma,context,{invocationId:currentId,status:'success',latencyMs:performance.now()-currentStart,source:'mastra-stream'});}catch(error){if(!settled)await persistUsage(prisma,context,{invocationId:currentId,usage:reportedUsage(error),status:'failed',latencyMs:performance.now()-currentStart,source:'mastra-stream',error});throw error;}})();}return Reflect.get(s,p,r);}});
+      return new Proxy(stream,{get(s,p,r){if(p==='fullStream'&&!wrapped){wrapped=true;return (async function*(){let currentId=streamId;let currentStart=performance.now();let settled=false;try{for await(const chunk of full){if(chunk.type==='step-start'){currentId=randomUUID();currentStart=performance.now();settled=false;}if(chunk.type==='step-finish'){const output=chunk.payload?.output;const finishReason=chunk.payload?.stepResult?.reason;const answer=context.runtime.role==='ANSWER';const errorCategory=output?.error?'CONNECTION_FAILED':answer&&finishReason==='length'?'OUTPUT_TRUNCATED':answer&&finishReason!=='stop'?'CONNECTION_FAILED':null;await persistUsage(prisma,context,{invocationId:currentId,usage:reportedUsage(output),status:errorCategory?'failed':'success',latencyMs:performance.now()-currentStart,source:'mastra-stream-step',actualModel:output?.response?.modelId,error:output?.error,errorCategory,finishReason:typeof finishReason==='string'?finishReason:null,maxOutputTokens:requestedBudget});settled=true;}yield chunk;}if(!settled)await persistUsage(prisma,context,{invocationId:currentId,status:'failed',latencyMs:performance.now()-currentStart,source:'mastra-stream',errorCategory:'CONNECTION_FAILED',maxOutputTokens:requestedBudget});}catch(error){if(!settled)await persistUsage(prisma,context,{invocationId:currentId,usage:reportedUsage(error),status:'failed',latencyMs:performance.now()-currentStart,source:'mastra-stream',error,maxOutputTokens:requestedBudget});throw error;}})();}return Reflect.get(s,p,r);}});
     };
     return original;
   }});

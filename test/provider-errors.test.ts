@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
+import { AgentRequestFailure, classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeAgentClientResponse, safeAgentFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
 import { createSitePilotStorageExporter } from '../src/mastra/observability.js';
 
 test('provider errors map common upstream statuses to stable safe codes', () => {
@@ -13,6 +13,15 @@ test('provider errors map common upstream statuses to stable safe codes', () => 
   assert.equal(classifyProviderError({ name: 'TimeoutError', message: 'private provider response' })?.code, 'TIMEOUT');
   assert.equal(classifyProviderError({ name: 'RetryError', errors: [{ statusCode: 429, responseHeaders: { 'retry-after': '2' } }] })?.retryAfterMs, 2000);
   assert.equal(classifyProviderError({ statusCode: 401 })?.retryable, false);
+});
+
+test('output truncation remains distinct from provider transport failure in client errors', () => {
+  const error = new AgentRequestFailure('OUTPUT_TRUNCATED');
+  assert.deepEqual(safeAgentFailure(error), { code: 'OUTPUT_TRUNCATED', retryable: false });
+  assert.deepEqual(safeAgentClientResponse(error), {
+    statusCode: 502,
+    body: { code: 'OUTPUT_TRUNCATED', message: 'The model response reached its output limit before the answer was complete. Narrow the request and try again.', retryable: false },
+  });
 });
 
 test('retry-after date and metadata are bounded and do not expose provider response text', () => {
@@ -138,6 +147,72 @@ test('provider timeout honors a measured stage budget above the former 60-second
   } finally {
     AbortSignal.timeout = originalTimeout;
   }
+});
+
+test('stream timeout distinguishes first token, idle gaps, and healthy progress', async () => {
+  await assert.rejects(withProviderRetry(() => new Promise(() => undefined), {
+    timeoutMs: 100, firstTokenTimeoutMs: 10, idleTimeoutMs: 10, maxRetries: 0,
+  }), error => error instanceof ProviderRequestFailure && error.safe.code === 'TIMEOUT');
+
+  const started = Date.now();
+  const value = await withProviderRetry(async (_signal, progress) => {
+    await new Promise(resolve => setTimeout(resolve, 5)); progress?.();
+    await new Promise(resolve => setTimeout(resolve, 8)); progress?.();
+    await new Promise(resolve => setTimeout(resolve, 8)); progress?.();
+    return 'complete';
+  }, { timeoutMs: 100, firstTokenTimeoutMs: 10, idleTimeoutMs: 12, maxRetries: 0 });
+  assert.equal(value, 'complete');
+  assert.ok(Date.now() - started >= 20, 'generation may exceed the idle timeout while progress continues');
+
+  await assert.rejects(withProviderRetry(async (_signal, progress) => {
+    progress?.();
+    await new Promise(() => undefined);
+  }, { timeoutMs: 100, firstTokenTimeoutMs: 10, idleTimeoutMs: 10, maxRetries: 0 }), error => error instanceof ProviderRequestFailure && error.safe.code === 'TIMEOUT');
+});
+
+test('timeout diagnostics identify the timer that ended the provider call', async () => {
+  const sources: string[] = [];
+  const onFailure = async (_failure: any, source?: string) => { if (source) sources.push(source); };
+  const stalled = (signal?: AbortSignal) => new Promise<never>((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }));
+
+  await assert.rejects(withProviderRetry(stalled, { timeoutMs: 100, firstTokenTimeoutMs: 8, idleTimeoutMs: 8, maxRetries: 0, onFailure }));
+  assert.equal(sources.at(-1), 'first-token');
+
+  await assert.rejects(withProviderRetry((signal, progress) => new Promise<never>((_resolve, reject) => {
+    progress?.();
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }), { timeoutMs: 100, firstTokenTimeoutMs: 8, idleTimeoutMs: 8, maxRetries: 0, onFailure }));
+  assert.equal(sources.at(-1), 'idle');
+
+  await assert.rejects(withProviderRetry((signal, progress) => new Promise<never>((_resolve, reject) => {
+    const heartbeat = setInterval(() => progress?.(), 2);
+    signal?.addEventListener('abort', () => { clearInterval(heartbeat); reject(signal.reason); }, { once: true });
+  }), { timeoutMs: 20, firstTokenTimeoutMs: 8, idleTimeoutMs: 8, maxRetries: 0, onFailure }));
+  assert.equal(sources.at(-1), 'stage-deadline');
+
+  const request = new AbortController();
+  setTimeout(() => request.abort(Object.assign(new Error('request deadline'), { name: 'TimeoutError', code: 'ETIMEDOUT' })), 8);
+  await assert.rejects(withProviderRetry(stalled, { signal: request.signal, timeoutMs: 100, firstTokenTimeoutMs: 50, idleTimeoutMs: 50, maxRetries: 0, onFailure }));
+  assert.equal(sources.at(-1), 'request-deadline');
+
+  await assert.rejects(withProviderRetry(async () => { throw Object.assign(new Error('provider timeout'), { name: 'TimeoutError', code: 'ETIMEDOUT' }); }, { maxRetries: 0, onFailure }));
+  assert.equal(sources.at(-1), 'provider');
+});
+
+test('stream request cancellation interrupts the generation without becoming a timeout', async () => {
+  const controller = new AbortController();
+  const request = withProviderRetry(async signal => new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }), { signal: controller.signal, timeoutMs: 1000, firstTokenTimeoutMs: 500, idleTimeoutMs: 500 });
+  controller.abort(new Error('CLIENT_DISCONNECTED'));
+  await assert.rejects(request, /CLIENT_DISCONNECTED/);
+});
+
+test('stream hard deadline still bounds a continuously active generation', async () => {
+  await assert.rejects(withProviderRetry((signal, progress) => new Promise((_resolve, reject) => {
+    const heartbeat = setInterval(() => progress?.(), 2);
+    signal?.addEventListener('abort', () => { clearInterval(heartbeat); reject(signal.reason); }, { once: true });
+  }), { timeoutMs: 20, firstTokenTimeoutMs: 10, idleTimeoutMs: 10, maxRetries: 0 }), error => error instanceof ProviderRequestFailure && error.safe.code === 'TIMEOUT');
 });
 
 test('model fallback is opt-in and cannot cross provider or Local AI Only boundaries', () => {

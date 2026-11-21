@@ -9,6 +9,11 @@ import { asMastraModel } from '../src/mastra/runtime-model.js';
 import { workflowGroundingInstructions } from '../src/agent/grounding-instructions.js';
 import { localGenerationOptions } from '../src/mastra/generation-options.js';
 
+test('default Answer token budget supports long document tables', () => {
+  assert.equal(config.answerMaxOutputTokens, 2048);
+  assert.deepEqual(localGenerationOptions({ provider: 'ollama', model: 'qwen3:8b', ollamaThink: false, maxOutputTokens: config.answerMaxOutputTokens }).modelSettings, { maxOutputTokens: 2048 });
+});
+
 test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correct wire format', async () => {
   const previous = { modelProvider: config.modelProvider, model: config.model, ollamaUrl: config.ollamaUrl, ollamaThink: config.ollamaThink };
   const received: any[] = [];
@@ -42,12 +47,13 @@ test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correc
 test('Ollama Answer streaming also sends no-thinking and bounded output options', async () => {
   const previousUrl = config.ollamaUrl;
   const received: any[] = [];
+  let finishReason: string | undefined = 'stop';
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const chunk of request) raw += chunk;
     received.push(JSON.parse(raw));
     response.setHeader('Content-Type', 'text/event-stream');
     response.write(`data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 0, model: 'qwen3:8b', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }] })}\n\n`);
-    response.write(`data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 0, model: 'qwen3:8b', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
+    response.write(`data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 0, model: 'qwen3:8b', choices: [{ index: 0, delta: {}, ...(finishReason ? { finish_reason: finishReason } : {}) }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
     response.end('data: [DONE]\n\n');
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -56,11 +62,25 @@ test('Ollama Answer streaming also sends no-thinking and bounded output options'
     const runtime = { provider: 'ollama', model: 'qwen3:8b', ollamaThink: true, role: 'ANSWER' as const, maxOutputTokens: 256 };
     const agent = new Agent({ id: 'ollama-answer-stream-test', name: 'Answer', instructions: workflowGroundingInstructions, model: asMastraModel(runtime).primary as any });
     const result = await agent.stream('Say hello', { maxSteps: 1, toolChoice: 'none', activeTools: [], ...localGenerationOptions(runtime) });
-    for await (const _chunk of result.fullStream) { /* Consume the provider stream. */ }
+    const reasons: string[] = [];
+    for await (const chunk of result.fullStream) if (chunk.type === 'step-finish') reasons.push(chunk.payload.stepResult.reason);
     assert.equal(received.length, 1);
     assert.equal(received[0].stream, true);
     assert.equal(received[0].reasoning_effort, 'none');
     assert.equal(received[0].max_tokens, 256);
+    assert.deepEqual(reasons, ['stop']);
+
+    finishReason = 'length';
+    const truncated = await agent.stream('Say hello', { maxSteps: 1, toolChoice: 'none', activeTools: [], ...localGenerationOptions(runtime) });
+    const truncatedReasons: string[] = [];
+    for await (const chunk of truncated.fullStream) if (chunk.type === 'step-finish') truncatedReasons.push(chunk.payload.stepResult.reason);
+    assert.deepEqual(truncatedReasons, ['length']);
+
+    finishReason = undefined;
+    const missing = await agent.stream('Say hello', { maxSteps: 1, toolChoice: 'none', activeTools: [], ...localGenerationOptions(runtime) });
+    const missingReasons: string[] = [];
+    for await (const chunk of missing.fullStream) if (chunk.type === 'step-finish') missingReasons.push(chunk.payload.stepResult.reason);
+    assert.ok(!missingReasons.includes('stop'), 'missing provider completion metadata must never normalize to success');
   } finally {
     config.ollamaUrl = previousUrl;
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -129,5 +149,31 @@ test('Gemini Planner keeps JSON mode while receiving the same Zod validation sch
     assert.equal(requestBody.generationConfig.responseMimeType, 'application/json');
     assert.equal(requestBody.generationConfig.responseSchema, undefined);
     assert.equal(requestBody.generationConfig.maxOutputTokens, 512);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('Gemini Answer adapter preserves stop and max-token completion reasons', async () => {
+  const previousFetch = globalThis.fetch;
+  let finishReason: string | undefined = 'STOP';
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'A supported answer [E1]' }] }, ...(finishReason ? { finishReason } : {}) }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 5, totalTokenCount: 7 } })}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+  try {
+    const runtime = { provider: 'google', model: 'gemini-3.6-flash', apiKey: 'test-key', role: 'ANSWER' as const, ollamaThink: false, maxOutputTokens: 256 };
+    const agent = new Agent({ id: 'gemini-answer-finish-test', name: 'Answer', instructions: 'Answer from evidence.', model: asMastraModel(runtime).primary as any });
+    const complete = await agent.stream('Answer from evidence.', { maxSteps: 1, toolChoice: 'none', activeTools: [], modelSettings: { maxOutputTokens: 256 } });
+    const completeReasons: string[] = [];
+    for await (const chunk of complete.fullStream) if (chunk.type === 'step-finish') completeReasons.push(chunk.payload.stepResult.reason);
+    assert.deepEqual(completeReasons, ['stop']);
+
+    finishReason = 'MAX_TOKENS';
+    const truncated = await agent.stream('Answer from evidence.', { maxSteps: 1, toolChoice: 'none', activeTools: [], modelSettings: { maxOutputTokens: 256 } });
+    const truncatedReasons: string[] = [];
+    for await (const chunk of truncated.fullStream) if (chunk.type === 'step-finish') truncatedReasons.push(chunk.payload.stepResult.reason);
+    assert.deepEqual(truncatedReasons, ['length']);
+
+    finishReason = undefined;
+    const missing = await agent.stream('Answer from evidence.', { maxSteps: 1, toolChoice: 'none', activeTools: [], modelSettings: { maxOutputTokens: 256 } });
+    const missingReasons: string[] = [];
+    for await (const chunk of missing.fullStream) if (chunk.type === 'step-finish') missingReasons.push(chunk.payload.stepResult.reason);
+    assert.ok(!missingReasons.includes('stop'), 'missing provider completion metadata must never normalize to success');
   } finally { globalThis.fetch = previousFetch; }
 });

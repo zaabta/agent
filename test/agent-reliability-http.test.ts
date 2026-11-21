@@ -45,6 +45,7 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
   let limited = false;
   let pauseStreaming = false;
   let slowStreaming = false;
+  let truncatedStreaming = false;
   let planPrompt = '';
   let analyticsMode: 'rank' | 'followup' | undefined;
   const workbook = { documentId: randomUUID(), filename: 'violations.xlsx', sheets: [{ sheetName: 'Warnings', columns: ['Employee', 'Year'] }] };
@@ -80,14 +81,24 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
       }
       return { object: { operation: 'retrieve', standaloneQuestion: 'Compare project costs and risks', retrievalQuery: 'project costs risks', retrievalQueries: ['project costs', 'project risks'] } } as any;
     }
-    return { object: { answer: 'Costs and risks are documented.', evidenceSufficient: true, evidenceIds: ['E1', 'E2'] } } as any;
+    return { object: { answer: 'unused' } } as any;
   });
   const streaming = mock.method(Agent.prototype, 'stream', async (_messages: any, options: any) => {
     assert.deepEqual(options.activeTools, []);
     if (config.modelProvider === 'ollama' && config.model.startsWith('qwen3') && !config.ollamaThink) assert.equal(options?.providerOptions?.ollama?.reasoningEffort, 'none');
+    if (truncatedStreaming) {
+      assert.match(_messages[0].content, /Authorized evidence inventory/);
+      assert.match(_messages[0].content, /Project risks/);
+      return ({
+      fullStream: (async function* () {
+        yield { type: 'text-delta', payload: { text: 'Footing schedule | CF3 [E1]' } };
+        yield { type: 'step-finish', payload: { output: { usage: { inputTokens: 80, outputTokens: 512 }, response: { modelId: 'qwen3:8b' } }, stepResult: { reason: 'length' } } };
+      })(), getFullOutput: async () => ({ text: 'Footing schedule | CF3 [E1]' }),
+      }) as any;
+    }
     return ({
-    fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Costs ' } }; if (slowStreaming) await new Promise(resolve => setTimeout(resolve, 200)); if (pauseStreaming) { await new Promise<void>((_resolve, reject) => { const abort = () => reject(options.abortSignal.reason); if (options.abortSignal.aborted) abort(); else options.abortSignal.addEventListener('abort', abort, { once: true }); }); } yield { type: 'text-delta', payload: { text: 'and risks.' } }; })(),
-    getFullOutput: async () => ({ text: 'Costs and risks.' }),
+    fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Costs ' } }; if (slowStreaming) await new Promise(resolve => setTimeout(resolve, 200)); if (pauseStreaming) { await new Promise<void>((_resolve, reject) => { const abort = () => reject(options.abortSignal.reason); if (options.abortSignal.aborted) abort(); else options.abortSignal.addEventListener('abort', abort, { once: true }); }); } yield { type: 'text-delta', payload: { text: 'and risks. [E1] [E2]' } }; yield { type: 'step-finish', payload: { output: { usage: { inputTokens: 10, outputTokens: 5 }, response: { modelId: 'fixture' } }, stepResult: { reason: 'stop' } } }; })(),
+    getFullOutput: async () => ({ text: 'Costs and risks. [E1] [E2]' }),
   }) as any; });
   @Module({ controllers: [AgentController], providers: [
     { provide: AgentService, useValue: service },
@@ -130,13 +141,23 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
     assert.doesNotMatch(failedFrames, /event: done/);
     assert.equal((await (await request(`conversations/${id}`)).json() as any).messages.at(-1).status, 'failed');
     limited = false;
+    truncatedStreaming = true;
+    const truncatedFrames = await (await request('stream', { message: 'Show the footing schedule as a table', conversationId: id })).text();
+    assert.match(truncatedFrames, /event: text-delta/);
+    assert.match(truncatedFrames, /event: error/);
+    assert.match(truncatedFrames, /"code":"OUTPUT_TRUNCATED"/);
+    assert.match(truncatedFrames, /"providerErrors":0/);
+    assert.match(truncatedFrames, /"discardProvisional":true/);
+    assert.doesNotMatch(truncatedFrames, /event: done/);
+    assert.equal((await (await request(`conversations/${id}`)).json() as any).messages.at(-1).status, 'failed');
+    truncatedStreaming = false;
     for (const message of ['\u0642\u0627\u0631\u0646 \u0628\u064a\u0646\u0647\u0645\u0627', '\u0130kisini kar\u015f\u0131la\u015ft\u0131r', 'Compare them']) {
       const response = await request('stream', { message, conversationId: id });
       const frames = (await response.text()).split('\n\n').filter(Boolean).map(frame => ({ name: frame.split('\n')[0]!.slice(7), data: JSON.parse(frame.split('\ndata: ')[1]!) }));
       for (const name of ['status', 'stage', 'tool-start', 'tool-finish', 'text-delta', 'text-reset', 'sources', 'done']) assert.ok(frames.some(frame => frame.name === name), name);
       assert.equal(frames.filter(frame => frame.name === 'done').length, 1);
       const final = frames.find(frame => frame.name === 'done')!.data;
-      assert.equal(final.telemetry.llmCalls, 3);
+      assert.equal(final.telemetry.llmCalls, 2);
       assert.equal(final.sources.length, 2);
       const saved = await (await request(`conversations/${id}`)).json() as any;
       assert.equal(saved.messages.at(-1).content, final.answer);
@@ -157,8 +178,8 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
       await new Promise(resolve => setTimeout(resolve, 20));
       restored = await (await request(`conversations/${id}`)).json() as any;
     } while (restored.messages.at(-1).status === 'processing' && Date.now() < deadline);
-    assert.equal(restored.messages.at(-1).status, 'completed');
-    assert.match(restored.messages.at(-1).content, /Costs and risks are documented/);
+    assert.equal(restored.messages.at(-1).status, 'interrupted');
+    assert.doesNotMatch(restored.messages.at(-1).content, /Costs and risks are documented/);
     slowStreaming = false;
     pauseStreaming = true;
     const cancellationResponse = await request('stream', { message: 'Cancel this comparison', conversationId: id });

@@ -28,6 +28,7 @@ export interface VerifiedSource {
   documentId: string;
   documentVersionId?: string;
   chunkId?: string;
+  pageNumber?: number;
   contentHash?: string;
   paragraphStart?: number;
   paragraphEnd?: number;
@@ -206,11 +207,61 @@ export class AgentService implements OnModuleDestroy {
           signal => (Reflect.get(target, property, target) as (...args: any[]) => Promise<unknown>).call(target, messages, { ...options, abortSignal: signal, maxRetries: 0 }),
           { signal: options.abortSignal as AbortSignal | undefined, timeoutMs },
         );
-        if (property === 'stream') return (...args: any[]) => {
+        if (property === 'stream') return async (...args: any[]) => {
           const options = (args[1] ?? {}) as Record<string, unknown>;
-          const timeoutSignal = AbortSignal.timeout(timeoutMs);
-          args[1] = { ...options, abortSignal: options.abortSignal instanceof AbortSignal ? AbortSignal.any([options.abortSignal, timeoutSignal]) : timeoutSignal, maxRetries: 0 };
-          return (Reflect.get(target, property, target) as (...args: any[]) => unknown).apply(target, args);
+          const isAnswer = runtime.role === 'ANSWER';
+          const streamController = new AbortController();
+          const maxDurationMs = isAnswer ? runtime.maxStreamDurationMs ?? config.answerStreamMaxDurationMs : timeoutMs;
+          const signal = AbortSignal.any([streamController.signal, AbortSignal.timeout(maxDurationMs), ...(options.abortSignal instanceof AbortSignal ? [options.abortSignal] : [])]);
+          let idleTimer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = () => Object.assign(new Error('Provider stream timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+          const arm = (ms: number) => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => streamController.abort(timeout()), ms);
+          };
+          if (isAnswer) arm(60_000);
+          let rejectAbort: (() => void) | undefined;
+          const abortPromise = new Promise<never>((_resolve, reject) => {
+            rejectAbort = () => reject(signal.reason ?? timeout());
+            if (signal.aborted) rejectAbort(); else signal.addEventListener('abort', rejectAbort, { once: true });
+          });
+          args[1] = { ...options, abortSignal: signal, maxRetries: 0 };
+          let output: any;
+          try {
+            output = await Promise.race([(Reflect.get(target, property, target) as (...args: any[]) => Promise<unknown>).apply(target, args), abortPromise]);
+          } catch (error) {
+            if (idleTimer) clearTimeout(idleTimer);
+            if (rejectAbort) signal.removeEventListener('abort', rejectAbort);
+            throw error;
+          }
+          const fullStream = (async function* () {
+            let completed = false;
+            const iterator = output.fullStream[Symbol.asyncIterator]();
+            try {
+              while (true) {
+                const next = await Promise.race([iterator.next(), abortPromise]);
+                if (next.done) break;
+                const chunk: any = next.value;
+                if (isAnswer && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.payload.text) arm(30_000);
+                if (isAnswer && chunk.type === 'step-finish') {
+                  const reason = chunk.payload.stepResult.reason;
+                  if (reason === 'error' || typeof reason !== 'string' || !reason) throw new AgentRequestFailure('CONNECTION_FAILED');
+                  if (reason !== 'stop' && reason !== 'length') throw new AgentRequestFailure('CONNECTION_FAILED');
+                  completed = true;
+                }
+                yield chunk;
+              }
+              if (isAnswer && !completed) throw new AgentRequestFailure('CONNECTION_FAILED');
+            } finally {
+              if (idleTimer) clearTimeout(idleTimer);
+              if (rejectAbort) signal.removeEventListener('abort', rejectAbort);
+              await Promise.resolve(iterator.return?.()).catch(() => undefined);
+            }
+          })();
+          return new Proxy(output, { get: (stream, key) => key === 'fullStream' ? fullStream : (() => {
+            const value = Reflect.get(stream, key, stream);
+            return typeof value === 'function' ? value.bind(stream) : value;
+          })() });
         };
         return Reflect.get(target, property, target);
       },
@@ -502,9 +553,9 @@ export class AgentService implements OnModuleDestroy {
     try {
     if (isDocumentInventoryRequest(message)) {
       const listing = await this.typegraph.listDocuments(principal.tenantId, principal.userId);
-      const documents = listing.documents as Array<{ id?: string; name?: string }>;
+      const documents = listing.documents as Array<{ id?: string; name?: string; type?: string }>;
       const answer = documents.length
-        ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}`
+        ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'} (${document.type ?? 'Unknown type'})`).join('\n')}`
         : 'There are no indexed documents in your workspace.';
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer, undefined, principal, [], turn.preserveConversationContext);
       return { answer, sources: [], toolsCalled: ['listDocuments'], citationValidation: 'valid' as const,
@@ -679,7 +730,8 @@ export class AgentService implements OnModuleDestroy {
     const startedAt = performance.now();
     const runtime = await resolveRuntimeModels(this.prisma);
     const run = this.activeRuns.create(principal);
-    const runSignal = AbortSignal.any([abortSignal, run.controller.signal]);
+    const overallDeadlineMs = Math.min(600_000, (runtime.planner.requestTimeoutMs ?? config.agentTimeoutMs) + (runtime.answer.maxStreamDurationMs ?? config.answerStreamMaxDurationMs));
+    const runSignal = AbortSignal.any([abortSignal, run.controller.signal, AbortSignal.timeout(overallDeadlineMs)]);
     const runWriter: EventWriter = (event, data) => write(event, event === 'status' ? { ...data, runId: run.runId } : data);
     try {
       const result = config.agentOrchestration === 'workflow' || await this.backendTools?.hasEnabledTools(principal)
@@ -692,13 +744,17 @@ export class AgentService implements OnModuleDestroy {
         this.activeRuns.finish(run.runId, 'cancelled');
         throw new AgentRunCancelledError(run.runId, Math.max(0, Date.now() - (run.cancelRequestedAtMs ?? Date.now())));
       }
+      if (runSignal.aborted && !safeAgentFailure(runSignal.reason)) {
+        this.activeRuns.finish(run.runId, 'cancelled');
+        throw runSignal.reason ?? new Error('CLIENT_DISCONNECTED');
+      }
       this.activeRuns.finish(run.runId, 'failed');
       const failure = safeAgentFailure(error);
       if (failure && !failure.requestId) throw new AgentRequestFailure(failure.code, {
         requestId: run.runId,
         retryable: failure.retryable,
         retryAfterMs: failure.retryAfterMs,
-        telemetry: failure.code === 'INVALID_MODEL_OUTPUT' || failure.code === 'TOOL_EXECUTION_FAILED' ? undefined : { providerErrors: 1, totalMs: Math.round(performance.now() - startedAt) },
+        telemetry: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(failure.code) ? undefined : { providerErrors: 1, totalMs: Math.round(performance.now() - startedAt) },
       });
       throw error;
     }
@@ -750,8 +806,8 @@ export class AgentService implements OnModuleDestroy {
     if (isDocumentInventoryRequest(message)) {
       await emit('tool-start', { toolName: 'listDocuments' });
       const listing = await this.typegraph.listDocuments(principal.tenantId, principal.userId);
-      const documents = listing.documents as Array<{ id?: string; name?: string }>;
-      const answer = documents.length ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'}`).join('\n')}` : 'There are no indexed documents in your workspace.';
+      const documents = listing.documents as Array<{ id?: string; name?: string; type?: string }>;
+      const answer = documents.length ? `Documents in your workspace:\n${documents.map(document => `- ${document.name ?? document.id ?? 'Untitled document'} (${document.type ?? 'Unknown type'})`).join('\n')}` : 'There are no indexed documents in your workspace.';
       this.activeRuns.beginFinalization(runId, abortSignal);
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, answer, undefined, principal, [], turn.preserveConversationContext);
       await emit('tool-finish', { toolName: 'listDocuments', durationMs: listing.durationMs, sourceCount: 0 });
@@ -982,6 +1038,7 @@ export class AgentService implements OnModuleDestroy {
             groundedStepStarted.set(chunk.payload.messageId ?? String(groundedStep), now);
             await emit('step-start', { step: stepNumber + groundedStep });
           } else if (chunk.type === 'step-finish') {
+            if (chunk.payload.stepResult.reason === 'length') throw new AgentRequestFailure('OUTPUT_TRUNCATED');
             const key = chunk.payload.messageId ?? String(groundedStep);
             const started = groundedStepStarted.get(key);
             if (started !== undefined) {
@@ -1086,7 +1143,7 @@ export class AgentService implements OnModuleDestroy {
       const answerParts:string[]=[];
       for await(const chunk of final.fullStream){
         if(chunk.type==='step-start'){modelCallCount++;await emit('step-start',{step:modelCallCount,recovery:'answer'});}
-        else if(chunk.type==='step-finish'){const usage=chunk.payload.output.usage;if(typeof usage.inputTokens==='number')promptTokens=(promptTokens??0)+usage.inputTokens;if(typeof usage.outputTokens==='number')completionTokens=(completionTokens??0)+usage.outputTokens;await emit('step-finish',{step:modelCallCount,recovery:'answer',promptTokens:usage.inputTokens??null,completionTokens:usage.outputTokens??null});}
+        else if(chunk.type==='step-finish'){if(chunk.payload.stepResult.reason==='length')throw new AgentRequestFailure('OUTPUT_TRUNCATED');const usage=chunk.payload.output.usage;if(typeof usage.inputTokens==='number')promptTokens=(promptTokens??0)+usage.inputTokens;if(typeof usage.outputTokens==='number')completionTokens=(completionTokens??0)+usage.outputTokens;await emit('step-finish',{step:modelCallCount,recovery:'answer',promptTokens:usage.inputTokens??null,completionTokens:usage.outputTokens??null});}
         else if(chunk.type==='text-delta'&&chunk.payload.text){answerParts.push(chunk.payload.text);streamedText.push(chunk.payload.text);if(ttftMs===null)ttftMs=Math.round(performance.now()-startedAt);await emit('text-delta',{text:chunk.payload.text,verification:'provisional'});}
         else if(chunk.type==='error'||chunk.type==='abort')throw chunk.payload?.error??new Error('MODEL_STREAM_FAILED');
       }
@@ -1176,7 +1233,7 @@ export class AgentService implements OnModuleDestroy {
     });
     return { ...result, conversationId: turn.conversationId, timing: telemetry };
     } catch (error) {
-      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted && !safeAgentFailure(abortSignal.reason) ? 'interrupted' : 'failed').catch(() => undefined);
       throw error;
     }
   }
@@ -1189,9 +1246,10 @@ export class AgentService implements OnModuleDestroy {
     const timeToFirstStatusMs = Math.round(performance.now() - startedAt);
     let streamedAnswer = false;
     let timeToFirstTextMs: number | null = null;
-    let providerTelemetry: { providerErrors: number; providerRetries: number; llmCalls: number; llmLatencyMs: number; code: string } | undefined;
+    let providerTelemetry: { providerErrors: number; providerRetries: number; llmCalls: number; llmLatencyMs: number; code: string; timeoutSource?: string } | undefined;
     const workflow = createAgentWorkflow(this.typegraph, this.structuredData, principal, abortSignal, {
       onPlannerDiagnostic: diagnostic => this.persistPlannerDiagnostic(diagnostic),
+      onDiagnostic: diagnostic => write('diagnostic', diagnostic as unknown as Record<string, unknown>),
       onProviderTelemetry: telemetry => { providerTelemetry = telemetry; return write('telemetry', telemetry); },
       onProgress: async progress => {
         await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, progress.stage);
@@ -1263,12 +1321,12 @@ export class AgentService implements OnModuleDestroy {
     } catch (error) {
       const provider = safeAgentFailure(error);
       recordWorkflowDiagnostic(requestId.replace(/-/g, ''), principal.tenantId, { step: 'sse-workflow', code: provider?.code ?? (error instanceof Error ? error.name : 'UNKNOWN'), ...(provider ? { retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : {}), outcome: abortSignal.aborted ? 'cancelled' : 'failure' });
-      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted && !safeAgentFailure(abortSignal.reason) ? 'interrupted' : 'failed').catch(() => undefined);
       if (provider) throw new AgentRequestFailure(provider.code, {
         requestId,
         retryable: provider.retryable,
         retryAfterMs: provider.retryAfterMs,
-        telemetry: provider.telemetry ?? (provider.code !== 'INVALID_MODEL_OUTPUT' && provider.code !== 'TOOL_EXECUTION_FAILED' && providerTelemetry
+        telemetry: provider.telemetry ?? (!['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(provider.code) && providerTelemetry
           ? { providerErrors: providerTelemetry.providerErrors, providerRetries: providerTelemetry.providerRetries, llmCalls: providerTelemetry.llmCalls, llmLatencyMs: providerTelemetry.llmLatencyMs }
           : undefined),
       });
@@ -1435,10 +1493,10 @@ export class AgentService implements OnModuleDestroy {
     for (const result of toolResults) {
       const output = result.payload.result as { hits?: DocumentSearchHit[] } | undefined;
       for (const hit of output?.hits ?? []) {
-        const { documentId, filename, chunkIndex, documentVersionId, chunkId, contentHash, paragraphStart, paragraphEnd } = hit.citation;
+        const { documentId, filename, chunkIndex, documentVersionId, chunkId, pageNumber, contentHash, paragraphStart, paragraphEnd } = hit.citation;
         const sourceRef = hit.sourceRef;
         if (!documentId || !filename || !sourceRef || !Number.isInteger(chunkIndex)) continue;
-        sources.set(`${documentId}:${documentVersionId || 'legacy'}:${chunkIndex}`, { documentId, filename, sourceRef, chunkIndex, ...(documentVersionId ? { documentVersionId } : {}), ...(chunkId ? { chunkId } : {}), ...(contentHash ? { contentHash } : {}), ...(paragraphStart ? { paragraphStart } : {}), ...(paragraphEnd ? { paragraphEnd } : {}) });
+        sources.set(`${documentId}:${documentVersionId || 'legacy'}:${chunkId ?? chunkIndex}`, { documentId, filename, sourceRef, chunkIndex, ...(documentVersionId ? { documentVersionId } : {}), ...(chunkId ? { chunkId } : {}), ...(Number.isInteger(pageNumber) ? { pageNumber } : {}), ...(contentHash ? { contentHash } : {}), ...(paragraphStart ? { paragraphStart } : {}), ...(paragraphEnd ? { paragraphEnd } : {}) });
       }
       const structured = result.payload.result as { sources?: StructuredSource[] } | undefined;
       for (const source of structured?.sources ?? []) {

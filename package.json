@@ -34,6 +34,7 @@
     "eval:seed": "node --import tsx scripts/seed-quality-corpus.ts",
     "typecheck:audit": "tsc --project tsconfig.audit.json",
     "eval:live-audit": "node --import tsx scripts/live-audit.ts",
+    "diagnose:footing-e2e": "node --import tsx scripts/diagnose-footing-e2e.ts",
     "eval:ollama-fixtures": "node --import tsx scripts/evaluate-ollama-fixtures.ts"
   },
   "dependencies": {

@@ -22,3 +22,12 @@ test('citation validator returns only source references explicitly cited by the 
   assert.equal(result.citationValidation, 'valid');
   assert.deepEqual(result.sources.map((source: { filename: string }) => source.filename), ['brief.md']);
 });
+
+test('citation validator rejects a reference outside retrieved authorized evidence', () => {
+  const agent = Object.create(AgentService.prototype) as any;
+  const result = agent.validateAnswer('The project leader is Deniz Kaya [[private.md (Leadership)]].', [{ payload: { result: { hits: [
+    { citation: { documentId: 'doc-1', filename: 'brief.md', chunkIndex: 0 }, sourceRef: 'brief.md (Leadership)', content: 'Project leader: Deniz Kaya.' },
+  ] } } }], ['documentSearch']);
+  assert.equal(result.citationValidation, 'fallback');
+  assert.deepEqual(result.sources, []);
+});

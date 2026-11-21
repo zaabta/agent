@@ -3,7 +3,6 @@ import type { Response } from 'express';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
-import { config } from '../config.js';
 import { AgentService } from './agent.service.js';
 import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InstallationOwnerOnly } from '../auth/installation-owner.decorator.js';
@@ -46,15 +45,7 @@ export class AgentController {
   async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
     const { message, conversationId } = this.validateBody(body, false);
     const controller = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new Error('REQUEST_TIMEOUT'));
-    }, config.agentTimeoutMs);
-    timeout.unref();
 
-    // A disconnected browser stops receiving SSE but does not cancel generation;
-    // the persisted assistant turn can be restored from conversation history.
     response.status(200);
     response.set({
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -63,6 +54,10 @@ export class AgentController {
       'X-Accel-Buffering': 'no',
     });
     response.flushHeaders();
+    const onDisconnect = () => {
+      if (!response.writableEnded && !controller.signal.aborted) controller.abort(new Error('CLIENT_DISCONNECTED'));
+    };
+    response.once('close', onDisconnect);
 
     const write = async (event: string, data: Record<string, unknown>, allowAborted = false) => {
       if (response.destroyed || (controller.signal.aborted && !allowAborted)) return;
@@ -98,20 +93,20 @@ export class AgentController {
         const modelFailure = error instanceof Error && error.message === 'MODEL_STREAM_FAILED';
         const capacity = error instanceof AgentRunCapacityError ? error : undefined;
         await write('error', {
-          code: timedOut ? 'TIMEOUT' : capacity?.code ?? failure?.code ?? (modelFailure ? 'CONNECTION_FAILED' : 'AGENT_REQUEST_FAILED'),
-          message: timedOut ? safeAgentErrorMessage('TIMEOUT') : failure ? safeAgentErrorMessage(failure.code) : capacity?.message ?? 'The agent request could not be completed.',
+          code: capacity?.code ?? failure?.code ?? (modelFailure ? 'CONNECTION_FAILED' : 'AGENT_REQUEST_FAILED'),
+          message: failure ? safeAgentErrorMessage(failure.code) : capacity?.message ?? 'The agent request could not be completed.',
           recoverable: failure?.retryable ?? Boolean(capacity),
           ...(failure ? { retryable: failure.retryable } : {}),
           ...(capacity ? { retryable: true, retryAfterMs: 1000 } : {}),
           ...(failure?.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
           ...(failure?.requestId ? { requestId: failure.requestId } : {}),
-          ...(failure?.telemetry ? { telemetry: failure.telemetry } : failure ? { telemetry: { providerErrors: failure.code === 'INVALID_MODEL_OUTPUT' || failure.code === 'TOOL_EXECUTION_FAILED' ? 0 : 1 } } : {}),
+          ...(failure?.telemetry ? { telemetry: failure.telemetry } : failure ? { telemetry: { providerErrors: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(failure.code) ? 0 : 1 } } : {}),
           discardProvisional: true,
         }, true);
         response.end();
       }
     } finally {
-      clearTimeout(timeout);
+      response.off('close', onDisconnect);
     }
   }
 

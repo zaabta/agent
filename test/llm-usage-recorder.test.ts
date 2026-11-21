@@ -45,3 +45,11 @@ test('runtime resolver selects planner and answer models independently and keeps
   values.PLANNER_MODEL='gemini-next';const next=await resolveRuntimeModels(prisma);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(next.planner.model,'gemini-next');
   delete values.PLANNER_PROVIDER;delete values.PLANNER_MODEL;delete values.ANSWER_PROVIDER;delete values.ANSWER_MODEL;const legacy=await resolveRuntimeModels(prisma);assert.equal(legacy.planner.provider,'ollama');assert.equal(legacy.answer.model,'shared');
 });
+
+test('Answer stream usage persists completion metadata and never records truncation as success',async()=>{
+  const saved:any[]=[];const prisma:any={llmUsage:{create:async({data}:any)=>{saved.push(data);}}};
+  const runtime:any={provider:'google',model:'gemini-answer',role:'ANSWER',ollamaThink:false,maxOutputTokens:384};
+  const agent=instrumentAgent({stream:async()=>({fullStream:(async function*(){yield{type:'step-start'};yield{type:'step-finish',payload:{output:{usage:{inputTokens:12,outputTokens:384,totalTokens:396},response:{modelId:'gemini-answer'}},stepResult:{reason:'length'}}};})()})} as any,prisma,{tenantId:'tenant',userId:'user',logicalRequestId:'request',runtime} as any);
+  const result=await (agent as any).stream('question',{modelSettings:{maxOutputTokens:1024}});for await(const _chunk of result.fullStream){}
+  assert.equal(saved.length,1);assert.equal(saved[0].status,'failed');assert.equal(saved[0].errorCategory,'OUTPUT_TRUNCATED');assert.equal(saved[0].finishReason,'length');assert.equal(saved[0].maxOutputTokens,1024);assert.equal(saved[0].inputTokens,12);assert.equal(saved[0].outputTokens,384);
+});

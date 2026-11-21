@@ -80,7 +80,7 @@ const evidenceSchema = z.object({
 });
 const finalSchema = z.object({
   answer: z.string(),
-  sources: z.array(z.object({ documentId: z.string(), documentVersionId: z.string().optional(), chunkId: z.string().optional(), contentHash: z.string().optional(), paragraphStart: z.number().int().optional(), paragraphEnd: z.number().int().optional(), filename: z.string(), sourceRef: z.string(), chunkIndex: z.number().int() })),
+  sources: z.array(z.object({ documentId: z.string(), documentVersionId: z.string().optional(), chunkId: z.string().optional(), pageNumber: z.number().int().optional(), contentHash: z.string().optional(), paragraphStart: z.number().int().optional(), paragraphEnd: z.number().int().optional(), filename: z.string(), sourceRef: z.string(), chunkIndex: z.number().int() })),
   selection: structuredSelectionSchema.optional(),
   toolsCalled: z.array(z.string()),
   citationValidation: z.enum(['valid', 'no-evidence', 'fallback']),
@@ -101,19 +101,51 @@ type Plan =
 type PublicTool = { inputSchema?: { parse: (input: unknown) => unknown }; execute: (input: any, context: any) => Promise<unknown> };
 
 function sourceList(results: Array<{ result: any }>) {
-  const byRef = new Map<string, { documentId: string; documentVersionId?: string; chunkId?: string; contentHash?: string; paragraphStart?: number; paragraphEnd?: number; filename: string; sourceRef: string; chunkIndex: number }>();
+  const byRef = new Map<string, { documentId: string; documentVersionId?: string; chunkId?: string; pageNumber?: number; contentHash?: string; paragraphStart?: number; paragraphEnd?: number; filename: string; sourceRef: string; chunkIndex: number }>();
   for (const { result } of results) {
     for (const hit of result?.hits ?? []) {
       const citation = hit.citation;
       if (citation?.documentId && citation?.filename && hit.sourceRef && Number.isInteger(citation.chunkIndex)) {
-        byRef.set(hit.sourceRef, { documentId: citation.documentId, ...(citation.documentVersionId ? { documentVersionId: citation.documentVersionId } : {}), ...(citation.chunkId ? { chunkId: citation.chunkId } : {}), ...(citation.contentHash ? { contentHash: citation.contentHash } : {}), ...(citation.paragraphStart ? { paragraphStart: citation.paragraphStart } : {}), ...(citation.paragraphEnd ? { paragraphEnd: citation.paragraphEnd } : {}), filename: citation.filename, sourceRef: hit.sourceRef, chunkIndex: citation.chunkIndex });
+        byRef.set(`${citation.documentId}:${citation.documentVersionId ?? 'legacy'}:${citation.chunkId ?? citation.chunkIndex}:${hit.sourceRef}`, { documentId: citation.documentId, ...(citation.documentVersionId ? { documentVersionId: citation.documentVersionId } : {}), ...(citation.chunkId ? { chunkId: citation.chunkId } : {}), ...(Number.isInteger(citation.pageNumber) ? { pageNumber: citation.pageNumber } : {}), ...(citation.contentHash ? { contentHash: citation.contentHash } : {}), ...(citation.paragraphStart ? { paragraphStart: citation.paragraphStart } : {}), ...(citation.paragraphEnd ? { paragraphEnd: citation.paragraphEnd } : {}), filename: citation.filename, sourceRef: hit.sourceRef, chunkIndex: citation.chunkIndex });
       }
     }
     for (const source of result?.sources ?? []) {
-      if (source?.documentId && source?.filename && source?.sourceRef && Number.isInteger(source?.chunkIndex)) byRef.set(source.sourceRef, source);
+      if (source?.documentId && source?.filename && source?.sourceRef && Number.isInteger(source?.chunkIndex)) byRef.set(`${source.documentId}:${source.documentVersionId ?? 'legacy'}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`, source);
     }
   }
   return [...byRef.values()];
+}
+
+function markdownTableCells(line: string) {
+  return /^\s*\|.*\|\s*$/.test(line) ? line.trim().split('|').slice(1, -1) : undefined;
+}
+
+function isMarkdownTableSeparator(line: string) {
+  const cells = markdownTableCells(line);
+  return Boolean(cells?.length && cells.every(cell => /^:?-{3,}:?$/.test(cell.trim())));
+}
+
+function normalizeCitationTableLabels(answer: string, evidenceIds: ReadonlySet<string>) {
+  const lines = answer.split('\n');
+  for (let index = 0; index < lines.length - 2; index++) {
+    const header = markdownTableCells(lines[index]!);
+    const citationIndex = header?.findIndex(cell => cell.trim().toLowerCase() === 'citation') ?? -1;
+    const separator = markdownTableCells(lines[index + 1]!);
+    if (citationIndex < 0 || !separator || separator.length !== header!.length || !isMarkdownTableSeparator(lines[index + 1]!)) continue;
+    for (let row = index + 2; row < lines.length; row++) {
+      const values = markdownTableCells(lines[row]!);
+      if (!values || values.length !== header!.length) break;
+      const label = values[citationIndex]?.trim();
+      if (label && evidenceIds.has(label)) {
+        const parts = lines[row]!.split('|');
+        const cellIndex = citationIndex + 1;
+        parts[cellIndex] = parts[cellIndex]!.replace(/^(\s*)(E\d+)(\s*)$/, '$1[$2]$3');
+        lines[row] = parts.join('|');
+      }
+    }
+    index++;
+  }
+  return lines.join('\n');
 }
 
 function schemaAwarePrompt(message: string, datasets: any[]) {
@@ -137,7 +169,7 @@ export function buildPlannerPrompt(input: {
   catalog: unknown[];
   message: string;
 }) {
-  const schemaText = ['google', 'gemini'].includes(input.provider.toLowerCase())
+  const schemaText = ['google', 'gemini', 'openai'].includes(input.provider.toLowerCase())
     ? `Return one JSON object matching this schema:\n${JSON.stringify(z.toJSONSchema(input.schema))}\n`
     : '';
   const catalog = input.catalog.map((item: any) => ({ id: item.id, description: item.description, input: item.input }));
@@ -188,6 +220,27 @@ export interface AgentWorkflowProgress {
   status: 'in_progress' | 'completed';
   message: string;
   toolName?: string;
+  durationMs?: number;
+  sourceCount?: number;
+}
+
+export interface AgentWorkflowDiagnostic {
+  requestId: string;
+  stage: 'planner-start' | 'planner-complete' | 'retrieval-complete' | 'answer-invocation' | 'answer-call-finish';
+  provider?: string;
+  model?: string;
+  durationMs?: number;
+  providerRetries?: number;
+  llmCalls?: number;
+  maxOutputTokens?: number;
+  retrievedChunks?: number;
+  evidenceChunks?: number;
+  evidenceChars?: number;
+  evidenceTokenEstimate?: number;
+  callIndex?: number;
+  finishReason?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
 }
 
 export interface AgentWorkflowStreamCallbacks {
@@ -195,7 +248,8 @@ export interface AgentWorkflowStreamCallbacks {
   onTextDelta?: (text: string) => Promise<void>;
   onTextReset?: () => Promise<void>;
   onPlannerDiagnostic?: (diagnostic: PlannerRoutingDiagnostic) => void;
-  onProviderTelemetry?: (telemetry: { requestId: string; providerErrors: number; providerRetries: number; llmCalls: number; llmLatencyMs: number; code: string }) => Promise<void>;
+  onDiagnostic?: (diagnostic: AgentWorkflowDiagnostic) => Promise<void>;
+  onProviderTelemetry?: (telemetry: { requestId: string; providerErrors: number; providerRetries: number; llmCalls: number; llmLatencyMs: number; code: string; timeoutSource?: string }) => Promise<void>;
 }
 
 export interface PlannerRoutingDiagnostic {
@@ -240,6 +294,15 @@ export function summarizePlannerValidationIssues(error: { issues: Array<{ code: 
 
 export function plannerGenerationOptions(runtime: RuntimeModelSnapshot) {
   const options = localGenerationOptions(runtime);
+  if (runtime.provider.toLowerCase() === 'openai') {
+    return {
+      ...options,
+      providerOptions: {
+        ...options.providerOptions,
+        openai: { ...options.providerOptions?.openai, structuredOutputs: false },
+      },
+    };
+  }
   if (!['google', 'gemini'].includes(runtime.provider.toLowerCase())) return options;
   // The installed Gemini adapter drops additionalProperties, making free-form tool args incompatible with its native response schema.
   return {
@@ -252,8 +315,8 @@ export function plannerGenerationOptions(runtime: RuntimeModelSnapshot) {
 }
 
 export function createAgentWorkflow(typegraph: TypegraphService, structured: StructuredDataService, principal: AuthPrincipal, abortSignal?: AbortSignal, callbacks: AgentWorkflowStreamCallbacks = {}, backendTools?: BackendTools, runtime?: RuntimeModelInput, usageRecorder?: (record: Record<string, unknown>) => Promise<void>, conversationId?: string) {
-  const progress = (stage: string, status: AgentWorkflowProgress['status'], message: string, toolName?: string) =>
-    callbacks.onProgress?.({ stage, status, message, ...(toolName ? { toolName } : {}) }) ?? Promise.resolve();
+  const progress = (stage: string, status: AgentWorkflowProgress['status'], message: string, toolName?: string, detail: Pick<AgentWorkflowProgress, 'durationMs' | 'sourceCount'> = {}) =>
+    callbacks.onProgress?.({ stage, status, message, ...detail, ...(toolName ? { toolName } : {}) }) ?? Promise.resolve();
   const plannerSnapshot = modelForRole(runtime, 'PLANNER');
   const modelSnapshot = modelForRole(runtime, 'ANSWER');
   const agent = createSitePilotAgent(typegraph, structured, principal.tenantId, principal.userId, 0, modelSnapshot);
@@ -305,9 +368,9 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
     timeoutMs: modelRequestTimeoutMs(runtime),
     shouldRetry: (failure: { code: string }) => !(runtime.provider.toLowerCase() === 'ollama' && failure.code === 'TIMEOUT'),
     onRetry: async () => { providerRetries++; await onRetry?.(); },
-    onFailure: async (failure: { code: string }) => {
+    onFailure: async (failure: { code: string; timeoutSource?: string }) => {
       providerErrors++;
-      await callbacks.onProviderTelemetry?.({ requestId, providerErrors, providerRetries, llmCalls, llmLatencyMs, code: failure.code }).catch(() => undefined);
+        await callbacks.onProviderTelemetry?.({ requestId, providerErrors, providerRetries, llmCalls, llmLatencyMs, code: failure.code, ...(failure.timeoutSource ? { timeoutSource: failure.timeoutSource } : {}) }).catch(() => undefined);
     },
   });
   let backendCatalogSnapshot: Array<{ id: string; description: string; input: unknown; version?: number }> = [];
@@ -340,6 +403,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
     execute: async ({ inputData }) => {
       await progress('planning', 'in_progress', 'Understanding your request');
       const startedAt = performance.now();
+      await callbacks.onDiagnostic?.({ requestId, stage: 'planner-start', provider: plannerSnapshot.provider, model: plannerSnapshot.model });
       const history = boundedConversationContext(inputData.history);
       const followUpContext = { entities: inputData.contextEntities, summary: inputData.conversationSummary, evidenceRefs: inputData.evidenceRefs, activeSelection: inputData.previousSelection };
       const evidenceFollowUp = isEvidenceFollowUp(inputData.message, history, followUpContext);
@@ -424,6 +488,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       callbacks.onPlannerDiagnostic?.(plannerRoutingDiagnostic);
       if (!planValid) throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
       stepDurations.planningMs = Math.round(performance.now() - startedAt);
+      await callbacks.onDiagnostic?.({ requestId, stage: 'planner-complete', provider: plannerSnapshot.provider, model: plannerSnapshot.model, durationMs: stepDurations.planningMs, providerRetries, llmCalls });
       await progress('planning', 'completed', 'Request plan is ready');
       return { message: chosen.standaloneQuestion?.trim() || inputData.message, originalMessage: inputData.message, history, plan: chosen, previousSelection: inputData.previousSelection, evidenceRefs, contextEntities: inputData.contextEntities, conversationSummary: inputData.conversationSummary };
     },
@@ -462,11 +527,14 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           if (abortSignal?.aborted) throw abortSignal.reason ?? new Error('AGENT_RUN_CANCELLED');
           const toolDurationMs = Math.round(performance.now() - toolStartedAt);
           toolExecutionMs += toolDurationMs;
+          const output: any = result;
+          const sourceCount = Array.isArray(output?.hits) ? output.hits.length : Array.isArray(output?.sources) ? output.sources.length : undefined;
           if (key === 'documentSearch') typegraphRetrievalMs += toolDurationMs;
           if (key === 'documentSearch' || key.startsWith('structured')) retrievalMs += toolDurationMs;
           toolResults.push({ name: key, result });
           toolNames.push(key);
-          await progress(stage, 'completed', key === 'documentSearch' ? 'Document search completed' : key === 'datasetDiscovery' ? 'Workspace data is ready' : 'Workspace lookup completed', key);
+          await progress(stage, 'completed', key === 'documentSearch' ? 'Document search completed' : key === 'datasetDiscovery' ? 'Workspace data is ready' : 'Workspace lookup completed', key, { durationMs: toolDurationMs, ...(sourceCount !== undefined ? { sourceCount } : {}) });
+          if (key === 'documentSearch') await callbacks.onDiagnostic?.({ requestId, stage: 'retrieval-complete', durationMs: toolDurationMs, retrievedChunks: sourceCount ?? 0 });
           return result as any;
         } catch (error) {
           traceFailure(requestId, principal.tenantId, { step: 'tool-execution', tool: key, code: error instanceof Error ? error.name : 'UNKNOWN', argumentHash: fingerprint(JSON.stringify(args)), elapsedMs: Math.round(performance.now() - startedAt) });
@@ -524,112 +592,197 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
           isDrawing(item.hit.citation?.filename ?? '') && item.hit.citation?.documentId).map(item => item.hit.citation.documentId));
         const missingRevision = { answer: 'I could not verify both drawing revisions from the available excerpts.', outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
         if (comparingDrawings && drawingIdentities(evidence).size < 2) return missingRevision;
-        const evidenceIds = evidence.map(item => item.id) as [string, ...string[]];
-        const citationSchema = z.object({
-          answer: z.string(),
-          evidenceSufficient: z.boolean().describe('True only when excerpts explicitly establish the requested fact, including an explicitly stated negative fact. A refusal saying the requested information is not mentioned or available in the excerpts MUST be false, even when that refusal is correct.'),
-          evidenceIds: z.array(z.enum(evidenceIds)).describe('Only excerpts that positively establish the requested fact. An insufficient-evidence refusal MUST use an empty array; never cite unrelated excerpts to support missing information.'),
-        });
         const evidenceText = evidence.map(item =>
-          `${item.id}: ${isDrawing(item.hit.citation?.filename ?? '') ? '[Unverified visual transcription] ' : ''}${item.hit.content}`).join('\n\n');
+          `${item.id} | ${item.sourceRef}${Number.isInteger(item.hit.citation?.pageNumber) ? ` | page ${item.hit.citation.pageNumber}` : ''} | document ${item.hit.citation.documentId}${item.hit.citation.documentVersionId ? ` | version ${item.hit.citation.documentVersionId}` : ''}${item.hit.citation.chunkId ? ` | chunk ${item.hit.citation.chunkId}` : ` | chunk ${item.hit.citation.chunkIndex}`}: ${isDrawing(item.hit.citation?.filename ?? '') ? '[Unverified visual transcription] ' : ''}${item.hit.content}`).join('\n\n');
         if (evidenceText.length > (modelSnapshot.maxContextChars ?? config.answerMaxContextChars)) {
           return { answer: 'The retrieved evidence is too large to verify safely in one pass. Please narrow the question.', outcome: 'clarification' as const, citationFailure: 'context-limit' as const };
         }
         try {
-          const generateWithoutTools = (messages: any, options: any) => {
-            const validationStartedAt = performance.now();
-            activeModelSnapshot=modelSnapshot;
-            return withProviderRetry(signal => observeModelCall(() => agent.generate(messages, { ...options, abortSignal: signal, ...localGenerationOptions(modelSnapshot), instructions: workflowGroundingInstructions, activeTools: [], maxRetries: 0 }), signal),
-              providerRetryOptions()).finally(() => { citationVerificationMs += Math.round(performance.now() - validationStartedAt); });
-          };
           await progress('composing', 'in_progress', 'Writing an answer from the retrieved evidence');
-          const prompt = `Answer in the language of the ORIGINAL user message below using only facts supported by the supplied excerpts. Include only facts needed to answer that question. Treat visual transcriptions as unverified, explicitly mark them as such in the answer, and never infer measurements or engineering conclusions. For revision comparisons cite both drawings and distinguish recorded differences from missing or unreadable content. Never infer a currency, unit, date or quantity that its supporting excerpt does not explicitly establish. Do not add unrelated records or warnings. Do not include citations or evidence labels; the server will attach verified citations after validation. If the excerpts do not answer the question, briefly say so without adding unsupported facts.\nConversation context (unverified; only for interpreting this request, never evidence): ${JSON.stringify(inputData.history)}\nORIGINAL user message (answer in this language): ${inputData.originalMessage}\nResolved question: ${question}\nEvidence:\n${evidenceText}`;
+          const prompt = `Answer in the language of the ORIGINAL user message using only facts directly supported by the supplied evidence. Include only facts needed to answer that question. Treat visual transcriptions as unverified, explicitly mark them as such, and never infer measurements or engineering conclusions. For revision comparisons cite evidence from both drawings and distinguish recorded differences from missing or unreadable content. Never infer a currency, unit, date or quantity the evidence does not explicitly establish. Do not add unrelated records or warnings. End every factual paragraph and every factual table row with one or more exact evidence labels in square brackets, such as [E1] or [E2]. In a Markdown table with a Citation column, put the bracketed label in that cell (for example, [E1]), not a bare label. Allowed labels for this answer: ${evidence.map(item => item.id).join(', ')}. Never invent or use a label outside this list. Do not cite a refusal that says the evidence does not answer the question; in that case say so briefly without evidence labels.\nConversation context (unverified; only for interpreting the request, never evidence): ${JSON.stringify(inputData.history)}\nORIGINAL user message: ${inputData.originalMessage}\nResolved question: ${question}\nAuthorized evidence inventory:\n${evidenceText}`;
           const tracingOptions = { traceId: requestId.replace(/-/g, ''), metadata: { requestId, tenantHash: tenantTraceKey(principal.tenantId), orchestration: 'workflow' } };
           await progress('composing', 'in_progress', 'Writing an answer from retrieved evidence');
+          await callbacks.onDiagnostic?.({ requestId, stage: 'answer-invocation', provider: modelSnapshot.provider, model: modelSnapshot.model, maxOutputTokens: modelSnapshot.maxOutputTokens ?? config.answerMaxOutputTokens, evidenceChunks: evidence.length, evidenceChars: evidenceText.length, evidenceTokenEstimate: Math.ceil(Buffer.byteLength(evidenceText, 'utf8') / 3) });
           let draft = '';
-          const answerStream = await withProviderRetry(async providerSignal => {
-            llmCalls++;
-            const callStartedAt = performance.now();
-            let streamedUsage: any; let streamedModelId:string|undefined; let streamedFinishReason:string|undefined; let streamedStatus='success';
-            try {
-              activeModelSnapshot=modelSnapshot;
-              const streamed = await agent.stream([{ role: 'user', content: prompt }], {
-                maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions,
-                activeTools: [], abortSignal: providerSignal, tracingOptions, ...localGenerationOptions(modelSnapshot),
-              });
-              let streamedDraft = '';
-              let usageSeen = false;
-              for await (const chunk of streamed.fullStream) {
-                if (chunk.type === 'text-delta' && chunk.payload.text) {
-                  streamedDraft += chunk.payload.text;
-                  await callbacks.onTextDelta?.(chunk.payload.text);
-                } else if (chunk.type === 'step-finish') {
-                  const usage = chunk.payload.output.usage;
-                  streamedModelId=(chunk.payload.output as any).response?.modelId;
-                  streamedFinishReason=(chunk.payload.output as any).finishReason;
-                  streamedUsage = usage;
-                  if (typeof usage.inputTokens === 'number') promptTokens += usage.inputTokens;
-                  if (typeof usage.outputTokens === 'number') completionTokens += usage.outputTokens;
-                  if (typeof usage.reasoningTokens === 'number') reasoningTokens += usage.reasoningTokens;
-                  usageSeen = true;
+          const outputTokenBudget = modelSnapshot.maxOutputTokens ?? config.answerMaxOutputTokens;
+          const continuationTokenBudget = Math.min(outputTokenBudget * 2, 4096);
+          const generationStartedAt = performance.now();
+          const answerStream = await withProviderRetry(async (providerSignal, providerProgress) => {
+            activeModelSnapshot = modelSnapshot;
+            let continuationToken: string | undefined;
+            let continuationAttempted = false;
+            const generationOptions = localGenerationOptions(modelSnapshot);
+            while (true) {
+              llmCalls++;
+              const callStartedAt = performance.now();
+              const callOutputBudget = continuationAttempted ? continuationTokenBudget : outputTokenBudget;
+              let streamedUsage: any; let streamedModelId: string | undefined; let streamedFinishReason: string | undefined;
+              let continuationAvailable = false; let finishObserved = false; let usageSeen = false;
+              let streamedStatus = 'success'; let streamedErrorCategory: string | undefined; let streamedDraft = '';
+              try {
+                const streamed = await agent.stream([{ role: 'user', content: prompt }], {
+                  maxSteps: 1, toolChoice: 'none', instructions: workflowGroundingInstructions,
+                  activeTools: [], abortSignal: providerSignal, tracingOptions,
+                  ...generationOptions,
+                  ...(continuationAttempted ? {
+                    modelSettings: { ...generationOptions.modelSettings, maxOutputTokens: continuationTokenBudget },
+                    providerOptions: { ...generationOptions.providerOptions, google: { ...generationOptions.providerOptions?.google, continuationToken } },
+                  } : {}),
+                });
+                for await (const chunk of streamed.fullStream) {
+                  if (chunk.type === 'text-delta' && chunk.payload.text) {
+                    streamedDraft += chunk.payload.text;
+                    draft += chunk.payload.text;
+                    providerProgress?.();
+                    await callbacks.onTextDelta?.(chunk.payload.text);
+                  } else if (chunk.type === 'reasoning-delta' && chunk.payload.text) {
+                    providerProgress?.();
+                  } else if (chunk.type === 'step-finish') {
+                    const output: any = chunk.payload.output;
+                    const usage = output.usage;
+                    streamedModelId = output.response?.modelId;
+                    streamedFinishReason = chunk.payload.stepResult.reason;
+                    continuationToken = typeof output.providerMetadata?.google?.continuationToken === 'string'
+                      && output.providerMetadata.google.continuationToken.length <= 8192
+                      ? output.providerMetadata.google.continuationToken : undefined;
+                    continuationAvailable = Boolean(continuationToken);
+                    finishObserved = true;
+                    streamedUsage = usage;
+                    if (typeof usage.inputTokens === 'number') promptTokens += usage.inputTokens;
+                    if (typeof usage.outputTokens === 'number') completionTokens += usage.outputTokens;
+                    if (typeof usage.reasoningTokens === 'number') reasoningTokens += usage.reasoningTokens;
+                    usageSeen = true;
+                    await callbacks.onDiagnostic?.({ requestId, stage: 'answer-call-finish', provider: modelSnapshot.provider, model: streamedModelId ?? modelSnapshot.model, durationMs: Math.round(performance.now() - callStartedAt), maxOutputTokens: callOutputBudget, callIndex: continuationAttempted ? 2 : 1, finishReason: streamedFinishReason ?? null, inputTokens: typeof usage?.inputTokens === 'number' ? usage.inputTokens : null, outputTokens: typeof usage?.outputTokens === 'number' ? usage.outputTokens : null });
+                  }
                 }
+                const output = await streamed.getFullOutput();
+                if (output.error) throw output.error;
+                if (!usageSeen && output.totalUsage) {
+                  streamedUsage = output.totalUsage;
+                  if (typeof output.totalUsage.inputTokens === 'number') promptTokens += output.totalUsage.inputTokens;
+                  if (typeof output.totalUsage.outputTokens === 'number') completionTokens += output.totalUsage.outputTokens;
+                  if (typeof output.totalUsage.reasoningTokens === 'number') reasoningTokens += output.totalUsage.reasoningTokens;
+                }
+                if (!finishObserved || !streamedFinishReason || streamedFinishReason === 'other' || streamedFinishReason === 'error') {
+                  streamedErrorCategory = 'CONNECTION_FAILED';
+                  throw new AgentRequestFailure('CONNECTION_FAILED');
+                }
+                if (streamedFinishReason === 'length') {
+                  streamedStatus = 'failed';
+                  streamedErrorCategory = 'OUTPUT_TRUNCATED';
+                  if (!continuationAttempted && modelSnapshot.provider.toLowerCase() === 'google' && continuationToken && continuationTokenBudget > outputTokenBudget) {
+                    continuationAttempted = true;
+                    continue;
+                  }
+                  traceFailure(requestId, principal.tenantId, {
+                    stage: 'answer-generation', code: 'OUTPUT_TRUNCATED', provider: modelSnapshot.provider,
+                    model: streamedModelId ?? modelSnapshot.model, finishReason: streamedFinishReason,
+                    inputTokens: streamedUsage?.inputTokens ?? null, outputTokens: streamedUsage?.outputTokens ?? null,
+                    maxOutputTokens: callOutputBudget, continuationAvailable, generationMs: Math.round(performance.now() - generationStartedAt),
+                  });
+                  throw new AgentRequestFailure('OUTPUT_TRUNCATED');
+                }
+                if (streamedFinishReason !== 'stop') {
+                  streamedErrorCategory = streamedFinishReason === 'content-filter' ? 'INVALID_MODEL_OUTPUT' : 'CONNECTION_FAILED';
+                  throw new AgentRequestFailure(streamedErrorCategory as any);
+                }
+                if (!draft.trim()) {
+                  streamedErrorCategory = 'INVALID_MODEL_OUTPUT';
+                  throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
+                }
+                traceFailure(requestId, principal.tenantId, {
+                  stage: 'answer-generation', outcome: 'complete', provider: modelSnapshot.provider,
+                  model: streamedModelId ?? modelSnapshot.model, finishReason: streamedFinishReason,
+                  inputTokens: streamedUsage?.inputTokens ?? null, outputTokens: streamedUsage?.outputTokens ?? null,
+                  maxOutputTokens: callOutputBudget, continuationAvailable, generationMs: Math.round(performance.now() - generationStartedAt),
+                });
+                return draft;
+              } catch (error) {
+                streamedStatus = 'failed';
+                streamedErrorCategory = safeAgentFailure(error)?.code ?? (error instanceof Error ? error.name : 'LLM_ERROR');
+                streamedUsage = (error as any)?.totalUsage ?? (error as any)?.usage ?? streamedUsage;
+                if (continuationAttempted && safeAgentFailure(error)?.code !== 'OUTPUT_TRUNCATED' && !abortSignal?.aborted) {
+                  streamedErrorCategory = 'OUTPUT_TRUNCATED';
+                  traceFailure(requestId, principal.tenantId, {
+                    stage: 'answer-generation', code: 'OUTPUT_TRUNCATED', provider: modelSnapshot.provider,
+                    model: streamedModelId ?? modelSnapshot.model, finishReason: streamedFinishReason ?? null,
+                    inputTokens: streamedUsage?.inputTokens ?? null, outputTokens: streamedUsage?.outputTokens ?? null,
+                    maxOutputTokens: callOutputBudget, continuationAvailable, generationMs: Math.round(performance.now() - generationStartedAt),
+                  });
+                  throw new AgentRequestFailure('OUTPUT_TRUNCATED');
+                }
+                throw error;
+              } finally {
+                const latencyMs = Math.round(performance.now() - callStartedAt);
+                llmLatencyMs += latencyMs;
+                if (usageRecorder) await usageRecorder({
+                  invocationId: randomUUID(), tenantId: principal.tenantId, userId: principal.userId, conversationId,
+                  logicalRequestId: requestId, role: modelSnapshot.role, provider: modelSnapshot.provider,
+                  configuredModelId: modelSnapshot.model, modelId: streamedModelId ?? modelSnapshot.model,
+                  inputTokens: typeof streamedUsage?.inputTokens === 'number' ? streamedUsage.inputTokens : null,
+                  outputTokens: typeof streamedUsage?.outputTokens === 'number' ? streamedUsage.outputTokens : null,
+                  totalTokens: typeof streamedUsage?.totalTokens === 'number' ? streamedUsage.totalTokens : typeof streamedUsage?.inputTokens === 'number' && typeof streamedUsage?.outputTokens === 'number' ? streamedUsage.inputTokens + streamedUsage.outputTokens : null,
+                  cachedTokens: typeof streamedUsage?.cachedInputTokens === 'number' ? streamedUsage.cachedInputTokens : null,
+                  reasoningTokens: typeof streamedUsage?.reasoningTokens === 'number' ? streamedUsage.reasoningTokens : null,
+                  usageSource: streamedUsage ? 'mastra-stream' : 'unavailable',
+                  accuracy: streamedUsage && ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'reasoningTokens'].some(key => typeof streamedUsage[key] === 'number') ? 'provider-reported' : 'unavailable',
+                  status: streamedStatus, latencyMs, errorCategory: streamedErrorCategory ?? null,
+                  finishReason: streamedFinishReason ?? null, maxOutputTokens: callOutputBudget,
+                }).catch(() => undefined);
               }
-              const output = await streamed.getFullOutput();
-              if (output.error) throw output.error;
-              if (streamedFinishReason === 'length') throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
-              if (!usageSeen && output.totalUsage) {
-                streamedUsage = output.totalUsage;
-                if (typeof output.totalUsage.inputTokens === 'number') promptTokens += output.totalUsage.inputTokens;
-                if (typeof output.totalUsage.outputTokens === 'number') completionTokens += output.totalUsage.outputTokens;
-                if (typeof output.totalUsage.reasoningTokens === 'number') reasoningTokens += output.totalUsage.reasoningTokens;
-              }
-              return streamedDraft.trim() ? streamedDraft : output.text;
-            } catch (error) { streamedStatus='failed'; streamedUsage=(error as any)?.totalUsage??(error as any)?.usage??streamedUsage; throw error; }
-            finally {
-              const latencyMs=Math.round(performance.now()-callStartedAt); llmLatencyMs += latencyMs;
-              if(usageRecorder) await usageRecorder({invocationId:randomUUID(),tenantId:principal.tenantId,userId:principal.userId,conversationId,logicalRequestId:requestId,role:modelSnapshot.role,provider:String(streamedUsage?.provider??modelSnapshot.provider),configuredModelId:modelSnapshot.model,modelId:String(streamedUsage?.modelId??streamedModelId??modelSnapshot.model),inputTokens:typeof streamedUsage?.inputTokens==='number'?streamedUsage.inputTokens:null,outputTokens:typeof streamedUsage?.outputTokens==='number'?streamedUsage.outputTokens:null,totalTokens:typeof streamedUsage?.totalTokens==='number'?streamedUsage.totalTokens:(typeof streamedUsage?.inputTokens==='number'&&typeof streamedUsage?.outputTokens==='number'?streamedUsage.inputTokens+streamedUsage.outputTokens:null),cachedTokens:typeof streamedUsage?.cachedInputTokens==='number'?streamedUsage.cachedInputTokens:null,reasoningTokens:typeof streamedUsage?.reasoningTokens==='number'?streamedUsage.reasoningTokens:null,usageSource:streamedUsage?'mastra-stream':'unavailable',accuracy:streamedUsage&&['inputTokens','outputTokens','totalTokens','cachedInputTokens','reasoningTokens'].some(k=>typeof streamedUsage[k]==='number')?'provider-reported':'unavailable',status:streamedStatus,latencyMs}).catch(()=>undefined);
             }
           }, {
             ...providerRetryOptions(async () => {
               await callbacks.onTextReset?.();
               await progress('composing', 'in_progress', 'Retrying the answer generation');
             }),
+            maxRetries: 0,
+            timeoutMs: modelSnapshot.maxStreamDurationMs ?? config.answerStreamMaxDurationMs,
+            firstTokenTimeoutMs: 60_000,
+            idleTimeoutMs: 30_000,
           });
           draft = answerStream;
+          draft = normalizeCitationTableLabels(draft, new Set(evidence.map(item => item.id)));
           await progress('composing', 'completed', 'Draft answer is ready');
-          await progress('validating', 'in_progress', 'Checking the answer against its evidence');
-          const validatePrompt = `Evaluate the proposed answer using only the supplied excerpts. The corrected answer must use the language of the ORIGINAL user message below. Keep explicit uncertainty for visual transcriptions and require evidence from both drawings before claiming a revision difference. Check each amount, currency and unit independently; remove unsupported units/currencies and unrelated facts. Preserve the proposed answer if supported; otherwise correct it or state that the evidence is insufficient. Select evidenceIds only from the excerpts that support factual claims. Set evidenceSufficient false when the excerpts do not answer the question and provide a brief insufficiency statement with no evidenceIds.\nConversation context (unverified; only for interpreting this request, never evidence): ${JSON.stringify(inputData.history)}\nORIGINAL user message (answer in this language): ${inputData.originalMessage}\nResolved question: ${question}\nProposed answer: ${draft}\nEvidence:\n${evidenceText}`;
-          const generationOptions = { maxSteps: 1, toolChoice: 'none' as const, structuredOutput: { schema: citationSchema, errorStrategy: 'strict' as const }, abortSignal, tracingOptions };
-          const grounded = await generateWithoutTools([{ role: 'user', content: validatePrompt }], generationOptions);
-          let parsed = citationSchema.safeParse(grounded.object);
-          if (parsed.success && parsed.data.evidenceSufficient && !parsed.data.evidenceIds.length && !isInsufficientEvidenceReply(parsed.data.answer)) {
-            const repaired = await generateWithoutTools([{ role: 'user', content: `${validatePrompt}\n\nYour previous validation claimed the answer was sufficient but omitted evidenceIds. Recheck the proposed answer against the excerpts. A correct refusal saying information is not mentioned or available in these excerpts MUST have evidenceSufficient=false and evidenceIds=[]; do not select unrelated labels merely to cite a refusal. Only return evidenceSufficient=true with labels when the excerpts explicitly establish the requested fact (including an explicitly stated negative fact).` }], generationOptions);
-            parsed = citationSchema.safeParse(repaired.object);
+          const verificationStartedAt = performance.now();
+          await progress('validating', 'in_progress', 'Checking cited sources');
+          if (isInsufficientEvidenceReply(draft)) {
+            citationVerificationMs += Math.round(performance.now() - verificationStartedAt);
+            await progress('validating', 'completed', 'Source references checked');
+            return { answer: draft.trim(), outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
           }
-          await progress('validating', 'completed', 'Evidence check completed');
-          if (!parsed.success || !parsed.data.answer.trim()) {
-            if (isInsufficientEvidenceReply(draft)) return { answer: draft.trim(), outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
-            return { answer: 'I could not produce a verifiable answer from the retrieved document evidence.', outcome: 'failure' as const, citationFailure: 'generation' as const };
+          const evidenceById = new Map(evidence.map(item => [item.id, item]));
+          const citedIds = [...draft.matchAll(/\[(E\d+)\]/g)].map(match => match[1]!);
+          const uniqueCitedIds = [...new Set(citedIds)];
+          const answerLines = draft.split('\n');
+          const uncitedTableRow = answerLines.some((line, index) => markdownTableCells(line)
+            && !isMarkdownTableSeparator(line)
+            && !isMarkdownTableSeparator(answerLines[index + 1] ?? '')
+            && !/\[(E\d+)\]/.test(line));
+          const uncitedParagraph = draft.split(/\n\s*\n/).some(block => {
+            const text = block.split('\n').filter(line => !/^\s*(?:#|\|)/.test(line)).join(' ').trim();
+            return text.length > 0 && !/\[(E\d+)\]/.test(block);
+          });
+          const invalidCitation = uniqueCitedIds.some(id => !evidenceById.has(id));
+          const reasonCodes = [
+            ...(!uniqueCitedIds.length ? ['missing_evidence_labels'] : []),
+            ...(invalidCitation ? ['unknown_evidence_label'] : []),
+            ...(uncitedTableRow ? ['uncited_table_row'] : []),
+            ...(uncitedParagraph ? ['uncited_factual_paragraph'] : []),
+          ];
+          citationVerificationMs += Math.round(performance.now() - verificationStartedAt);
+          await progress('validating', 'completed', 'Source references checked');
+          if (reasonCodes.length) {
+            traceFailure(requestId, principal.tenantId, { stage: 'citation-validation', code: reasonCodes[0], groundingReasonCodes: reasonCodes, evidenceLabels: evidence.map(item => item.id), modelEvidenceIdCount: uniqueCitedIds.length });
+            return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: invalidCitation ? 'unknown' as const : 'missing' as const };
           }
-          // Small models can label a correct short refusal as a supported fact
-          // and select every unrelated excerpt. Never attach those sources.
-          if (isInsufficientEvidenceReply(parsed.data.answer)) return { answer: parsed.data.answer, outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
-          if (!parsed.data.evidenceSufficient) {
-            if (parsed.data.evidenceIds.length) return { answer: 'The retrieved excerpts did not sufficiently support a factual answer.', outcome: 'failure' as const, citationFailure: 'unsupported' as const };
-            return { answer: parsed.data.answer, outcome: 'empty' as const, citationFailure: 'no-evidence' as const };
-          }
-          if (!parsed.data.evidenceIds.length) {
-            traceFailure(requestId, principal.tenantId, { stage: 'semantic-answer', code: 'missing', answerHash: fingerprint(parsed.data.answer), evidenceLabels: evidence.map(item => item.id), sourceRefs: evidence.map(item => item.sourceRef), modelEvidenceIdCount: 0 });
-            return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'missing' as const };
-          }
-          if (comparingDrawings && drawingIdentities(evidence.filter(item => parsed.data.evidenceIds.includes(item.id))).size < 2) return missingRevision;
-          const mappedRefs = parsed.data.evidenceIds.map(id => evidence.find(item => item.id === id)?.sourceRef);
-          if (mappedRefs.some(ref => !ref)) return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', outcome: 'failure' as const, citationFailure: 'unknown' as const };
-          // Multiple distinct chunks can legitimately cite the same PDF page.
-          const sourceRefs = [...new Set(mappedRefs.filter((ref): ref is string => Boolean(ref)))];
-          const visual = parsed.data.evidenceIds.some(id => isDrawing(evidence.find(item => item.id === id)?.hit.citation?.filename ?? ''));
+          const citedEvidence = uniqueCitedIds.map(id => evidenceById.get(id)!);
+          if (comparingDrawings && drawingIdentities(citedEvidence).size < 2) return missingRevision;
+          const sourceRefs = [...new Set(citedEvidence.map(item => item.sourceRef))];
+          const verifiedAnswer = draft.replace(/\[(E\d+)\]/g, (_label, id: string) => `[[${evidenceById.get(id)!.sourceRef}]]`);
+          const visual = citedEvidence.some(item => isDrawing(item.hit.citation?.filename ?? ''));
           const visualNotice = visual ? '\n\n⚠ Unverified visual transcription. Check the original drawing.' : '';
-          return { answer: `${parsed.data.answer.trim()}${visualNotice}\n\nSources: ${sourceRefs.map(ref => `[[${ref}]]`).join(' ')}`, outcome: 'success' as const, citationFailure: undefined };
+          return { answer: `${verifiedAnswer.trim()}${visualNotice}\n\nSources: ${sourceRefs.map(ref => `[[${ref}]]`).join(' ')}`, outcome: 'success' as const, citationFailure: undefined };
         } catch (error) {
           if (abortSignal?.aborted) throw abortSignal.reason ?? error;
           if (safeAgentFailure(error)) throw error;
@@ -638,7 +791,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
       };
       const synthesizeReply = async (instruction:string) => {
         activeModelSnapshot=modelSnapshot;
-        const result=await withProviderRetry(signal=>observeModelCall(()=>agent.generate([{role:'user',content:`${instruction}\nCurrent request: ${inputData.originalMessage}\nPlanning suggestion: ${plan.reply??''}\nConversation context: ${JSON.stringify(history)}`}],{maxSteps:1,toolChoice:'none',activeTools:[],abortSignal:signal,...localGenerationOptions(modelSnapshot),instructions:workflowGroundingInstructions}),signal),providerRetryOptions());
+        const result=await withProviderRetry(signal=>observeModelCall(()=>agent.generate([{role:'user',content:`${instruction}\nCurrent request: ${inputData.originalMessage}\nPlanning suggestion: ${plan.reply??''}\nConversation context: ${JSON.stringify(inputData.history)}`}],{maxSteps:1,toolChoice:'none',activeTools:[],abortSignal:signal,...localGenerationOptions(modelSnapshot),instructions:workflowGroundingInstructions}),signal),providerRetryOptions());
         return result.text.trim();
       };
       try {
@@ -787,16 +940,23 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
 Request: ${inputData.originalMessage}
 API result: ${serializedOutput}` }], {
                     maxSteps: 1, toolChoice: 'none', activeTools: [], abortSignal: signal,
+                    structuredOutput: { schema, errorStrategy: 'strict' as const },
                     instructions: workflowGroundingInstructions,
                     ...localGenerationOptions(modelSnapshot),
                   }), signal), providerRetryOptions());
-                  if (result.finishReason === 'length') throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
+                  if (result.finishReason === 'length') throw new AgentRequestFailure('OUTPUT_TRUNCATED');
                   let responseObject = result.object;
                   if (responseObject === undefined && typeof result.text === 'string') {
-                    try { responseObject = JSON.parse(result.text); } catch { throw new AgentRequestFailure('INVALID_MODEL_OUTPUT'); }
+                    try { responseObject = JSON.parse(result.text); } catch {
+                      traceFailure(requestId, principal.tenantId, { stage: 'custom-tool-answer-validation', reason: 'invalid_json' });
+                      throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
+                    }
                   }
                   const parsed = schema.safeParse(responseObject);
-                  if (!parsed.success) throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
+                  if (!parsed.success) {
+                    traceFailure(requestId, principal.tenantId, { stage: 'custom-tool-answer-validation', reason: 'answer_schema_mismatch' });
+                    throw new AgentRequestFailure('INVALID_MODEL_OUTPUT');
+                  }
                   answer = parsed.data.answer;
                 }
               } else {
@@ -819,7 +979,7 @@ API result: ${serializedOutput}` }], {
         } else if (plan.operation === 'list') {
           const output = await invoke('listDocuments', {});
           const docs = output.documents ?? [];
-          answer = docs.length ? `Documents in your workspace:\n${docs.map((d: any) => `- ${d.name ?? d.id ?? 'Untitled document'}`).join('\n')}` : 'There are no indexed documents in your workspace.';
+          answer = docs.length ? `Documents in your workspace:\n${docs.map((d: any) => `- ${d.name ?? d.id ?? 'Untitled document'} (${d.type ?? 'Unknown type'})`).join('\n')}` : 'There are no indexed documents in your workspace.';
         } else if (plan.operation === 'retrieve') {
           const output = await searchDocuments(plan.retrievalQuery || inputData.message);
           if (!output.hits?.length) { answer = 'I could not find matching evidence in the documents available to you.'; outcome = 'empty'; citationFailure = 'no-evidence'; }
@@ -1003,8 +1163,12 @@ API result: ${serializedOutput}` }], {
       const mixed = inputData.plan.operation === 'aggregate' && Boolean(inputData.plan.documentQuestion);
       const verifiedInsufficient = inputData.outcome === 'empty' && inputData.citationFailure === 'no-evidence' && (mixed || citations.length === 0);
       if (!contextLimited && (hasSemanticHits || hasCustomTools) && (invalid || hasSemanticHits && !verifiedInsufficient && sources.length > 0 && citations.length === 0)) {
-        const citationFailure = citations.length === 0 ? 'missing' : citations.some(ref => sources.some(source => source.sourceRef.normalize('NFC').trim().replace(/\s+/g, ' ') === ref.normalize('NFC').trim().replace(/\s+/g, ' '))) ? 'normalization' : 'unknown';
-        traceFailure(requestId, principal.tenantId, { stage: 'citation-validation', code: citationFailure, sourceRefs: sources.map(source => source.sourceRef), citationCount: citations.length, tools: inputData.toolNames });
+        const normalizedMatch = citations.some(ref => sources.some(source => source.sourceRef.normalize('NFC').trim().replace(/\s+/g, ' ') === ref.normalize('NFC').trim().replace(/\s+/g, ' ')));
+        const reasonCodes = [
+          ...(citations.length === 0 ? ['missing_source_reference'] : []),
+          ...(invalid ? [normalizedMatch ? 'source_reference_normalization' : 'unknown_source_reference'] : []),
+        ];
+        traceFailure(requestId, principal.tenantId, { stage: 'citation-validation', finalizationReasonCodes: reasonCodes, finalizationCode: reasonCodes[0], citationCount: citations.length, authorizedSourceCount: sources.length, tools: inputData.toolNames });
         return { answer: 'I could not produce an answer with verifiable document citations. Please try again.', sources: [], toolsCalled: inputData.toolNames, citationValidation: 'fallback' as const, outcome: 'failure' as const, requestId,
           timing: { planningMs: stepDurations.planningMs ?? 0, evidenceMs: stepDurations.evidenceMs ?? 0, finalizationMs: Math.round(performance.now() - startedAt), toolExecutionMs, retrievalMs, typegraphRetrievalMs, citationVerificationMs, llmCalls, promptTokens, completionTokens, reasoningTokens, llmLatencyMs, providerRetries, providerErrors } };
       }
@@ -1017,7 +1181,7 @@ API result: ${serializedOutput}` }], {
         outcome: inputData.outcome,
         operation: inputData.plan.operation,
         tools: inputData.toolNames,
-        sourceRefs: sources.map(source => source.sourceRef),
+        sourceCount: sources.length,
         citationFailure: inputData.citationFailure,
         step: 'finalization',
         stepDurations: { ...stepDurations, finalizationMs: Math.round(performance.now() - startedAt) },

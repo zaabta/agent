@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { z } from 'zod';
+import { Agent } from '@mastra/core/agent';
+import { createOpenAI } from '@ai-sdk/openai';
 import { backendCallLLMSchema, backendCallSchema } from '../src/agent/backend-tools.js';
 import { buildPlannerPrompt, planLLMSchema, planLLMSchemaWithoutTools, plannerGenerationOptions, summarizePlannerValidationIssues } from '../src/agent/agent.workflow.js';
 import { resolveRuntimeModels } from '../src/mastra/runtime-model.js';
@@ -53,7 +56,37 @@ test('Gemini planner uses validated JSON mode for dynamic tool arguments', () =>
   assert.deepEqual(plannerGenerationOptions({ provider: 'openrouter', model: 'model', ollamaThink: false }), {});
 });
 
-test('Planner prompt keeps schema text for Gemini and omits its duplicate for constrained-output providers', () => {
+test('OpenAI planner uses JSON mode and validates the complete plan locally', async () => {
+  const received: any[] = [];
+  const plan = { operation: 'tool_call', toolCall: { id: 'custom_233145be28474f2ca2b2f7b028a2a1dc', args: { q: 'luna' } } };
+  const server = createServer(async (request, response) => {
+    let raw = ''; for await (const chunk of request) raw += chunk;
+    received.push(JSON.parse(raw));
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ id: 'test', object: 'chat.completion', created: 0, model: 'gpt-4.1-mini', choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(plan) }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (server.address() as any).port;
+    const runtime = { provider: 'openai', model: 'gpt-4.1-mini', ollamaThink: false };
+    const schemaText = JSON.stringify(z.toJSONSchema(planLLMSchema));
+    const prompt = buildPlannerPrompt({
+      schema: planLLMSchema, retrievalLanguage: 'Preserve the user language.', conversationSummary: '', history: [],
+      contextEntities: [], userMemories: [], evidenceRefs: [], catalog: [{ id: plan.toolCall.id, description: 'Search a catalog.', input: { type: 'object', properties: { q: { type: 'string' } } } }],
+      message: 'Search for luna.', provider: 'openai',
+    });
+    const agent = new Agent({ id: 'openai-planner-json-mode-test', name: 'Planner', instructions: 'Return a plan.', model: createOpenAI({ apiKey: 'test-key', baseURL: `http://127.0.0.1:${port}/v1` }).chat(runtime.model) as any });
+    const result = await agent.generate(prompt, { ...plannerGenerationOptions(runtime), structuredOutput: { schema: planLLMSchema, errorStrategy: 'strict' }, maxSteps: 1 });
+    assert.deepEqual(planLLMSchema.parse(result.object), plan);
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0].response_format, { type: 'json_object' });
+    assert.ok(received[0].messages.some((message: any) => message.content.includes(schemaText)));
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('Planner prompt includes schemas for JSON-mode providers and omits them for native structured output', () => {
   const input = {
     schema: planLLMSchema, retrievalLanguage: 'Preserve the user language.', conversationSummary: '', history: [],
     contextEntities: [], userMemories: [], evidenceRefs: [], catalog: [{ id: 'custom_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'museumSearch', displayName: 'Museum Search', description: 'Check museum opening hours', input: { type: 'object', properties: { city: { type: 'string' } } } }],
@@ -61,9 +94,11 @@ test('Planner prompt keeps schema text for Gemini and omits its duplicate for co
   };
   const ollama = buildPlannerPrompt({ ...input, provider: 'ollama' });
   const gemini = buildPlannerPrompt({ ...input, provider: 'google' });
+  const openai = buildPlannerPrompt({ ...input, provider: 'openai' });
   const schemaText = JSON.stringify(z.toJSONSchema(planLLMSchema));
   assert.equal(ollama.includes(schemaText), false);
   assert.equal(gemini.includes(schemaText), true);
+  assert.equal(openai.includes(schemaText), true);
   assert.match(ollama, /Check museum opening hours/);
   assert.doesNotMatch(ollama, /museumSearch|Museum Search/);
   assert.match(ollama, /authorized capability catalog/i);

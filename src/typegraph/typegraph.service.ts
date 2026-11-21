@@ -24,6 +24,7 @@ export interface DocumentSearchHit {
     chunkIndex: number;
     chunkCount: number;
     location?: string;
+    pageNumber?: number;
     documentVersionId?: string;
     chunkId?: string;
     contentHash?: string;
@@ -100,16 +101,22 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     const client = await this.clientFor(tenantId);
     const active = await this.activeVersionScopes(tenantId);
     const activeIds = new Set(await this.activeTypegraphDocumentIds(client, userId, active));
-    const documents: Array<{ id: string; metadata: Record<string, unknown> }> = [];
+    const documents = new Map<string, { id: string; name: string; type: string }>();
     let offset = 0;
     while (true) {
       const page = await client.document.list({ bucketId: 'documents' }, { context: this.actor(userId) }, { limit: 500, offset });
       const items = Array.isArray(page) ? page : page.items;
-      documents.push(...items.filter(document => activeIds.has(document.id)));
+      for (const document of items) {
+        if (!activeIds.has(document.id)) continue;
+        const id = typeof document.metadata.documentId === 'string' ? document.metadata.documentId : document.id.split('::')[0]!;
+        if (documents.has(id)) continue;
+        const name = typeof document.metadata.originalFilename === 'string' ? document.metadata.originalFilename : document.name;
+        documents.set(id, { id, name, type: /\.([^.]+)$/.exec(name)?.[1]?.toUpperCase() ?? 'Unknown' });
+      }
       if (items.length < 500) break;
       offset += items.length;
     }
-    return { documents, durationMs: Math.round(performance.now() - startedAt) };
+    return { documents: [...documents.values()], durationMs: Math.round(performance.now() - startedAt) };
   }
 
   async deleteDocument(id: string, tenantId = config.tenantId, userId?: string) {
@@ -367,6 +374,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         chunkIndex: Number.isInteger(hit.metadata.chunkIndex) ? Number(hit.metadata.chunkIndex) : chunkIndex,
         chunkCount: Number.isInteger(hit.metadata.chunkCount) ? Number(hit.metadata.chunkCount) : hit.chunk.total,
         ...(location ? { location } : {}),
+        ...(Number.isInteger(hit.metadata.pageNumber) ? { pageNumber: Number(hit.metadata.pageNumber) } : {}),
         ...(typeof hit.metadata.documentVersionId === 'string' ? { documentVersionId: hit.metadata.documentVersionId } : {}),
         ...(typeof hit.metadata.chunkId === 'string' ? { chunkId: hit.metadata.chunkId } : {}),
         ...(typeof hit.metadata.contentHash === 'string' ? { contentHash: hit.metadata.contentHash } : {}),

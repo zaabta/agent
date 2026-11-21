@@ -332,6 +332,8 @@ model LlmUsage {
   status            String
   latencyMs          Int?     @map("latency_ms")
   errorCategory     String?  @map("error_category")
+  finishReason      String?  @map("finish_reason")
+  maxOutputTokens   Int?     @map("max_output_tokens")
   createdAt         DateTime @default(now()) @map("created_at")
   @@index([tenantId, createdAt])
   @@index([provider, modelId, createdAt])

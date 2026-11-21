@@ -7,14 +7,18 @@ import { createAgentWorkflow } from '../src/agent/agent.workflow.js';
 import { readLocalWorkflowDiagnostic } from '../src/mastra/observability.js';
 import { safeAgentFailure } from '../src/agent/provider-errors.js';
 
-for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'followup', 'followup-ar', 'followup-tr', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal', 'oversized-evidence'] as const) {
+for (const scenario of ['narrative', 'citation-table-label', 'unknown-column', 'aggregate-unique', 'aggregate-year', 'mixed', 'mixed-dependent', 'cohort-ar', 'cohort-tr', 'cohort-en', 'drawing-revisions', 'drawing-missing-revision', 'backend-mixed', 'backend-denied', 'backend-missing', 'custom-independent', 'custom-en', 'custom-ar', 'custom-ambiguous', 'custom-irrelevant', 'planner-invalid', 'planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'truncated-answer', 'continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish', 'answer-google-complete', 'followup', 'followup-ar', 'followup-tr', 'respond-history', 'same-source-chunks', 'irrelevant-evidence', 'mislabelled-refusal', 'invalid-verifier-refusal', 'oversized-evidence'] as const) {
   test(`workflow routing recovery: ${scenario}`, async () => {
     const previous = process.env.MASTRA_OBSERVABILITY;
     process.env.MASTRA_OBSERVABILITY = 'false';
     const calls: string[] = [];
     const modelEvents: string[] = [];
     const plannerOptions: any[] = [];
+    const answerGenerationOptions: any[] = [];
     const providerEvents: any[] = [];
+    const usageEvents: any[] = [];
+    const textDeltas: string[] = [];
+    const continuationOptions: any[] = [];
     const customExecutions: any[] = [];
     const selectedModels: Array<{ role:string; model:any }> = [];
     const datasets = [
@@ -112,31 +116,60 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
         if (scenario === 'aggregate-year') return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }] } } as any;
         if (scenario === 'aggregate-unique' && prompt.includes('Authorized schema:')) return { object: { operation: 'aggregate', aggregate: 'COUNT', filters: [{ columnName: 'Project', operator: 'EQ', value: 'Orion' }] } } as any;
         if (scenario === 'oversized-evidence') return { object: { operation: 'retrieve', retrievalQuery: 'large report' } } as any;
+        if (scenario === 'citation-table-label' || ['truncated-answer', 'continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish', 'answer-google-complete'].includes(scenario)) return { object: { operation: 'retrieve', retrievalQuery: 'footing schedule' } } as any;
         if (scenario === 'same-source-chunks' || scenario === 'irrelevant-evidence' || scenario === 'mislabelled-refusal' || scenario === 'invalid-verifier-refusal') return { object: { operation: 'retrieve', retrievalQueries: ['first fact', 'second fact'] } } as any;
+        if (scenario === 'respond-history') return { object: { operation: 'respond', reply: 'Hello' } } as any;
         if (scenario.startsWith('followup')) return { object: { operation: 'respond', standaloneQuestion: 'What are the project risks?', reply: 'How can I help?' } } as any;
         return { object: { operation: 'aggregate', aggregate: 'SUM', columnName: scenario === 'aggregate-unique' ? 'Cost' : 'Budget' } } as any;
       }
       selectedModels.push({role:'ANSWER',model:(this as any).model});
+      if (['custom-independent', 'custom-en', 'custom-ar'].includes(scenario)) answerGenerationOptions.push(options);
+      if (scenario === 'respond-history') {
+        assert.match(messages[0].content, /Previous relevant exchange/);
+        return { text: 'Hello' } as any;
+      }
       if (dynamicScenarios.includes(scenario) && scenario !== 'custom-irrelevant') {
         if (scenario === 'custom-en') { assert.match(messages[0].content, /160.25/); return { object: { answer: 'The EUR to JPY rate is 160.25.' } } as any; }
         assert.match(messages[0].content, /temperatureC/);
         return { object: { answer: scenario === 'custom-ar' ? 'درجة الحرارة في إسطنبول 22 مئوية.' : 'Istanbul is 22 C.' } } as any;
       }
-      modelEvents.push('citation-verifier');
-      const ids = [...prompt.matchAll(/(?:^|\n)(E\d+):/g)].map((m: any) => m[1]);
-      if (scenario === 'irrelevant-evidence') return { object: { answer: 'Ù„Ø§ ØªØªÙˆÙØ± Ø£Ø¯Ù„Ø© ÙƒØ§ÙÙŠØ© ÙÙŠ Ø§Ù„Ù…Ù„ÙØ§Øª Ù„Ù„Ø¥Ø¬Ø§Ø¨Ø©.', evidenceSufficient: false, evidenceIds: [] } } as any;
-      if (scenario === 'mislabelled-refusal') return { object: { answer: 'The requested company is not mentioned in the available documents.', evidenceSufficient: true, evidenceIds: ids } } as any;
-      if (scenario === 'invalid-verifier-refusal') return { object: { answer: '', evidenceSufficient: false, evidenceIds: [] } } as any;
-      return { object: { answer: 'Supported fixture answer', evidenceSufficient: true, evidenceIds: scenario === 'same-source-chunks' ? [...ids, ids[0]] : ids } } as any;
+      return { object: { answer: 'unused' } } as any;
     });
-    const stream = mock.method(Agent.prototype, 'stream', async (messages: any) => {
-      if (scenario === 'invalid-verifier-refusal') return { fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Ø§Ù„Ø´Ø±ÙƒØ© Ø§Ù„Ù…ÙØ¤Ù…Ù†Ø© Ù„Ù…Ø´Ø±ÙˆØ¹ Orion ØºÙŠØ± Ù…Ø°ÙƒÙˆØ±Ø© ÙÙŠ Ø§Ù„Ù…Ø¹Ù„ÙˆÙ…Ø§Øª Ø§Ù„Ù…ØªØ§Ø­Ø©.' } }; })(), getFullOutput: async () => ({}) } as any;
+    const stream = mock.method(Agent.prototype, 'stream', async function(this: Agent, messages: any, options: any) {
+      if (['truncated-answer', 'continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish', 'answer-google-complete'].includes(scenario)) {
+        selectedModels.push({ role: 'ANSWER', model: (this as any).model });
+        assert.equal(options.structuredOutput, undefined);
+        assert.match(messages[0].content, /Authorized evidence inventory/);
+        continuationOptions.push(options);
+        if (scenario === 'continuation-failed' && continuationOptions.length === 2) throw new Error('continuation unavailable');
+        const isContinuation = continuationOptions.length === 2;
+        const answer = isContinuation ? ' | CF4 [E1]' : 'Footing schedule | CF3 [E1]';
+        if (scenario === 'continued-answer') assert.equal(options.modelSettings.maxOutputTokens, isContinuation ? 1024 : 512);
+        else if (scenario === 'truncated-answer' || scenario === 'continuation-failed') assert.equal(options.modelSettings.maxOutputTokens, isContinuation ? 1024 : 512);
+        const finishReason = ['answer-missing-finish'].includes(scenario) ? undefined : ['answer-other-finish'].includes(scenario) ? 'other' : (scenario === 'truncated-answer' || scenario === 'continued-answer' || scenario === 'continuation-failed') && !isContinuation ? 'length' : 'stop';
+        if (scenario === 'continued-answer' && isContinuation) assert.equal(options.providerOptions.google.continuationToken, 'fixture-continuation-token');
+        if (scenario === 'continuation-failed' && isContinuation) assert.fail('failed continuation must throw before stream creation');
+        return ({ fullStream: (async function* () {
+          yield { type: 'text-delta', payload: { text: answer } };
+          if (finishReason) yield { type: 'step-finish', payload: { output: { usage: { inputTokens: isContinuation ? 15 : 80, outputTokens: isContinuation ? 12 : 512 }, response: { modelId: scenario === 'truncated-answer' ? 'qwen3:8b' : 'gemini-test' }, ...(finishReason === 'length' ? { providerMetadata: { google: { continuationToken: 'fixture-continuation-token' } } } : {}) }, stepResult: { reason: finishReason } } };
+        })(), getFullOutput: async () => ({ text: answer }) }) as any;
+      }
+      assert.match(messages[0].content, /Allowed labels for this answer: E1/);
+      const labels = [...messages[0].content.matchAll(/(?:^|\n)(E\d+) \|/g)].map((match: any) => match[1]);
+      const refusal = scenario === 'irrelevant-evidence' ? 'I could not find enough evidence in the available documents.'
+        : scenario === 'mislabelled-refusal' ? 'The requested company is not mentioned in the available documents.' : undefined;
+      const answer = scenario === 'citation-table-label'
+        ? '| Footing ID | Dimensions | Citation |\n| --- | --- | --- |\n| F-10 | 3500 x 3500 | E1 |'
+        : refusal ?? (scenario === 'invalid-verifier-refusal' ? 'Unsupported fixture statement.' : `Supported fixture answer ${labels.map((id: string) => `[${id}]`).join(' ')}`);
       if (scenario === 'same-source-chunks') { assert.ok(messages[0].content.includes('First fact 17')); assert.ok(messages[0].content.includes('Second fact 29')); }
-      if (scenario === 'same-source-chunks') return ({ fullStream: (async function* () {
+      const fullStream = async function* () {
+        if (scenario === 'same-source-chunks') {
         modelEvents.push('model-delta-1'); yield { type: 'text-delta', payload: { text: 'Supported ' } };
-        modelEvents.push('model-delta-2'); yield { type: 'text-delta', payload: { text: 'fixture answer' } };
-      })(), getFullOutput: async () => ({ text: 'Supported fixture answer' }) }) as any;
-      return ({ fullStream: (async function* () { yield { type: 'text-delta', payload: { text: 'Supported fixture answer' } }; })(), getFullOutput: async () => ({ text: 'Supported fixture answer' }) }) as any; });
+        modelEvents.push('model-delta-2'); yield { type: 'text-delta', payload: { text: answer.slice('Supported '.length) } };
+        } else yield { type: 'text-delta', payload: { text: answer } };
+        yield { type: 'step-finish', payload: { output: { usage: { inputTokens: 10, outputTokens: 5 }, response: { modelId: 'fixture' } }, stepResult: { reason: 'stop' } } };
+      };
+      return ({ fullStream: fullStream(), getFullOutput: async () => ({ text: answer }) }) as any; });
     const typegraph: any = { listDocuments: async () => ({ documents: [], durationMs: 0 }), searchDocuments: async (query: string) => {
       calls.push(query);
       if (scenario === 'drawing-revisions' || scenario === 'drawing-missing-revision') {
@@ -174,16 +207,18 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       },
     };
     try {
-      const runtime = ['custom-independent', 'planner-repair', 'planner-invalid', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'oversized-evidence'].includes(scenario) ? {
+      const runtime = ['custom-independent', 'planner-repair', 'planner-invalid', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired', 'planner-timeout', 'oversized-evidence', 'truncated-answer', 'continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish', 'answer-google-complete'].includes(scenario) ? {
         planner: { provider: scenario === 'planner-invalid' ? 'google' : 'ollama', model: 'planner-model', ollamaThink: false },
-        answer: { provider: scenario === 'custom-independent' ? 'google' : 'ollama', model: 'answer-model', ollamaThink: false, ...(scenario === 'oversized-evidence' ? { maxContextChars: 100, maxOutputTokens: 128 } : {}) },
+        answer: { provider: ['custom-independent', 'continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish', 'answer-google-complete'].includes(scenario) ? 'google' : 'ollama', model: scenario === 'truncated-answer' ? 'qwen3:8b' : 'answer-model', ollamaThink: false, ...(scenario === 'oversized-evidence' ? { maxContextChars: 100, maxOutputTokens: 128 } : {}), ...(['truncated-answer', 'continued-answer', 'continuation-failed'].includes(scenario) ? { maxOutputTokens: 512 } : {}) },
       } : undefined;
       const workflow = createAgentWorkflow(typegraph, structured, { userId: 'user', tenantId: 'tenant', authMethod: 'jwt' }, undefined, {
-        onTextDelta: async text => { if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
+        onTextDelta: async text => { if (['truncated-answer', 'continued-answer', 'continuation-failed'].includes(scenario)) textDeltas.push(text); if (scenario === 'same-source-chunks') modelEvents.push(text === 'Supported ' ? 'sse-delta-1' : 'sse-delta-2'); },
         onProviderTelemetry: async telemetry => { providerEvents.push(telemetry); },
-      }, workflowTools, runtime as any);
+      }, workflowTools, runtime as any, async record => { usageEvents.push(record); });
       const run = await workflow.createRun();
-      const followupHistory = scenario === 'followup-tr'
+      const followupHistory = scenario === 'respond-history'
+        ? [{ role: 'user' as const, content: 'Previous relevant exchange' }]
+        : scenario === 'followup-tr'
         ? [
             { role: 'user' as const, content: 'Summarize the Orion project' },
             { role: 'assistant' as const, content: 'The project has documented risks. [[project.md (line 1)]]' },
@@ -196,7 +231,67 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       const followupMessage = scenario === 'followup-ar' ? 'ماذا عن المخاطر؟'
         : scenario === 'followup-tr' ? 'Peki proje riskleri?'
           : 'What about the project risks?';
-      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message: cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenario === 'narrative' ? 'Compare project Budget and risks across reports' : scenario === 'aggregate-unique' ? 'Sum Orion item costs' : scenario === 'mixed-dependent' ? 'Top two employees in 2025 and the report risks for them' : scenario === 'mixed' ? 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md' : scenario === 'aggregate-year' ? 'How many violations were recorded in 2025?' : scenario === 'custom-independent' ? 'What is the weather in Istanbul?' : scenario === 'custom-en' ? 'What is the EUR to JPY exchange rate?' : scenario === 'custom-ar' ? 'كم تبلغ درجة الحرارة في إسطنبول الآن؟' : scenario === 'custom-ambiguous' ? 'Tell me the current conditions outside.' : scenario === 'custom-irrelevant' ? 'What does the safety handbook say about evacuation?' : scenario === 'planner-invalid' ? 'Please handle this request.' : scenario === 'oversized-evidence' ? 'Summarize the large report' : ['planner-repair', 'planner-unknown-id-repair', 'planner-unknown-id-unrepaired'].includes(scenario) ? 'What is the weather in Oslo?' : scenario === 'planner-timeout' ? 'What is the weather in Oslo?' : 'Sum the Budget column'), history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      const scenarioMessages: Record<string, string> = {
+        narrative: 'Compare project Budget and risks across reports', 'aggregate-unique': 'Sum Orion item costs',
+        'citation-table-label': 'Show the footing schedule as a table',
+        'mixed-dependent': 'Top two employees in 2025 and the report risks for them',
+        mixed: 'Count violations in 2025 from violations.xlsx and independently describe report risks in safety.md',
+        'aggregate-year': 'How many violations were recorded in 2025?',
+        'custom-independent': 'What is the weather in Istanbul?', 'custom-en': 'What is the EUR to JPY exchange rate?',
+        'custom-ar': 'كم تبلغ درجة الحرارة في إسطنبول الآن؟', 'custom-ambiguous': 'Tell me the current conditions outside.',
+        'custom-irrelevant': 'What does the safety handbook say about evacuation?', 'planner-invalid': 'Please handle this request.',
+        'oversized-evidence': 'Summarize the large report', 'truncated-answer': 'Show the footing schedule as a table',
+        'continued-answer': 'Show the footing schedule as a table', 'continuation-failed': 'Show the footing schedule as a table',
+        'answer-missing-finish': 'Show the footing schedule as a table', 'answer-other-finish': 'Show the footing schedule as a table',
+        'answer-google-complete': 'Show the footing schedule as a table', 'planner-repair': 'What is the weather in Oslo?',
+        'planner-unknown-id-repair': 'What is the weather in Oslo?', 'planner-unknown-id-unrepaired': 'What is the weather in Oslo?',
+        'planner-timeout': 'What is the weather in Oslo?',
+      };
+      const message = cohortQuestions[scenario] ?? (scenario.startsWith('followup') ? followupMessage : scenarioMessages[scenario] ?? 'Sum the Budget column');
+      const result = await run.start({ inputData: { previousSelection: cohortQuestions[scenario] ? previousSelection : undefined, message, history: followupHistory, userMemories: [], evidenceRefs: [], contextEntities: [], conversationSummary: '' } });
+      if (scenario === 'truncated-answer') {
+        assert.equal(result.status, 'failed');
+        assert.equal(safeAgentFailure(result.error)?.code, 'OUTPUT_TRUNCATED');
+        assert.equal(selectedModels.filter(item => item.role === 'ANSWER').length, 1);
+        assert.deepEqual(providerEvents, [], 'output truncation is not a provider transport error');
+        assert.deepEqual(textDeltas, ['Footing schedule | CF3 [E1]']);
+        const answerUsage = usageEvents.find(item => item.outputTokens === 512);
+        assert.ok(answerUsage, 'provider-reported output tokens are recorded on failure');
+        assert.equal(answerUsage.status, 'failed');
+        assert.equal(answerUsage.errorCategory, 'OUTPUT_TRUNCATED');
+        const diagnostic = readLocalWorkflowDiagnostic(String(workflow.id).replace(/^sitepilot-answer-/, '').replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
+        assert.equal(diagnostic?.stage, 'answer-generation');
+        assert.equal(diagnostic?.finishReason, 'length');
+        assert.equal(diagnostic?.provider, 'ollama');
+        assert.equal(diagnostic?.model, 'qwen3:8b');
+        assert.equal(diagnostic?.inputTokens, 80);
+        assert.equal(diagnostic?.outputTokens, 512);
+        assert.equal(diagnostic?.maxOutputTokens, 512);
+        assert.equal(typeof diagnostic?.generationMs, 'number');
+        return;
+      }
+      if (['continued-answer', 'continuation-failed', 'answer-missing-finish', 'answer-other-finish'].includes(scenario)) {
+        if (scenario === 'continued-answer') {
+          assert.equal(result.status, 'success');
+          assert.match(result.result.answer, /CF3 \[\[risks\]\]/);
+          assert.match(result.result.answer, /CF4 \[\[risks\]\]/);
+          assert.equal(continuationOptions.length, 2);
+          assert.deepEqual(textDeltas, ['Footing schedule | CF3 [E1]', ' | CF4 [E1]']);
+          assert.equal(usageEvents.filter(item => item.finishReason === 'length').length, 1);
+          assert.equal(usageEvents.filter(item => item.finishReason === 'stop').length, 1);
+        } else {
+          assert.equal(result.status, 'failed');
+          assert.equal(safeAgentFailure(result.error)?.code, scenario === 'continuation-failed' ? 'OUTPUT_TRUNCATED' : 'CONNECTION_FAILED');
+        }
+        assert.equal(providerEvents.length, 0, 'incomplete output and malformed completion metadata are not provider transport failures');
+        return;
+      }
+      if (scenario === 'answer-google-complete') {
+        assert.equal(result.status, 'success');
+        assert.equal(result.result.citationValidation, 'valid');
+        assert.equal(continuationOptions.length, 1);
+        return;
+      }
       if (scenario === 'planner-invalid') {
         assert.equal(result.status, 'failed');
         assert.equal(safeAgentFailure(result.error)?.code, 'INVALID_MODEL_OUTPUT');
@@ -230,25 +325,37 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       if (scenario === 'oversized-evidence') {
         assert.equal(result.result.outcome, 'clarification');
         assert.match(result.result.answer, /too large to verify safely/);
-        assert.equal(modelEvents.filter(event => event === 'citation-verifier').length, 0);
         assert.equal(modelEvents.length, 1, 'only the planner runs when retrieved evidence exceeds the cap');
         return;
       }
+      if (scenario === 'citation-table-label') {
+        assert.equal(result.result.outcome, 'success', JSON.stringify(readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant')));
+        assert.equal(result.result.citationValidation, 'valid');
+        assert.match(result.result.answer, /F-10/);
+        assert.match(result.result.answer, /\[\[risks\]\]/);
+        assert.equal(result.result.sources.length, 1);
+      }
       if (scenario === 'narrative') {
-        assert.equal(result.result.timing.llmCalls, 5, 'this multi-document route performs three planning requests, one answer stream, and one citation verification request');
+        assert.equal(result.result.timing.llmCalls, 4, 'this multi-document route performs three planning requests and one answer stream');
         assert.equal(typeof result.result.timing.llmLatencyMs, 'number');
         assert.equal(typeof result.result.timing.promptTokens, 'number');
         assert.equal(typeof result.result.timing.completionTokens, 'number');
+        assert.match(result.result.answer, /\[\[budget\]\]/);
+        assert.match(result.result.answer, /\[\[risks\]\]/);
       }
       if (scenario === 'custom-independent') { assert.equal((selectedModels.find(item=>item.role==='PLANNER')?.model as any).modelId,'planner-model');assert.equal(selectedModels.find(item=>item.role==='ANSWER')?.model,'google/answer-model'); }
       if (scenario === 'same-source-chunks') {
-        assert.equal(result.result.timing.llmCalls, 3, 'one planner request, one answer stream, and one citation verification request');
-        assert.deepEqual(modelEvents, ['planner', 'model-delta-1', 'sse-delta-1', 'model-delta-2', 'sse-delta-2', 'citation-verifier']);
+        assert.equal(result.result.timing.llmCalls, 2, 'one planner request and one answer stream');
+        assert.deepEqual(modelEvents, ['planner', 'model-delta-1', 'sse-delta-1', 'model-delta-2', 'sse-delta-2']);
       }
-      if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
+      if (scenario === 'respond-history') { assert.equal(result.result.outcome, 'success'); assert.equal(result.result.answer, 'Hello'); assert.deepEqual(result.result.toolsCalled, []); }
+      else if (scenario === 'unknown-column') { assert.equal(result.result.outcome, 'clarification'); assert.deepEqual(calls, []); }
       else if (scenario === 'invalid-verifier-refusal') {
         assert.equal(result.result.outcome, 'failure');
         assert.match(result.result.answer, /verifiable document citations/i);
+        const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
+        assert.deepEqual(diagnostic?.groundingReasonCodes, ['missing_evidence_labels', 'uncited_factual_paragraph']);
+        assert.deepEqual(diagnostic?.finalizationReasonCodes, ['missing_source_reference']);
       }
       else if (scenario === 'irrelevant-evidence' || scenario === 'mislabelled-refusal') {
         assert.ok(calls.length > 0);
@@ -265,6 +372,9 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       }
       else if (['custom-independent', 'custom-en', 'custom-ar'].includes(scenario)) {
         const expectedId = scenario === 'custom-en' ? dynamicCatalog[1]!.id : dynamicCatalog[0]!.id;
+        assert.equal(answerGenerationOptions.length, 1);
+        assert.ok(answerGenerationOptions[0].structuredOutput?.schema.safeParse({ answer: 'valid' }).success);
+        assert.equal(answerGenerationOptions[0].structuredOutput.errorStrategy, 'strict');
         assert.ok(result.result.toolsCalled.includes(expectedId));
         assert.deepEqual(calls, []);
         const diagnostic = readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') as Record<string, any> | undefined;
@@ -322,7 +432,7 @@ for (const scenario of ['narrative', 'unknown-column', 'aggregate-unique', 'aggr
       }
       else if (scenario === 'aggregate-year') { assert.match(result.result.answer, /21/); assert.deepEqual(calls, []); }
       else if (scenario === 'aggregate-unique') { assert.match(result.result.answer, /300/); assert.deepEqual(calls, []); }
-      else { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.citationValidation, 'valid'); if (scenario === 'narrative') assert.equal(result.result.sources.length, 2); if (scenario === 'same-source-chunks') assert.equal(result.result.sources.length, 1); }
+      else { assert.ok(calls.length > 0); assert.ok(result.result.toolsCalled.includes('documentSearch')); assert.equal(result.result.citationValidation, 'valid'); if (scenario === 'narrative') assert.equal(result.result.sources.length, 2); if (scenario === 'same-source-chunks') assert.equal(result.result.sources.length, 2); }
     } finally {
       generate.mock.restore(); stream.mock.restore();
       if (previous === undefined) delete process.env.MASTRA_OBSERVABILITY; else process.env.MASTRA_OBSERVABILITY = previous;

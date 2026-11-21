@@ -216,6 +216,7 @@ test('document inventory excludes superseded and unversioned stale index rows', 
     { id: `${documentId}::version-one::g1::chunk`, name: 'old.pdf', metadata: { documentId, documentVersionId: 'version-one', indexGeneration: 1 } },
     { id: `${documentId}::${versionTwo}::g1::chunk`, name: 'stale.pdf', metadata: { documentId, documentVersionId: versionTwo, indexGeneration: 1 } },
     { id: `${documentId}::${versionTwo}::g2::chunk`, name: 'current.pdf', metadata: { documentId, documentVersionId: versionTwo, indexGeneration: 2 } },
+    { id: `${documentId}::${versionTwo}::g2::chunk-2`, name: 'current.pdf', metadata: { documentId, documentVersionId: versionTwo, indexGeneration: 2 } },
     { id: documentId, name: 'legacy-stale.pdf', metadata: { documentId } },
   ];
   const prisma: any = {
@@ -228,7 +229,7 @@ test('document inventory excludes superseded and unversioned stale index rows', 
 
   const response = await service.listDocuments(tenant);
 
-  assert.deepEqual(response.documents.map((document: any) => document.name), ['current.pdf']);
+  assert.deepEqual(response.documents, [{ id: documentId, name: 'current.pdf', type: 'PDF' }]);
 });
 
 test('authorized indexed provenance restores PDF pages and logical chunk identity after SDK projection', async () => {
