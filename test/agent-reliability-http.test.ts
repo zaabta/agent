@@ -157,6 +157,11 @@ test('authenticated HTTP workflow preserves history after 429, paginates indepen
       for (const name of ['status', 'stage', 'tool-start', 'tool-finish', 'text-delta', 'text-reset', 'sources', 'done']) assert.ok(frames.some(frame => frame.name === name), name);
       assert.equal(frames.filter(frame => frame.name === 'done').length, 1);
       const final = frames.find(frame => frame.name === 'done')!.data;
+      const sourceFrameIndex = frames.findIndex(frame => frame.name === 'sources');
+      const doneFrameIndex = frames.findIndex(frame => frame.name === 'done');
+      assert.ok(sourceFrameIndex > frames.findIndex(frame => frame.name === 'text-delta'));
+      assert.ok(sourceFrameIndex < doneFrameIndex);
+      assert.deepEqual(frames[sourceFrameIndex]!.data.sources, final.sources);
       assert.equal(final.telemetry.llmCalls, 2);
       assert.equal(final.sources.length, 2);
       const saved = await (await request(`conversations/${id}`)).json() as any;

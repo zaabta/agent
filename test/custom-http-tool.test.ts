@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CustomToolError, customToolEndpoint, executeHttpTool, jsonSchema, safeToolPath, validateCustomToolEndpoint } from '../src/agent/custom-http-tool.js';
+import { CustomToolError, customToolEndpoint, executeHttpTool, jsonSchema, normalizeCustomToolOutput, safeToolPath, validateCustomToolEndpoint } from '../src/agent/custom-http-tool.js';
 
 const inputSchema = {
   type: 'object', properties: { email: { type: 'string', maxLength: 100 } },
@@ -63,4 +63,15 @@ test('an omitted optional parameter is not added to the query and does not inval
     inputSchema: { type: 'object', properties: { units: { type: 'string' } }, required: [], additionalProperties: false },
     outputSchema, args: {}, timeoutMs: 1000, maxResponseBytes: 1000,
   }), (error: unknown) => error instanceof CustomToolError && error.category === 'ADDRESS_NOT_ALLOWED');
+});
+
+test('custom output schemas project disallowed API fields before returning data to the Agent', () => {
+  const schema = {
+    type: 'object', properties: {
+      products: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, title: { type: 'string' }, price: { type: 'number' }, category: { type: 'string' } }, required: ['id', 'title', 'price', 'category'], additionalProperties: false } },
+    }, required: ['products'], additionalProperties: false,
+  };
+  const result = normalizeCustomToolOutput({ products: [{ id: 1, title: 'Laptop', price: 500, category: 'computers', description: 'large field' }], unrelated: 'large field' }, schema);
+  assert.deepEqual(result, { products: [{ id: 1, title: 'Laptop', price: 500, category: 'computers' }] });
+  assert.throws(() => normalizeCustomToolOutput({ products: [{ id: 'invalid', title: 'Laptop', price: 500, category: 'computers' }] }, schema), /OUTPUT_SCHEMA_MISMATCH/);
 });

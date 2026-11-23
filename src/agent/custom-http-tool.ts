@@ -37,6 +37,21 @@ export function jsonSchema(schema: unknown) {
   try { return z.fromJSONSchema(schema as any); } catch { throw new CustomToolError('INVALID_SCHEMA'); }
 }
 
+function projectOutput(value: unknown, schema: any): unknown {
+  if (schema?.type === 'array' && Array.isArray(value)) return value.map(item => projectOutput(item, schema.items));
+  if (schema?.type !== 'object' || !value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const properties = schema.properties as Record<string, unknown>;
+  const entries = Object.entries(value);
+  return Object.fromEntries(entries
+    .filter(([key]) => schema.additionalProperties !== false || Object.hasOwn(properties, key))
+    .map(([key, item]) => [key, Object.hasOwn(properties, key) ? projectOutput(item, properties[key]) : item]));
+}
+
+export function normalizeCustomToolOutput(value: unknown, schema: unknown) {
+  try { return jsonSchema(schema).parse(projectOutput(value, schema)); }
+  catch { throw new CustomToolError('OUTPUT_SCHEMA_MISMATCH'); }
+}
+
 export function connectionProfiles(): Record<string, ConnectionProfile> {
   const raw = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
   if (!raw) return {};
@@ -129,7 +144,7 @@ export async function executeHttpTool(input: {
   onValidatedArgs?: (args: Record<string, unknown>) => void;
 }) {
   const inputValidator = jsonSchema(input.inputSchema);
-  const outputValidator = jsonSchema(input.outputSchema);
+  jsonSchema(input.outputSchema);
   const inputProperties = (input.inputSchema as any).properties as Record<string, unknown>;
   let args: Record<string, unknown>;
   try { args = inputValidator.parse(input.args) as Record<string, unknown>; input.onInputValidation?.('valid'); input.onValidatedArgs?.(args); }
@@ -177,7 +192,7 @@ export async function executeHttpTool(input: {
       res.on('end', () => {
         let parsed: unknown;
         try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reject(new CustomToolError('INVALID_JSON')); return; }
-        try { resolve(outputValidator.parse(parsed)); } catch { reject(new CustomToolError('OUTPUT_SCHEMA_MISMATCH')); }
+        try { resolve(normalizeCustomToolOutput(parsed, input.outputSchema)); } catch (error) { reject(error); }
       });
       res.on('error', error => reject(error instanceof CustomToolError ? error : new CustomToolError('NETWORK_ERROR')));
     });

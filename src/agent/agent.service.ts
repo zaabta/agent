@@ -44,6 +44,7 @@ export interface AgentStreamResult {
   conversationId: string;
   timing: Record<string, number | null>;
   citationValidation: 'valid' | 'no-evidence' | 'fallback';
+  verificationStatus?: 'verified' | 'unverified' | 'not_required';
 }
 
 type AgentMessage = { role: 'user'; content: string } | { role: 'assistant'; content: string };
@@ -694,9 +695,9 @@ export class AgentService implements OnModuleDestroy {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: Record<string, number> };
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext);
-      return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: string; requestId: string; timing: Record<string, number> };
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
+      return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
     } catch (error) {
@@ -910,7 +911,6 @@ export class AgentService implements OnModuleDestroy {
             const timing = result?.timing as { embeddingMs?: number; retrievalMs?: number } | undefined;
             embeddingMs += timing?.embeddingMs ?? 0;
             retrievalMs += timing?.retrievalMs ?? 0;
-            if (sources.length > 0) await emit('sources', { sources });
           } else if (toolName === 'listDocuments') {
             const listResult = result as { documents?: unknown[]; durationMs?: number } | undefined;
             hasInventoryResult = true;
@@ -1013,7 +1013,6 @@ export class AgentService implements OnModuleDestroy {
       hasAnySearchHits = sources.length > 0;
       suppressTextAfterNoEvidence = sources.length === 0;
       for (const source of sources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
-      if (sources.length) await emit('sources', { sources });
       await emit('tool-finish', { toolName: 'documentSearch', durationMs: search.timing.searchMs, sourceCount: sources.length });
       const fallbackResult = { payload: { toolName: 'document-search', result: search } } as typeof fullOutput.toolResults[number];
       finalToolResults = [...fullOutput.toolResults, fallbackResult];
@@ -1096,7 +1095,6 @@ export class AgentService implements OnModuleDestroy {
           hasSearchResult = true;
           hasAnySearchHits = structuredSources.length > 0;
           suppressTextAfterNoEvidence = false;
-          if (structuredSources.length) await emit('sources', { sources: structuredSources });
           for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
           await emit('tool-finish', { toolName: recoveredToolName, recovery: true, sourceCount: structuredSources.length });
           finalText = this.deterministicStructuredFinalization([recoveredResult])?.answer ?? 'The authorized structured query completed, but its result could not be formatted.';
@@ -1122,7 +1120,6 @@ export class AgentService implements OnModuleDestroy {
           hasSearchResult = true;
           hasAnySearchHits = structuredSources.length > 0;
           suppressTextAfterNoEvidence = !hasAnySearchHits;
-          if (structuredSources.length) await emit('sources', { sources: structuredSources });
           for (const source of structuredSources) retrievedSources.set(`${source.documentId}:${source.chunkIndex}`, source);
           for (const call of analytic.toolCalls) await emit('tool-finish', { toolName: this.publicToolName(call.payload.toolName), recovery: true, sourceCount: structuredSources.length });
           const grounded = await answerAgent.generate(withStructuredEvidence(prompt, message, analytic.toolResults), {
@@ -1202,6 +1199,7 @@ export class AgentService implements OnModuleDestroy {
     }
     this.activeRuns.beginFinalization(runId, abortSignal);
     await this.saveAssistant(turn.conversationId, turn.assistantMessageId, result.answer, undefined, principal, result.sources, turn.preserveConversationContext);
+    await emit('sources', { sources: result.sources });
 
     const totalMs = Math.round(performance.now() - startedAt);
     const telemetry = {
@@ -1283,16 +1281,16 @@ export class AgentService implements OnModuleDestroy {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; promptTokens: number; completionTokens: number; reasoningTokens: number; llmLatencyMs: number; providerRetries: number; providerErrors: number } };
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; promptTokens: number; completionTokens: number; reasoningTokens: number; llmLatencyMs: number; providerRetries: number; providerErrors: number } };
       this.activeRuns.beginFinalization(runId, abortSignal);
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext);
+      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
       // The streamed model draft is provisional. Citation validation may rewrite it
       // or append server-verified citations, so replace it atomically with the
       // persisted answer to prevent duplicate or unverified text in the client.
       if (streamedAnswer) await write('text-reset', { reason: 'citation-verification' });
       await write('sources', { sources: final.sources });
-      await write('text-delta', { text: final.answer, verification: 'verified' });
-      await write('stage', { stage: 'completed', status: 'completed', message: 'Answer is ready' });
+      await write('text-delta', { text: final.answer, verification: final.verificationStatus });
+      await write('stage', { stage: final.outcome === 'failure' ? 'failed' : 'completed', status: final.outcome === 'failure' ? 'failed' : 'completed', message: final.outcome === 'failure' ? 'Answer could not be verified' : 'Answer is ready' });
       const timing = {
         timeToFirstStatusMs,
         timeToFirstTextMs,
@@ -1314,7 +1312,7 @@ export class AgentService implements OnModuleDestroy {
         tokensPerSecond: null,
         orchestration: 1,
       };
-      const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation,
+      const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus,
         conversationId: turn.conversationId, timing };
       await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
       return result;
@@ -1417,18 +1415,18 @@ export class AgentService implements OnModuleDestroy {
     };
   }
 
-  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = [], preserveConversationContext = false) {
+  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = [], preserveConversationContext = false, status: 'completed' | 'failed' = 'completed') {
     const contextModel = (this.prisma as unknown as { conversationContext?: { upsert?: unknown } }).conversationContext;
     if (principal && contextModel?.upsert) {
       await this.prisma.$transaction(async transaction => {
-        await transaction.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } });
+        await transaction.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status, stage: status === 'failed' ? 'failed' : null, ...(selection ? { structuredSelection: selection } : {}) } });
         await transaction.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
-        await this.conversationContext.saveTurn(transaction, conversationId, principal, content, sources, selection, preserveConversationContext);
+        if (status === 'completed') await this.conversationContext.saveTurn(transaction, conversationId, principal, content, sources, selection, preserveConversationContext);
       });
       return;
     }
     await this.prisma.$transaction([
-      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status: 'completed', stage: null, ...(selection ? { structuredSelection: selection } : {}) } }),
+      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status, stage: status === 'failed' ? 'failed' : null, ...(selection ? { structuredSelection: selection } : {}) } }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
   }
