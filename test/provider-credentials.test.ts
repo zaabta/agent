@@ -7,7 +7,7 @@ import { config } from '../src/config.js';
 import { LlmController } from '../src/llm-admin/llm.controller.js';
 import { CustomToolsController } from '../src/agent/custom-tools.controller.js';
 import { decryptCredential, encryptCredential } from '../src/llm-admin/provider-credentials.js';
-import { LlmAdminService } from '../src/llm-admin/llm-admin.service.js';
+import { LlmAdminService, supportsOpenAITools } from '../src/llm-admin/llm-admin.service.js';
 import { asMastraModel } from '../src/mastra/runtime-model.js';
 
 test('cloud API credentials encrypt and decrypt with AES-GCM and reject tampering', () => {
@@ -103,4 +103,10 @@ test('OpenAI model IDs create the official chat adapter used for tool and stream
   assert.equal(model.config.provider, 'openai.chat');
   assert.equal(typeof model.doGenerate, 'function');
   assert.equal(typeof model.doStream, 'function');
+});
+
+test('GPT-6 model family is recognized as compatible during catalog discovery and model testing', () => {
+  for (const modelId of ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.2-sol', 'gpt-6.2-astra']) assert.equal(supportsOpenAITools(modelId), true, modelId);
+  assert.equal(supportsOpenAITools('gpt-5.6-sol'), true);
+  assert.equal(supportsOpenAITools('text-embedding-3-large'), false);
 });

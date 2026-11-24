@@ -121,7 +121,7 @@ test('authorized company users share documents and datasets while conversations 
     accountY = await login(usernameY);
     const accountZ = await login(usernameZ);
     assert.equal('tenant' in accountX, false, 'frontend auth responses omit workspace data');
-    const hiddenGlobalSettings = await fetch(`${baseUrl}/api/llm/settings`, { headers: await bearer(accountZ.accessToken) });
+    const hiddenGlobalSettings = await fetch(`${baseUrl}/api/admin/llm/settings`, { headers: await bearer(accountZ.accessToken) });
     assert.ok([403, 503].includes(hiddenGlobalSettings.status), 'ordinary users cannot access global provider settings');
 
     const existingLegacy = await prisma.appDocumentVersion.findFirst({

@@ -45,6 +45,8 @@ export interface AgentStreamResult {
   timing: Record<string, number | null>;
   citationValidation: 'valid' | 'no-evidence' | 'fallback';
   verificationStatus?: 'verified' | 'unverified' | 'not_required';
+  outcome?: 'success' | 'empty' | 'clarification' | 'failure';
+  executionStatus?: 'completed' | 'failed';
 }
 
 type AgentMessage = { role: 'user'; content: string } | { role: 'assistant'; content: string };
@@ -695,9 +697,9 @@ export class AgentService implements OnModuleDestroy {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: string; requestId: string; timing: Record<string, number> };
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: NonNullable<AgentStreamResult['outcome']>; executionStatus: NonNullable<AgentStreamResult['executionStatus']>; requestId: string; timing: Record<string, number> };
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
-      return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus,
+      return { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus, executionStatus: final.executionStatus,
         conversationId: turn.conversationId, requestId: final.requestId, outcome: final.outcome,
         timing: { ...final.timing, totalMs: Math.round(performance.now() - startedAt), workflow: true } };
     } catch (error) {
@@ -1264,9 +1266,9 @@ export class AgentService implements OnModuleDestroy {
         streamedAnswer = true;
         await write('text-delta', { text, verification: 'provisional' });
       },
-      onTextReset: async () => {
+      onTextReset: async reason => {
         streamedAnswer = false;
-        await write('text-reset', { reason: 'provider-retry' });
+        await write('text-reset', { reason });
       },
     }, this.backendTools, runtime, record => persistUsageEvent(this.prisma,record), turn.conversationId);
     const requestId = String((workflow as any).id).replace(/^sitepilot-answer-/, '');
@@ -1281,7 +1283,7 @@ export class AgentService implements OnModuleDestroy {
         if (execution.status === 'failed') throw execution.error;
         throw new Error('AGENT_WORKFLOW_FAILED');
       }
-      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: string; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; promptTokens: number; completionTokens: number; reasoningTokens: number; llmLatencyMs: number; providerRetries: number; providerErrors: number } };
+      const final = execution.result as { answer: string; selection?: StructuredSelection; sources: VerifiedSource[]; toolsCalled: string[]; citationValidation: AgentStreamResult['citationValidation']; verificationStatus: NonNullable<AgentStreamResult['verificationStatus']>; outcome: NonNullable<AgentStreamResult['outcome']>; executionStatus: NonNullable<AgentStreamResult['executionStatus']>; requestId: string; timing: { planningMs: number; evidenceMs: number; finalizationMs: number; toolExecutionMs: number; retrievalMs: number; typegraphRetrievalMs: number; citationVerificationMs: number; llmCalls: number; promptTokens: number; completionTokens: number; reasoningTokens: number; llmLatencyMs: number; providerRetries: number; providerErrors: number } };
       this.activeRuns.beginFinalization(runId, abortSignal);
       await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, final.selection, principal, final.sources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
       // The streamed model draft is provisional. Citation validation may rewrite it
@@ -1290,7 +1292,7 @@ export class AgentService implements OnModuleDestroy {
       if (streamedAnswer) await write('text-reset', { reason: 'citation-verification' });
       await write('sources', { sources: final.sources });
       await write('text-delta', { text: final.answer, verification: final.verificationStatus });
-      await write('stage', { stage: final.outcome === 'failure' ? 'failed' : 'completed', status: final.outcome === 'failure' ? 'failed' : 'completed', message: final.outcome === 'failure' ? 'Answer could not be verified' : 'Answer is ready' });
+      await write('stage', { stage: final.outcome === 'failure' ? 'failed' : 'completed', status: final.outcome === 'failure' ? 'failed' : 'completed', message: final.outcome === 'failure' ? 'Answer could not be verified' : final.outcome === 'clarification' ? 'More information is needed' : 'Answer is ready' });
       const timing = {
         timeToFirstStatusMs,
         timeToFirstTextMs,
@@ -1312,9 +1314,9 @@ export class AgentService implements OnModuleDestroy {
         tokensPerSecond: null,
         orchestration: 1,
       };
-      const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus,
+      const result = { answer: final.answer, sources: final.sources, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus, executionStatus: final.executionStatus, outcome: final.outcome,
         conversationId: turn.conversationId, timing };
-      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, discardProvisional: false, finishObserved: true, telemetry: timing });
+      await write('done', { ...result, requestId: final.requestId, outcome: final.outcome, executionStatus: final.executionStatus, discardProvisional: false, finishObserved: true, telemetry: timing });
       return result;
     } catch (error) {
       const provider = safeAgentFailure(error);

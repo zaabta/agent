@@ -10,5 +10,6 @@ export function localGenerationOptions(runtime?:RuntimeModelSnapshot): { provide
       ? { google: { thinkingConfig: { thinkingLevel: config.geminiThinkingLevel, includeThoughts: false } } }
       : undefined;
   const maxOutputTokens=runtime?.maxOutputTokens;
-  return { ...(providerOptions?{providerOptions}:{}), ...(maxOutputTokens?{modelSettings:{maxOutputTokens}}:{}) };
+  const hasConfiguredOutputLimit = typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0;
+  return { ...(providerOptions?{providerOptions}:{}), ...(hasConfiguredOutputLimit ? {modelSettings:{maxOutputTokens: maxOutputTokens as number}}:{}) };
 }

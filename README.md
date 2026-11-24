@@ -52,7 +52,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:3220/api/admin/llm/usage?period=last7days&groupBy=model'
 ```
 
-Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; model results preserve exact provider/model identifiers. Usage results return `timezone`, UTC `from`/`to`, `groupBy`, and grouped `data` with invocation count, input/output/total/cached/reasoning tokens, missing usage count, and average latency. Provider usage values are recorded when returned by Mastra; unavailable token counts remain null. No prompt or document contents and no prices/costs are stored. The new additive migration is `202611130001_runtime_llm_registry_usage`; run `pnpm prisma:generate` then `pnpm prisma:deploy` after reviewing the migration in the target environment. Do not run the deploy command against production without the normal production approval.
+Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; model results preserve exact provider/model identifiers. Usage results return `timezone`, UTC `from`/`to`, `groupBy`, and grouped `data` with invocation count, input/output/total/cached/reasoning tokens, missing usage count, and average latency. Provider usage values are recorded when returned by Mastra; unavailable token counts remain null. No prompt or document contents and no prices/costs are stored. The new additive migration is `202611130001_runtime_llm_registry_usage`; run `pnpm prisma:generate` then `pnpm prisma:deploy` after reviewing the migration in the target environment. Stop the local API and document worker before generating Prisma so Windows can replace the query-engine DLL. Do not run the deploy command against production without the normal production approval.
 
 ## API
 
@@ -72,6 +72,8 @@ pnpm typecheck
 pnpm test:unit
 pnpm test
 ```
+
+On Windows, stop the local API and document worker before `prisma:generate`; running Node processes can lock `query_engine-windows.dll`. The generate script checks for workspace processes and prints the blocking PIDs before exiting.
 
 The test harness also exposes `pnpm test:integration` for opt-in `*.e2e.test.ts` files; run it only with the isolated service environment and variables documented by each test. Named scripts include `pnpm test:e2e:stream`, `pnpm test:e2e:documents`, and `pnpm test:e2e:typegraph`. These suites require PostgreSQL, Redis, TypeGraph, worker, and local model services as applicable. Live Gemini checks consume quota and should be run only when quota is available. GitHub Actions runs lint, typecheck, build, and the non-E2E regression suite on pushes and pull requests.
 

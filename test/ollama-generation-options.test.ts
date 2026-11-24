@@ -9,9 +9,10 @@ import { asMastraModel } from '../src/mastra/runtime-model.js';
 import { workflowGroundingInstructions } from '../src/agent/grounding-instructions.js';
 import { localGenerationOptions } from '../src/mastra/generation-options.js';
 
-test('default Answer token budget supports long document tables', () => {
-  assert.equal(config.answerMaxOutputTokens, 2048);
-  assert.deepEqual(localGenerationOptions({ provider: 'ollama', model: 'qwen3:8b', ollamaThink: false, maxOutputTokens: config.answerMaxOutputTokens }).modelSettings, { maxOutputTokens: 2048 });
+test('unconfigured Answer output tokens defer to the provider/model default', () => {
+  assert.deepEqual(localGenerationOptions({ provider: 'openai', model: 'gpt-4.1', ollamaThink: false, role: 'ANSWER' }), {});
+  assert.deepEqual(localGenerationOptions({ provider: 'ollama', model: 'qwen3:8b', ollamaThink: false, role: 'ANSWER' }), { providerOptions: { ollama: { reasoningEffort: 'none' } } });
+  assert.deepEqual(localGenerationOptions({ provider: 'ollama', model: 'qwen3:8b', ollamaThink: false, role: 'ANSWER', maxOutputTokens: 6000 }).modelSettings, { maxOutputTokens: 6000 });
 });
 
 test('Qwen no-thinking setting reaches actual Mastra HTTP requests in the correct wire format', async () => {
@@ -90,7 +91,7 @@ test('Ollama Answer streaming also sends no-thinking and bounded output options'
 test('Planner structured output sends the full dynamic-tool schema to Ollama', async () => {
   const previousUrl = config.ollamaUrl;
   const received: any[] = [];
-  const plan = { operation: 'tool_call', toolCall: { id: 'custom_11111111111141118111111111111111', args: { q: 'Istanbul' } } };
+  const plan = { operation: 'tool_call', requiredSources: ['registered_tool'], toolCall: { id: 'custom_11111111111141118111111111111111', args: { q: 'Istanbul' } } };
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const chunk of request) raw += chunk;
     received.push(JSON.parse(raw));
@@ -131,7 +132,7 @@ test('Gemini Planner keeps JSON mode while receiving the same Zod validation sch
   const previousFetch = globalThis.fetch;
   const options = plannerGenerationOptions({ provider: 'google', model: 'gemini-3.6-flash', ollamaThink: false });
   assert.equal(options.providerOptions?.google?.structuredOutputs, false);
-  const plan = { operation: 'respond', reply: 'Hello' };
+  const plan = { operation: 'respond', requiredSources: [], reply: 'Hello' };
   let requestBody: any;
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body));

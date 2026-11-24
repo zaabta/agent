@@ -9,6 +9,7 @@ export type DocumentCitation = {
   chunkId?: string;
   pageNumber?: number;
   contentHash?: string;
+  chunkerVersion?: string;
   paragraphStart?: number;
   paragraphEnd?: number;
 };

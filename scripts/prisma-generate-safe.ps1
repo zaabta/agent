@@ -4,7 +4,7 @@ $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 try {
   $nodeProcesses = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'"
 } catch {
-  Write-Error 'Cannot inspect local Node command lines. Stop this workspace API/worker manually, then run pnpm prisma:generate.'
+  Write-Host 'Cannot inspect local Node command lines. Stop this workspace API/worker manually, then rerun npm run prisma:generate.'
   exit 2
 }
 
@@ -15,11 +15,11 @@ $lockCandidates = @($nodeProcesses | Where-Object {
 })
 
 if ($lockCandidates.Count -gt 0) {
-  Write-Host 'Prisma generation may fail because these SitePilot processes can hold query_engine-windows.dll:'
-  $lockCandidates | ForEach-Object { Write-Host ("PID {0}: {1}" -f $_.ProcessId, $_.CommandLine) }
-  Write-Host 'Stop only the listed SitePilot process(es) in their owning terminal, then rerun pnpm prisma:generate:safe.'
+  Write-Host 'Prisma generation cannot replace query_engine-windows.dll while this workspace API/worker is running:'
+  $lockCandidates | ForEach-Object { Write-Host ("PID {0}" -f $_.ProcessId) }
+  Write-Host 'Stop the API/worker in its owning terminal, then rerun npm run prisma:generate.'
   exit 1
 }
 
-& pnpm exec prisma generate
+& npm exec -- prisma generate
 exit $LASTEXITCODE

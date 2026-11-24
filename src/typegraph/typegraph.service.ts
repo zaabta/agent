@@ -28,6 +28,7 @@ export interface DocumentSearchHit {
     documentVersionId?: string;
     chunkId?: string;
     contentHash?: string;
+    chunkerVersion?: string;
     paragraphStart?: number;
     paragraphEnd?: number;
   };
@@ -378,6 +379,7 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
         ...(typeof hit.metadata.documentVersionId === 'string' ? { documentVersionId: hit.metadata.documentVersionId } : {}),
         ...(typeof hit.metadata.chunkId === 'string' ? { chunkId: hit.metadata.chunkId } : {}),
         ...(typeof hit.metadata.contentHash === 'string' ? { contentHash: hit.metadata.contentHash } : {}),
+        ...(typeof hit.metadata.chunkerVersion === 'string' ? { chunkerVersion: hit.metadata.chunkerVersion } : {}),
         ...(Number.isInteger(hit.metadata.paragraphStart) ? { paragraphStart: Number(hit.metadata.paragraphStart) } : {}),
         ...(Number.isInteger(hit.metadata.paragraphEnd) ? { paragraphEnd: Number(hit.metadata.paragraphEnd) } : {}),
       },

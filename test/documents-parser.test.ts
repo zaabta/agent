@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
-import { extractableTextCoverage, parseDocument } from '../src/documents/parser.js';
+import { PDFParse } from 'pdf-parse';
+import { extractableTextCoverage, formatPdfTables, parseDocument } from '../src/documents/parser.js';
 
 async function docxFixture() {
   const zip = new JSZip();
@@ -101,6 +102,17 @@ test('PDF text coverage identifies image-only pages and gives searchable pages a
   assert.equal(extractableTextCoverage('', 595, 842), 0);
   assert.ok(extractableTextCoverage('x'.repeat(1000), 595, 842) > 0.9);
   assert.ok(extractableTextCoverage('x'.repeat(20), 595, 842) < 0.16);
+});
+
+test('engineering PDF table extraction retains each measurement with its original header and row', async t => {
+  const table = [['Footing', 'Size', 'Depth'], ['F1', '2800 x 2800', '550'], ['F2', '2500 x 3200', '750']];
+  const formatted = formatPdfTables([table]);
+  assert.match(formatted[0]!, /Table 1, row 1: Footing=F1 \| Size=2800 x 2800 \| Depth=550/);
+  assert.match(formatted[0]!, /Table 1, row 2: Footing=F2 \| Size=2500 x 3200 \| Depth=750/);
+  assert.doesNotMatch(formatted[0]!, /Footing=F1[^\n]*Depth=750/);
+  t.mock.method(PDFParse.prototype, 'getTable', async () => ({ pages: [{ num: 1, tables: [table] }] }) as any);
+  const parsed = await parseDocument('engineering.pdf', pdfFixture('Engineering schedule. '.repeat(40)));
+  assert.match(parsed.text, /Page 1:[\s\S]*Table 1, row 2: Footing=F2 \| Size=2500 x 3200 \| Depth=750/);
 });
 
 test('scanned PDF without a local vision model fails once with an actionable configuration code', async () => {

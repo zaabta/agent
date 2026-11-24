@@ -64,8 +64,6 @@ export const config = {
   documentWorkerConcurrency: Math.min(8, Math.max(1, Number(process.env.DOCUMENT_WORKER_CONCURRENCY || 2))),
   documentJobAttempts: Math.min(5, Math.max(1, Number(process.env.DOCUMENT_JOB_ATTEMPTS || 3))),
   agentTimeoutMs: Number(process.env.AGENT_REQUEST_TIMEOUT_MS || 180000),
-  plannerMaxOutputTokens: 1024,
-  answerMaxOutputTokens: 2048,
   answerMaxContextChars: 12000,
   answerStreamMaxDurationMs: 360000,
   agentTrace: process.env.AGENT_TRACE === 'true',

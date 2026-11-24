@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const CHUNKER_VERSION = 'smart-1';
+export const CHUNKER_VERSION = 'smart-2';
 export interface SmartChunk {
   id: string;
   index: number;

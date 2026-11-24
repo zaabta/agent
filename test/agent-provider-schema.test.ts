@@ -58,7 +58,7 @@ test('Gemini planner uses validated JSON mode for dynamic tool arguments', () =>
 
 test('OpenAI planner uses JSON mode and validates the complete plan locally', async () => {
   const received: any[] = [];
-  const plan = { operation: 'tool_call', toolCall: { id: 'custom_233145be28474f2ca2b2f7b028a2a1dc', args: { q: 'luna' } } };
+  const plan = { operation: 'tool_call', requiredSources: ['registered_tool'], toolCall: { id: 'custom_233145be28474f2ca2b2f7b028a2a1dc', args: { q: 'luna' } } };
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const chunk of request) raw += chunk;
     received.push(JSON.parse(raw));

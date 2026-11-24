@@ -20,6 +20,15 @@ export function extractableTextCoverage(text: string, width: number, height: num
 
 const MIN_PDF_TEXT_COVERAGE = 0.16;
 
+export function formatPdfTables(tables: Array<Array<Array<string>>>): string[] {
+  return tables.flatMap((table, tableIndex) => {
+    if (table.length < 2 || Math.max(...table.map(row => row.length)) < 2) return [];
+    const headers = table[0]!.map((value, column) => value.trim() || `column ${column + 1}`);
+    const rows = table.slice(1).map((row, rowIndex) => `Table ${tableIndex + 1}, row ${rowIndex + 1}: ${headers.map((header, column) => `${header}=${(row[column] ?? '').trim()}`).join(' | ')}`);
+    return [`Extracted PDF table ${tableIndex + 1}; headers: ${headers.join(' | ')}\n${rows.join('\n')}`];
+  });
+}
+
 function decodeUtf8(buffer: Buffer): string {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, ''); }
   catch { throw new BadRequestException('INVALID_UTF8'); }
@@ -115,6 +124,8 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {
       const result = await parser.getText();
+      const tableResult = await parser.getTable().catch(() => undefined);
+      const tablesByPage = new Map((tableResult?.pages ?? []).map(page => [page.num, formatPdfTables(page.tables)]));
       const info = await parser.getInfo({ parsePageInfo: true });
       const pageInfo = new Map(info.pages.map(page => [page.pageNumber, page]));
       const needsVision = result.pages.filter(page => {
@@ -130,8 +141,9 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
       let extractedByVision = 0;
       for (const page of result.pages) {
         const nativeText = (page.text ?? '').trim();
+        const extractedTables = tablesByPage.get(page.num) ?? [];
         if (!needsVision.some(item => item.num === page.num)) {
-          if (nativeText) pageTexts.push(`Page ${page.num}:\n${nativeText}`);
+          if (nativeText || extractedTables.length) pageTexts.push(`Page ${page.num}:\n${[nativeText, ...extractedTables].filter(Boolean).join('\n\n')}`);
           continue;
         }
         signal?.throwIfAborted();
@@ -148,7 +160,7 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
         const visualText = await transcribePdfPage(image, signal);
         extractedByVision++;
         await onProgress?.({ stage: 'vision_extraction', status: 'in_progress', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
-        const combinedText = [nativeText, visualText].filter(Boolean).join('\n');
+        const combinedText = [nativeText, ...extractedTables, visualText].filter(Boolean).join('\n');
         if (combinedText) pageTexts.push(`Page ${page.num}:\n${combinedText}`);
       }
       if (needsVision.length) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { estimateTokens, smartChunk } from '../src/documents/smart-chunker.js';
+import { CHUNKER_VERSION, estimateTokens, smartChunk } from '../src/documents/smart-chunker.js';
 
 const identity = { documentId: 'doc-a', documentVersionId: 'ver-a' };
 
@@ -22,6 +22,14 @@ test('PDF chunks retain the originating page', () => {
   const chunks = smartChunk('Page 2:\nFirst page paragraph.\n\nPage 8:\nSecond page paragraph.', 'pdf', identity);
   assert.equal(chunks.length, 2);
   assert.deepEqual(chunks.map(chunk => chunk.pageNumber), [2, 8]);
+});
+
+test('versioned PDF table rows remain together in page-scoped chunks', () => {
+  const text = 'Page 4:\nExtracted PDF table 1; headers: Footing | Size | Depth\nTable 1, row 1: Footing=F1 | Size=2800 x 2800 mm | Depth=550 mm\nTable 1, row 2: Footing=F2 | Size=2500 x 3200 mm | Depth=750 mm';
+  const [chunk] = smartChunk(text, 'pdf', identity);
+  assert.equal(CHUNKER_VERSION, 'smart-2');
+  assert.equal(chunk?.pageNumber, 4);
+  assert.match(chunk?.content ?? '', /row 1: Footing=F1[\s\S]*row 2: Footing=F2/);
 });
 
 test('CSV chunks retain headers, sheet, row span, cell references, and exact identifiers', () => {
