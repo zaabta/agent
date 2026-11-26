@@ -41,11 +41,13 @@ Optional authentication:
 }
 ```
 
-`auth.headerName` accepts `Authorization` or `X-API-Key`; `prefix` is optional. Omit `auth` to disable authentication. On update, omit `auth` to remove it; provide `auth` with a new secret to rotate; or provide the saved header/prefix without a secret to preserve the credential. A saved secret is never returned.
+`auth.headerName` accepts `Authorization` or `X-API-Key`; `prefix` is optional. On update, omit `auth` to preserve the existing authentication configuration, provide `auth` with a new secret to rotate it, provide saved header/prefix metadata without a secret to preserve the credential, or set `auth` to `null` to remove authentication. A saved secret is never returned.
 
 Advanced safety limits accept `timeoutMs` from 500 to 30000 and `maxResponseBytes` from 256 to 1000000. Defaults are 10000 and 65536.
 
-Create returns the detail shape with `enabled:false`. The response includes `endpoint`, normalized `parameters`, schemas, limits, and `authSecretConfigured`; it never includes the credential or ciphertext. `configurationVersion` increments on edits and enable/disable so plans based on stale configurations are rejected.
+Create returns the detail shape with `enabled:false`. The response includes `endpoint`, normalized `parameters`, schemas, limits, `authHeaderName`, `authPrefix`, and `authSecretConfigured`; it never includes the credential or ciphertext. `configurationVersion` increments on edits and enable/disable so plans based on stale configurations are rejected.
+
+When a secret is provided, `LLM_CREDENTIALS_ENCRYPTION_KEY` must be configured as a 32-byte key encoded in hexadecimal or base64. If it is missing or invalid, create/update fails with HTTP 503 `CUSTOM_TOOL_ENCRYPTION_NOT_CONFIGURED`; no credential or tool changes are written.
 
 ## Endpoint and SSRF policy
 

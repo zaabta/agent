@@ -5,7 +5,7 @@ import { request as httpsRequest } from 'node:https';
 import { z } from 'zod';
 
 export class CustomToolError extends Error {
-  constructor(readonly category: string) {
+  constructor(readonly category: string, readonly statusCode?: number, readonly responseHeaders?: Record<string, string | string[] | undefined>) {
     super(category);
   }
 }
@@ -21,7 +21,7 @@ function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 
 export type ConnectionProfile = { baseUrl: URL; allowedHosts: string[]; trustedInternal: boolean };
 
-export function jsonSchema(schema: unknown) {
+export function jsonSchema(schema: unknown, allowArrayRoot = false) {
   if (
     !schema ||
     typeof schema !== 'object' ||
@@ -71,7 +71,8 @@ export function jsonSchema(schema: unknown) {
     } else if (!['string', 'number', 'integer', 'boolean', 'null'].includes(value.type)) return false;
     return true;
   };
-  if (!check(schema) || (schema as any).type !== 'object') throw new CustomToolError('INVALID_SCHEMA');
+  if (!check(schema) || ((schema as any).type !== 'object' && !(allowArrayRoot && (schema as any).type === 'array')))
+    throw new CustomToolError('INVALID_SCHEMA');
   try {
     return z.fromJSONSchema(schema as any);
   } catch {
@@ -97,7 +98,18 @@ function projectOutput(value: unknown, schema: any): unknown {
 
 export function normalizeCustomToolOutput(value: unknown, schema: unknown) {
   try {
-    return jsonSchema(schema).parse(projectOutput(value, schema));
+    const shape = schema as any;
+    if (
+      Array.isArray(value) &&
+      shape?.type === 'object' &&
+      shape.additionalProperties === true &&
+      Object.keys(shape.properties ?? {}).length === 0
+    )
+      return z.array(z.unknown()).max(1000).parse(value);
+    const validator = shape?.type === 'array'
+      ? z.array(jsonSchema(shape.items, true)).max(1000)
+      : jsonSchema(schema);
+    return validator.parse(projectOutput(value, schema));
   } catch {
     throw new CustomToolError('OUTPUT_SCHEMA_MISMATCH');
   }
@@ -269,6 +281,119 @@ export function safeToolPath(baseUrl: URL, path: string) {
   return joined;
 }
 
+async function requestJson(input: {
+  profile: ConnectionProfile;
+  url: URL;
+  method: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  signal?: AbortSignal;
+  allowErrorStatus?: boolean;
+}) {
+  const hostname = input.url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!input.profile.allowedHosts.includes(hostname)) throw new CustomToolError('HOST_NOT_APPROVED');
+  let addresses: Array<{ address: string; family: number }>;
+  const signal = input.signal ?? AbortSignal.timeout(input.timeoutMs);
+  signal.throwIfAborted();
+  try {
+    addresses = isIP(hostname)
+      ? [{ address: hostname, family: isIP(hostname) }]
+      : await abortable(dnsLookup(hostname, { all: true, order: 'verbatim' }), signal);
+  } catch (error) {
+    if (error instanceof CustomToolError) throw error;
+    throw new CustomToolError('DNS_FAILURE');
+  }
+  if (!addresses.length || (!input.profile.trustedInternal && addresses.some((item) => !publicAddress(item.address))))
+    throw new CustomToolError('ADDRESS_NOT_ALLOWED');
+  const pinned = addresses[0]!;
+  const lookup = ((_hostname: string, options: any, callback: (...args: any[]) => void) => {
+    if (options?.all) callback(null, addresses);
+    else callback(null, pinned.address, pinned.family);
+  }) as any;
+  const request = input.url.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise<{ body: unknown; statusCode: number; responseHeaders: Record<string, string | string[] | undefined> }>((resolve, reject) => {
+    let received = 0;
+    const chunks: Buffer[] = [];
+    const req = request(input.url, {
+      method: input.method,
+      headers: { accept: 'application/json', ...(input.body ? { 'content-type': 'application/json' } : {}), ...input.headers },
+      agent: false,
+      lookup,
+      servername: isIP(hostname) ? undefined : hostname,
+      rejectUnauthorized: true,
+    }, (res) => {
+      const statusCode = res.statusCode ?? 500;
+      const responseHeaders = res.headers;
+      if ((statusCode < 200 || statusCode >= 300) && (statusCode >= 300 && statusCode < 400 || !input.allowErrorStatus)) {
+        res.destroy();
+        reject(new CustomToolError(statusCode >= 300 && statusCode < 400 ? 'REDIRECT_REJECTED' : 'HTTP_STATUS', statusCode, responseHeaders));
+        return;
+      }
+      const contentType = String(responseHeaders['content-type'] ?? '').toLowerCase();
+      if (!contentType.includes('application/json')) {
+        res.destroy();
+        reject(new CustomToolError('CONTENT_TYPE_INVALID', statusCode, responseHeaders));
+        return;
+      }
+      const length = Number(responseHeaders['content-length']);
+      if (Number.isFinite(length) && length > input.maxResponseBytes) {
+        res.destroy();
+        reject(new CustomToolError('RESPONSE_TOO_LARGE', statusCode));
+        return;
+      }
+      res.on('data', (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > input.maxResponseBytes) {
+          res.destroy(new CustomToolError('RESPONSE_TOO_LARGE', statusCode));
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      });
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          resolve({ body, statusCode, responseHeaders });
+        } catch {
+          reject(new CustomToolError('INVALID_JSON', statusCode));
+        }
+      });
+      res.on('error', (error) => reject(error instanceof CustomToolError ? error : new CustomToolError('NETWORK_ERROR')));
+    });
+    const timer = setTimeout(() => req.destroy(new CustomToolError('TIMEOUT')), input.timeoutMs);
+    const abort = () => req.destroy(new CustomToolError(signal.reason?.name === 'TimeoutError' ? 'TIMEOUT' : 'CANCELLED'));
+    signal.addEventListener('abort', abort, { once: true });
+    req.on('error', (error) => reject(error instanceof CustomToolError ? error : new CustomToolError('NETWORK_ERROR')));
+    req.on('close', () => { clearTimeout(timer); signal.removeEventListener('abort', abort); });
+    req.end(input.body);
+  }).catch((error) => {
+    if (error instanceof CustomToolError) throw error;
+    throw new CustomToolError('NETWORK_ERROR');
+  });
+}
+
+export async function executeInternalJsonRequest(input: {
+  profile: ConnectionProfile;
+  path: string;
+  body: Record<string, unknown>;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  maxResponseBytes?: number;
+}) {
+  const url = safeToolPath(input.profile.baseUrl, input.path);
+  return requestJson({
+    profile: input.profile,
+    url,
+    method: 'POST',
+    headers: input.headers,
+    body: JSON.stringify(input.body),
+    timeoutMs: input.timeoutMs ?? 10_000,
+    maxResponseBytes: input.maxResponseBytes ?? 65_536,
+    allowErrorStatus: true,
+  });
+}
+
 export async function executeHttpTool(input: {
   profile: ConnectionProfile;
   path: string;
@@ -284,7 +409,7 @@ export async function executeHttpTool(input: {
   onValidatedArgs?: (args: Record<string, unknown>) => void;
 }) {
   const inputValidator = jsonSchema(input.inputSchema);
-  jsonSchema(input.outputSchema);
+    jsonSchema(input.outputSchema, true);
   const inputProperties = (input.inputSchema as any).properties as Record<string, unknown>;
   let args: Record<string, unknown>;
   try {
@@ -305,110 +430,20 @@ export async function executeHttpTool(input: {
       url.searchParams.set(parameter, String(value));
   }
   if (url.href.length > 4000) throw new CustomToolError('INVALID_ARGUMENTS');
-  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (!input.profile.allowedHosts.includes(hostname)) throw new CustomToolError('HOST_NOT_APPROVED');
-  let addresses: Array<{ address: string; family: number }>;
-  const signal = input.signal ?? AbortSignal.timeout(input.timeoutMs);
-  signal.throwIfAborted();
-  try {
-    addresses = isIP(hostname)
-      ? [{ address: hostname, family: isIP(hostname) }]
-      : await abortable(dnsLookup(hostname, { all: true, order: 'verbatim' }), signal);
-  } catch (error) {
-    if (error instanceof CustomToolError) throw error;
-    throw new CustomToolError('DNS_FAILURE');
-  }
-  if (
-    !addresses.length ||
-    (!input.profile.trustedInternal && addresses.some((item) => !publicAddress(item.address)))
-  )
-    throw new CustomToolError('ADDRESS_NOT_ALLOWED');
-  const pinned = addresses[0]!;
-  const lookup = ((_hostname: string, options: any, callback: (...args: any[]) => void) => {
-    if (options?.all) callback(null, addresses);
-    else callback(null, pinned.address, pinned.family);
-  }) as any;
-  const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
   const started = performance.now();
-  const response = await new Promise<unknown>((resolve, reject) => {
-    let received = 0;
-    const chunks: Buffer[] = [];
-    const req = request(
-      url,
-      {
-        method: 'GET',
-        headers: { accept: 'application/json', ...input.headers },
-        agent: false,
-        lookup,
-        servername: isIP(hostname) ? undefined : hostname,
-        rejectUnauthorized: true,
-      },
-      (res) => {
-        if ((res.statusCode ?? 500) < 200 || (res.statusCode ?? 500) >= 300) {
-          res.destroy();
-          reject(
-            new CustomToolError(
-              (res.statusCode ?? 500) >= 300 && (res.statusCode ?? 500) < 400
-                ? 'REDIRECT_REJECTED'
-                : 'HTTP_STATUS',
-            ),
-          );
-          return;
-        }
-        const contentType = String(res.headers['content-type'] ?? '').toLowerCase();
-        if (!contentType.includes('application/json')) {
-          res.destroy();
-          reject(new CustomToolError('CONTENT_TYPE_INVALID'));
-          return;
-        }
-        const length = Number(res.headers['content-length']);
-        if (Number.isFinite(length) && length > input.maxResponseBytes) {
-          res.destroy();
-          reject(new CustomToolError('RESPONSE_TOO_LARGE'));
-          return;
-        }
-        res.on('data', (chunk: Buffer) => {
-          received += chunk.length;
-          if (received > input.maxResponseBytes) {
-            res.destroy(new CustomToolError('RESPONSE_TOO_LARGE'));
-            return;
-          }
-          chunks.push(Buffer.from(chunk));
-        });
-        res.on('end', () => {
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          } catch {
-            reject(new CustomToolError('INVALID_JSON'));
-            return;
-          }
-          try {
-            resolve(normalizeCustomToolOutput(parsed, input.outputSchema));
-          } catch (error) {
-            reject(error);
-          }
-        });
-        res.on('error', (error) =>
-          reject(error instanceof CustomToolError ? error : new CustomToolError('NETWORK_ERROR')),
-        );
-      },
-    );
-    const timer = setTimeout(() => req.destroy(new CustomToolError('TIMEOUT')), input.timeoutMs);
-    const abort = () =>
-      req.destroy(new CustomToolError(signal.reason?.name === 'TimeoutError' ? 'TIMEOUT' : 'CANCELLED'));
-    signal.addEventListener('abort', abort, { once: true });
-    req.on('error', (error) =>
-      reject(error instanceof CustomToolError ? error : new CustomToolError('NETWORK_ERROR')),
-    );
-    req.on('close', () => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', abort);
-    });
-    req.end();
-  }).catch((error) => {
-    if (error instanceof CustomToolError) throw error;
-    throw new CustomToolError('NETWORK_ERROR');
+  const response = await requestJson({
+    profile: input.profile,
+    url,
+    method: 'GET',
+    headers: input.headers,
+    timeoutMs: input.timeoutMs,
+    maxResponseBytes: input.maxResponseBytes,
+    signal: input.signal,
   });
-  return { output: response, latencyMs: Math.max(0, Math.round(performance.now() - started)) };
+  return {
+    output: normalizeCustomToolOutput(response.body, input.outputSchema),
+    statusCode: response.statusCode,
+    responseHeaders: response.responseHeaders,
+    latencyMs: Math.max(0, Math.round(performance.now() - started)),
+  };
 }

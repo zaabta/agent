@@ -369,6 +369,33 @@ model CustomToolSecret {
   @@map("custom_tool_secrets")
 }
 
+model CustomToolConnectionCredential {
+  id                       String       @id @default(uuid()) @db.Uuid
+  profileId                String       @map("profile_id")
+  name                     String       @db.VarChar(80)
+  authStrategy             String       @map("auth_strategy") @db.VarChar(40)
+  accessTokenCiphertext    String       @map("access_token_ciphertext") @db.Text
+  accessTokenIv            String       @map("access_token_iv")
+  accessTokenAuthTag       String       @map("access_token_auth_tag")
+  refreshCookieCiphertext  String       @map("refresh_cookie_ciphertext") @db.Text
+  refreshCookieIv          String       @map("refresh_cookie_iv")
+  refreshCookieAuthTag     String       @map("refresh_cookie_auth_tag")
+  tokenExpiresAt           DateTime     @map("token_expires_at")
+  lastRefreshedAt          DateTime?    @map("last_refreshed_at")
+  credentialVersion        Int          @default(1) @map("credential_version")
+  refreshLeaseId           String?      @map("refresh_lease_id") @db.Uuid
+  refreshLeaseUntil        DateTime?    @map("refresh_lease_until")
+  authStatus               String       @default("ACTIVE") @map("auth_status") @db.VarChar(24)
+  createdBy                String       @map("created_by")
+  createdAt                DateTime     @default(now()) @map("created_at")
+  updatedAt                DateTime     @updatedAt @map("updated_at")
+  tools                    CustomTool[]
+
+  @@unique([profileId, name])
+  @@index([profileId, authStatus])
+  @@map("custom_tool_connection_credentials")
+}
+
 model CustomTool {
   id                    String                @id @default(uuid()) @db.Uuid
   name                  String                @unique
@@ -386,6 +413,9 @@ model CustomTool {
   authPrefix            String?               @map("auth_prefix")
   authSecretId          String?               @unique @map("auth_secret_id") @db.Uuid
   authSecret            CustomToolSecret?     @relation(fields: [authSecretId], references: [id], onDelete: SetNull)
+  connectionCredentialId String?              @map("connection_credential_id") @db.Uuid
+  connectionCredential  CustomToolConnectionCredential? @relation(fields: [connectionCredentialId], references: [id], onDelete: SetNull)
+  allowedUserIds        String[]               @default([]) @map("allowed_user_ids")
   enabled               Boolean               @default(false)
   effectClassification String                @default("READ_ONLY") @map("effect_classification")
   timeoutMs             Int                   @default(10000) @map("timeout_ms")

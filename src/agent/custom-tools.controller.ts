@@ -23,7 +23,8 @@ class ToolAuthDto {
     'Authorization' | 'X-API-Key';
   @ApiProperty({ type: String, required: false, description: 'For example, Bearer followed by a space.' })
   prefix?: string;
-  @ApiProperty({ type: String, writeOnly: true, minLength: 8, maxLength: 2000 }) secret!: string;
+  @ApiProperty({ type: String, required: false, writeOnly: true, minLength: 8, maxLength: 2000 })
+  secret?: string;
 }
 class CustomToolParameterDto {
   @ApiProperty({ type: String, pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }) name!: string;
@@ -78,7 +79,11 @@ class CustomToolDto {
     description: 'Advanced restricted JSON Schema. Bounded JSON object accepted when omitted.',
   })
   outputSchema?: Record<string, unknown>;
-  @ApiProperty({ type: ToolAuthDto, required: false }) auth?: ToolAuthDto | null;
+  @ApiProperty({ type: ToolAuthDto, required: false, nullable: true }) auth?: ToolAuthDto | null;
+  @ApiProperty({ type: String, required: false, nullable: true, format: 'uuid' })
+  connectionCredentialId?: string | null;
+  @ApiProperty({ type: String, isArray: true, required: false, description: 'User UUID allowlist required for shared privileged credentials.' })
+  allowedUserIds?: string[];
   @ApiProperty({ type: Number, required: false, minimum: 500, maximum: 30000, default: 10000 })
   timeoutMs?: number;
   @ApiProperty({ type: Number, required: false, minimum: 256, maximum: 1000000, default: 65536 })
@@ -89,6 +94,11 @@ class EnabledDto {
 }
 class ToolTestDto {
   @ApiProperty({ type: Object }) sampleInput!: Record<string, unknown>;
+}
+class ConnectionLoginDto {
+  @ApiProperty({ type: String, pattern: '^[a-z][a-z0-9_-]{0,63}$' }) name!: string;
+  @ApiProperty({ type: String, format: 'email', maxLength: 254 }) email!: string;
+  @ApiProperty({ type: String, writeOnly: true, minLength: 1, maxLength: 1024 }) password!: string;
 }
 
 @ApiTags('custom agent tools')
@@ -103,6 +113,25 @@ export class CustomToolsController {
   @ApiOperation({ summary: 'List approved custom-tool connection profiles (no credentials)' })
   connections() {
     return this.service.listConnectionProfiles();
+  }
+
+  @Get('connections/:profile/credentials')
+  @InstallationOwnerOnly()
+  @ApiOperation({ summary: 'List connection credential metadata without secrets' })
+  credentials(@Param('profile') profile: string) {
+    return this.service.listConnectionCredentials(profile);
+  }
+
+  @Post('connections/:profile/credentials/login')
+  @InstallationOwnerOnly()
+  @ApiOperation({ summary: 'Create or replace an encrypted Atomic connection session; credentials and tokens are never returned' })
+  @ApiBody({ type: ConnectionLoginDto })
+  loginConnection(
+    @Param('profile') profile: string,
+    @Body() body: ConnectionLoginDto,
+    @CurrentPrincipal() principal: AuthPrincipal,
+  ) {
+    return this.service.loginConnectionCredential(profile, body?.name, body?.email, body?.password, principal.userId);
   }
 
   @Get()

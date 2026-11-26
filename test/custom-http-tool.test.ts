@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import {
   CustomToolError,
@@ -171,4 +172,72 @@ test('custom output schemas project disallowed API fields before returning data 
       ),
     /OUTPUT_SCHEMA_MISMATCH/,
   );
+});
+
+test('custom tool outputs accept root arrays with the default and an explicit array schema', () => {
+  const rows = [{ id: 1, name: 'Engineering' }, { id: 2, name: 'Finance' }];
+  assert.deepEqual(
+    normalizeCustomToolOutput(rows, {
+      type: 'object', properties: {}, required: [], additionalProperties: true,
+    }),
+    rows,
+  );
+  assert.deepEqual(
+    normalizeCustomToolOutput(rows, {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'integer' }, name: { type: 'string' } },
+        required: ['id', 'name'],
+        additionalProperties: false,
+      },
+    }),
+    rows,
+  );
+  assert.throws(() =>
+    normalizeCustomToolOutput(
+      [{ id: 'bad', name: 'Engineering' }],
+      {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'integer' }, name: { type: 'string' } },
+          required: ['id', 'name'],
+          additionalProperties: false,
+        },
+      },
+    ),
+    /OUTPUT_SCHEMA_MISMATCH/,
+  );
+});
+
+test('custom HTTP errors retain numeric status and response headers internally', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(401, { 'content-type': 'application/json', 'x-upstream': 'atomic' });
+    response.end('{"error":"expired"}');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    await assert.rejects(
+      executeHttpTool({
+        profile: { baseUrl: new URL(`http://127.0.0.1:${address.port}`), allowedHosts: ['127.0.0.1'], trustedInternal: true },
+        path: '/',
+        queryMappings: {},
+        inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        outputSchema,
+        args: {},
+        timeoutMs: 1000,
+        maxResponseBytes: 1000,
+      }),
+      (error: unknown) =>
+        error instanceof CustomToolError &&
+        error.category === 'HTTP_STATUS' &&
+        error.statusCode === 401 &&
+        error.responseHeaders?.['x-upstream'] === 'atomic',
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });

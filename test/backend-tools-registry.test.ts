@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { BackendTools } from '../src/agent/backend-tools.js';
 import type { PrismaService } from '../src/prisma/prisma.service.js';
-import { decryptCredential } from '../src/llm-admin/provider-credentials.js';
+import { decryptCredential, encryptCredential } from '../src/llm-admin/provider-credentials.js';
 
 const toolId = 'f9237c78-64ae-40df-91c7-21e0915d2f15';
 const dbTool = () => ({
@@ -220,6 +221,8 @@ test('owner-created full-endpoint tools generate parameter schemas and encrypt o
       'owner',
     );
     assert.equal(stored.tool.endpointUrl, 'https://8.8.8.8/v1/weather');
+    assert.equal(stored.tool.authHeaderName, 'X-API-Key');
+    assert.equal(stored.tool.authPrefix, null);
     assert.deepEqual(stored.tool.inputSchema.required, ['city']);
     assert.deepEqual(stored.tool.queryMappings, { q: 'city' });
     assert.equal(stored.tool.outputSchema.additionalProperties, true);
@@ -230,7 +233,224 @@ test('owner-created full-endpoint tools generate parameter schemas and encrypt o
       { response: 'echo [redacted]' },
     );
     assert.equal(result.authSecretConfigured, true);
+    assert.equal(result.authHeaderName, 'X-API-Key');
     assert.equal(JSON.stringify(result).includes('test-secret-value-123'), false);
+  } finally {
+    if (previousKey === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+    else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previousKey;
+  }
+});
+
+test('custom tool updates preserve, replace, and explicitly remove authentication transactionally', async () => {
+  const previousKey = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+  process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = Buffer.alloc(32, 8).toString('base64');
+  let row: any = {
+    ...dbTool(),
+    endpointUrl: 'https://8.8.8.8/v1/weather',
+    connectionProfile: 'direct',
+    authHeaderName: 'Authorization',
+    authPrefix: 'Bearer ',
+    authSecretId: 'old-secret',
+    effectClassification: 'READ_ONLY',
+  };
+  const secrets = new Map<string, any>([
+    ['old-secret', { ...encryptCredential('old-access-token'), id: 'old-secret' }],
+  ]);
+  let failAudit = false;
+  const prisma: any = {
+    customTool: {
+      findFirst: async () => ({ ...row }),
+      update: async ({ data }: any) => {
+        row = { ...row, ...data, configurationVersion: row.configurationVersion + 1 };
+        return { ...row };
+      },
+    },
+    customToolSecret: {},
+    $transaction: async (run: (tx: any) => Promise<any>) => {
+      const oldRow = { ...row },
+        oldSecrets = new Map(secrets);
+      const tx = {
+        customToolSecret: {
+          create: async ({ data }: any) => secrets.set(data.id, data),
+          delete: async ({ where }: any) => secrets.delete(where.id),
+        },
+        customTool: {
+          update: async ({ data }: any) => {
+            row = { ...row, ...data, configurationVersion: row.configurationVersion + 1 };
+            return { ...row };
+          },
+        },
+        auditLog: {
+          create: async () => {
+            if (failAudit) throw new Error('audit failed');
+          },
+        },
+      };
+      try {
+        return await run(tx);
+      } catch (error) {
+        row = oldRow;
+        secrets.clear();
+        for (const [key, value] of oldSecrets) secrets.set(key, value);
+        throw error;
+      }
+    },
+  };
+  const updateInput: any = {
+    name: 'customer_search',
+    description: 'Search authorized CRM customers.',
+    endpoint: 'https://8.8.8.8/v1/weather',
+    parameters: [{ name: 'query', type: 'string' }],
+  };
+  try {
+    const tools = new BackendTools(prisma);
+    const preserved = await tools.updateCustomTool(toolId, updateInput, 'owner');
+    assert.equal(row.authHeaderName, 'Authorization');
+    assert.equal(row.authPrefix, 'Bearer ');
+    assert.equal(decryptCredential(secrets.get('old-secret')!), 'old-access-token');
+    assert.equal(preserved.authSecretConfigured, true);
+    const restartedTools = new BackendTools(prisma);
+    const loadedAfterRestart = await restartedTools.getCustomTool(toolId);
+    assert.equal(loadedAfterRestart.authHeaderName, 'Authorization');
+    assert.equal(loadedAfterRestart.authPrefix, 'Bearer ');
+    assert.equal(loadedAfterRestart.authSecretConfigured, true);
+
+    await tools.updateCustomTool(
+      toolId,
+      { ...updateInput, auth: { headerName: 'X-API-Key', prefix: 'Token ' } },
+      'owner',
+    );
+    assert.equal(row.authHeaderName, 'X-API-Key');
+    assert.equal(row.authPrefix, 'Token ');
+    assert.equal(decryptCredential(secrets.get('old-secret')), 'old-access-token');
+
+    const rotated = await tools.updateCustomTool(
+      toolId,
+      {
+        ...updateInput,
+        auth: { headerName: 'Authorization', prefix: 'Bearer ', secret: 'new-access-token' },
+      },
+      'owner',
+    );
+    assert.equal(decryptCredential(secrets.get(row.authSecretId)), 'new-access-token');
+    assert.equal(secrets.has('old-secret'), false);
+    assert.equal(JSON.stringify(rotated).includes('new-access-token'), false);
+
+    failAudit = true;
+    await assert.rejects(
+      tools.updateCustomTool(
+        toolId,
+        {
+          ...updateInput,
+          auth: { headerName: 'X-API-Key', secret: 'failed-replacement' },
+        },
+        'owner',
+      ),
+      /audit failed/,
+    );
+    assert.equal(decryptCredential(secrets.get(row.authSecretId)), 'new-access-token');
+
+    failAudit = false;
+    const removed = await tools.updateCustomTool(toolId, { ...updateInput, auth: null }, 'owner');
+    assert.equal(row.authHeaderName, null);
+    assert.equal(row.authPrefix, null);
+    assert.equal(row.authSecretId, null);
+    assert.equal(removed.authSecretConfigured, false);
+    assert.equal(secrets.size, 0);
+    assert.equal(row.effectClassification, 'READ_ONLY');
+  } finally {
+    if (previousKey === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+    else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previousKey;
+  }
+});
+
+test('custom HTTP execution sends the decrypted credential with the configured Bearer prefix', async () => {
+  const previousKey = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+  const previousProfiles = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
+  process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = Buffer.alloc(32, 6).toString('base64');
+  const encrypted = encryptCredential('fresh-access-token');
+  let received: any;
+  const server = createServer((request, response) => {
+    received = request.headers;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{"id":"authenticated"}');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({
+    local_test: {
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      allowedHosts: ['127.0.0.1'],
+      trustedInternal: true,
+    },
+  });
+  const row = {
+    ...dbTool(),
+    connectionProfile: 'local_test',
+    path: '/customers',
+    endpointUrl: null,
+    authHeaderName: 'Authorization',
+    authPrefix: 'Bearer ',
+    authSecretId: 'persisted-secret',
+    authSecret: { id: 'persisted-secret', ...encrypted },
+  };
+  const history: any[] = [];
+  try {
+    const tools = new BackendTools({
+      customTool: { findUnique: async () => row },
+      customToolExecution: { create: async ({ data }: any) => history.push(data) },
+    } as unknown as PrismaService);
+    const result = await tools.execute(
+      {
+        id: `custom_${toolId.replaceAll('-', '')}`,
+        args: { query: 'active' },
+      },
+      principal,
+    );
+    assert.match(JSON.stringify(result), /"id":"authenticated"/);
+    assert.equal(received.authorization, 'Bearer fresh-access-token');
+    assert.equal(JSON.stringify(history).includes('fresh-access-token'), false);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    if (previousKey === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+    else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previousKey;
+    if (previousProfiles === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
+    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previousProfiles;
+  }
+});
+
+test('custom tool authentication encryption misconfiguration returns a sanitized error without writing', async () => {
+  const previousKey = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+  let writes = 0;
+  const prisma: any = {
+    $transaction: async () => {
+      writes++;
+    },
+  };
+  try {
+    const tools = new BackendTools(prisma);
+    for (const key of [undefined, 'invalid-key']) {
+      if (key === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+      else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = key;
+      await assert.rejects(
+        tools.createCustomTool(
+          {
+            name: 'weather_lookup',
+            description: 'Look up current weather.',
+            endpoint: 'https://8.8.8.8/weather',
+            parameters: [],
+            auth: { headerName: 'Authorization', prefix: 'Bearer ', secret: 'access-token-value' },
+          },
+          'owner',
+        ),
+        (error: any) =>
+          error.getStatus() === 503 && error.message === 'CUSTOM_TOOL_ENCRYPTION_NOT_CONFIGURED',
+      );
+    }
+    assert.equal(writes, 0);
   } finally {
     if (previousKey === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
     else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previousKey;
