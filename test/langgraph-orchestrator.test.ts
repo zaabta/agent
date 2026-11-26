@@ -5,142 +5,143 @@ import { maskConversationForExternalGpt, maskForExternalGpt } from '../src/agent
 import { assertReadOnlyAtomicTool, type AtomicToolRegistration } from '../src/agent/atomic-tool-contract.js';
 
 const principal = { userId: 'user-a', tenantId: 'tenant-a', authMethod: 'jwt' as const };
-const runtime = { planner: { provider: 'openai', model: 'gpt-test', apiKey: 'key', ollamaThink: false }, answer: { provider: 'openai', model: 'gpt-test', apiKey: 'key', ollamaThink: false } };
-function models(plan: unknown, answer: string, count: { planner: number; answer: number }) {
+const runtime = { planner: { provider: 'openai', model: 'planner-test', apiKey: 'key', ollamaThink: false }, answer: { provider: 'google', model: 'answer-test', apiKey: 'key', ollamaThink: false } };
+function models(plan: unknown, response: { claims: Array<{ text: string; evidenceIds: string[] }>; missingInformation?: string[] }, count = { planner: 0, answer: 0 }, inspectAnswer?: (messages: unknown[]) => void) {
   const planner: PlannerModel = { withStructuredOutput: () => ({ invoke: async () => { count.planner++; return plan; } }) };
-  const answerModel: AnswerModel = { stream: async () => ({ async *[Symbol.asyncIterator]() { count.answer++; yield { content: answer }; } }) };
-  return { planner, answer: answerModel };
+  const answer: AnswerModel = { withStructuredOutput: () => ({ invoke: async messages => { count.answer++; inspectAnswer?.(messages); return { parsed: { ...response, missingInformation: response.missingInformation ?? [] }, raw: { usage_metadata: { input_tokens: 4, output_tokens: 3 } } }; } }) };
+  return { planner, answer };
 }
 
-test('graph topology has the router, optional planner, authorized executor, evidence, answer, and integrity nodes', () => {
+test('graph topology puts evidence preparation and validation before the only answer call', () => {
   assert.deepEqual(SITEPILOT_GRAPH_EDGES, [
     'START->router', 'router->planner|tool_executor', 'planner->tool_executor',
-    'tool_executor->evidence_collector', 'evidence_collector->answer_composer',
-    'answer_composer->integrity_gate', 'integrity_gate->END',
+    'tool_executor->evidence_collection', 'evidence_collection->source_resolution',
+    'source_resolution->evidence_validation', 'evidence_validation->answer_provider',
+    'answer_provider->finalization', 'finalization->END',
   ]);
 });
 
-test('ordinary conversation skips planner and data tools', async () => {
+test('ordinary conversation skips planner and all tools, then uses the answer model once', async () => {
   const count = { planner: 0, answer: 0 };
-  const typegraph = { searchDocuments: async () => { throw new Error('unexpected retrieval'); } } as any;
-  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: models({ operation: 'retrieve', query: 'unused' }, 'Hello!', count) });
+  const graph = createLangGraphOrchestrator({ typegraph: {} as any, principal, runtime, models: models({}, { claims: [{ text: 'Hello!', evidenceIds: [] }] }, count) });
   const result = await graph.invoke({ message: 'Hello there', history: [], signal: new AbortController().signal });
   assert.equal(result.answer, 'Hello!');
-  assert.equal(result.verificationStatus, 'not_required');
   assert.deepEqual(count, { planner: 0, answer: 1 });
+  assert.deepEqual(result.sources, []);
 });
 
-test('workspace question uses authorized existing RAG and validates source attribution', async () => {
+test('workspace route resolves and validates authorized RAG evidence before structured answer generation', async () => {
+  const order: string[] = [];
   const count = { planner: 0, answer: 0 };
-  const usage: any[] = [];
-  const typegraph = { searchDocuments: async (_query: string, _limit: number, tenantId: string, userId: string) => {
-    assert.equal(tenantId, 'tenant-a'); assert.equal(userId, 'user-a');
-    return { hits: [{ sourceRef: 'report page 2', content: 'The beam is 350 mm wide.', citation: { documentId: 'doc-a', filename: 'report.pdf', chunkIndex: 1, pageNumber: 2 } }] };
+  const progress = async (_event: string, data: Record<string, unknown>) => { if (typeof data.stage === 'string') order.push(data.stage); };
+  const typegraph = { searchDocuments: async (_q: string, _n: number, tenantId: string, userId: string) => {
+    assert.equal(tenantId, principal.tenantId); assert.equal(userId, principal.userId);
+    return { hits: [{ sourceRef: 'report page 2', content: 'The beam is 350 mm wide.', citation: { documentId: 'doc-a', documentVersionId: 'v1', filename: 'report.pdf', chunkIndex: 1, pageNumber: 2 } }] };
   } } as any;
-  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: models({ operation: 'retrieve', query: 'beam width' }, 'The beam is 350 mm wide [[report page 2]].', count), onUsage: record => { usage.push(record); } });
+  const selected = models({ operation: 'retrieve', query: 'beam width' }, { claims: [{ text: 'The beam is 350 mm wide.', evidenceIds: ['E1'] }] }, count, () => {
+    assert.ok(order.indexOf('evidence_validation') < order.indexOf('answer_provider'));
+    assert.equal(count.answer, 1);
+  });
+  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: selected, progress });
   const result = await graph.invoke({ message: 'What does the report say about beam width?', history: [], signal: new AbortController().signal });
-  assert.equal(result.answer, 'The beam is 350 mm wide [[report page 2]].');
-  assert.equal(result.citationValidation, 'valid');
-  assert.equal(result.verificationStatus, 'verified');
-  assert.deepEqual(result.sources.map(source => source.sourceRef), ['report page 2']);
+  const firstStageIndexes = ['routing', 'planning', 'tool_execution', 'evidence_collection', 'source_resolution', 'evidence_validation', 'answer_provider', 'finalization'].map(stage => order.indexOf(stage));
+  assert.ok(firstStageIndexes.every(index => index >= 0));
+  assert.deepEqual(firstStageIndexes, [...firstStageIndexes].sort((a, b) => a - b));
+  assert.equal(result.answer, 'The beam is 350 mm wide.');
+  assert.equal(result.verificationStatus, 'unverified');
+  assert.deepEqual(result.evidenceReferences[0]?.evidenceIds, ['E1']);
+  assert.deepEqual(result.evidenceReferences[0]?.sources.map(source => source.sourceRef), ['report page 2']);
+  assert.equal(result.sources[0]?.sourceRef, 'report page 2');
   assert.deepEqual(count, { planner: 1, answer: 1 });
-  assert.deepEqual(usage.map(record => record.role), ['PLANNER', 'ANSWER']);
-  assert.ok(usage.every(record => record.status === 'success'));
 });
 
-test('retrieval with no authorized hits refuses and marks missing evidence', async () => {
+test('missing authorized evidence returns safely without calling Answer Provider', async () => {
   const count = { planner: 0, answer: 0 };
-  const typegraph = { searchDocuments: async () => ({ hits: [] }) } as any;
-  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: models({ operation: 'retrieve', query: 'policy details' }, 'unreachable', count) });
-  const result = await graph.invoke({ message: 'Find the policy details in the documents', history: [], signal: new AbortController().signal });
+  const graph = createLangGraphOrchestrator({ typegraph: { searchDocuments: async () => ({ hits: [] }) } as any, principal, runtime, models: models({ operation: 'retrieve', query: 'policy' }, { claims: [] }, count) });
+  const result = await graph.invoke({ message: 'Find policy details in the documents', history: [], signal: new AbortController().signal });
   assert.equal(result.citationValidation, 'no-evidence');
   assert.match(result.answer, /do not contain evidence/i);
   assert.deepEqual(count, { planner: 1, answer: 0 });
 });
 
-test('conversation follow-up reuses context and sends the planner only masked prior turns', async () => {
-  const count = { planner: 0, answer: 0 };
-  let sawPriorTurn = false;
-  const planner: PlannerModel = { withStructuredOutput: () => ({ invoke: async messages => { count.planner++; sawPriorTurn = JSON.stringify(messages).includes('Earlier report value'); return { operation: 'retrieve', query: 'report detail' }; } }) };
-  const answer: AnswerModel = { stream: async () => ({ async *[Symbol.asyncIterator]() { count.answer++; yield { content: 'The report gives no further detail.' }; } }) };
-  const typegraph = { searchDocuments: async () => ({ hits: [] }) } as any;
-  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: { planner, answer } });
-  await graph.invoke({ message: 'What about it?', history: [{ role: 'user', content: 'Find the report value' }, { role: 'assistant', content: 'Earlier report value' }], signal: new AbortController().signal });
-  assert.equal(sawPriorTurn, true);
-  assert.deepEqual(count, { planner: 1, answer: 0 });
+test('deterministic document inventory preserves its source evidence relationship', async () => {
+  const graph = createLangGraphOrchestrator({ typegraph: { listDocuments: async () => ({ documents: [{ id: 'd1', name: 'report.pdf', type: 'PDF' }] }) } as any, principal, runtime,
+    models: models({ operation: 'registered_tool', toolId: 'list_documents', args: {} }, { claims: [] }) });
+  const result = await graph.invoke({ message: 'List all documents in my workspace', history: [], signal: new AbortController().signal });
+  assert.match(result.answer, /report\.pdf/);
+  assert.deepEqual(result.evidenceReferences[0]?.evidenceIds, ['S1']);
+  assert.deepEqual(result.evidenceReferences[0]?.sources, []);
+  assert.equal(result.verificationStatus, 'unverified');
 });
 
-test('registered tools are rechecked against the authorized catalog and cited as tool evidence', async () => {
-  const count = { planner: 0, answer: 0 };
-  const catalog = [{ id: 'price_lookup', description: 'Read the authorized price', input: { item: 'string' }, version: 2 }];
-  const backendTools = {
-    catalog: async () => catalog,
-    execute: async (call: any, authorizedPrincipal: any) => {
-      assert.equal(call.id, 'price_lookup'); assert.deepEqual(authorizedPrincipal, principal);
-      return { customToolId: 'price_lookup', configurationVersion: 2, data: { price: 25.5, currency: 'EUR' } };
-    },
-  } as any;
-  const graph = createLangGraphOrchestrator({ typegraph: {} as any, principal, backendTools, runtime, models: models({ operation: 'registered_tool', toolId: 'price_lookup', args: { item: 'subscription' } }, 'The price is 25.5 EUR [T1].', count) });
-  const result = await graph.invoke({ message: 'Look up the subscription price', history: [], signal: new AbortController().signal });
-  assert.equal(result.answer, 'The price is 25.5 EUR [T1].');
-  assert.deepEqual(result.toolsCalled, ['price_lookup']);
-  assert.equal(result.citationValidation, 'valid');
-  assert.equal(result.verificationStatus, 'verified');
-
-  let unauthorizedExecuted = false;
-  const unauthorized = { catalog: async () => catalog, execute: async () => { unauthorizedExecuted = true; } } as any;
-  const invalidGraph = createLangGraphOrchestrator({ typegraph: {} as any, principal, backendTools: unauthorized, runtime, models: models({ operation: 'registered_tool', toolId: 'other_tool', args: {} }, 'unused', count) });
-  const refused = await invalidGraph.invoke({ message: 'Call another tool in the workspace', history: [], signal: new AbortController().signal });
-  assert.equal(refused.outcome, 'clarification');
-  assert.equal(unauthorizedExecuted, false);
+test('deterministic structured table keeps each row attached to its own source evidence id', async () => {
+  const source = { documentId: 'doc-a', documentVersionId: 'v1', filename: 'rows.xlsx', sourceRef: 'rows.xlsx row 2', chunkIndex: 0 };
+  const source2 = { ...source, sourceRef: 'rows.xlsx row 3', chunkIndex: 1 };
+  const graph = createLangGraphOrchestrator({ typegraph: {} as any, structuredData: { lookupRows: async () => ({ records: [
+    { cells: [{ columnName: 'Name', value: 'Deniz' }], source }, { cells: [{ columnName: 'Name', value: 'Aria' }], source: source2 },
+  ], sources: [source, source2] }) } as any,
+    principal, runtime, models: models({ operation: 'registered_tool', toolId: 'structured_row_lookup', args: { filters: [{ columnName: 'Name', operator: 'EQ', value: 'Deniz' }] } }, { claims: [{ text: 'Deniz is in row 2.', evidenceIds: ['S1'] }] }) });
+  const result = await graph.invoke({ message: 'Find Deniz in the spreadsheet', history: [], signal: new AbortController().signal });
+  assert.match(result.answer, /\| Name \|\n\| --- \|\n\| Deniz \|\n\| Aria \|/);
+  assert.deepEqual(result.sources.map(item => item.sourceRef), [source.sourceRef, source2.sourceRef]);
+  assert.deepEqual(result.evidenceReferences.map(item => item.evidenceIds), [['S1'], ['S2']]);
+  assert.deepEqual(result.evidenceReferences.map(item => item.sources[0]?.sourceRef), [source.sourceRef, source2.sourceRef]);
 });
 
-test('invalid citations are replaced by the final integrity gate', async () => {
-  const count = { planner: 0, answer: 0 };
-  const typegraph = { searchDocuments: async () => ({ hits: [{ sourceRef: 'report page 2', content: 'The beam is 350 mm wide.', citation: { documentId: 'doc-a', filename: 'report.pdf', chunkIndex: 1 } }] }) } as any;
-  const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: models({ operation: 'retrieve', query: 'beam' }, 'The beam is 350 mm wide [[unknown source]].', count) });
-  const result = await graph.invoke({ message: 'Find beam width in the report', history: [], signal: new AbortController().signal });
-  assert.equal(result.citationValidation, 'fallback');
-  assert.match(result.answer, /could not produce an answer with verifiable evidence/i);
-  assert.deepEqual(result.sources, []);
-});
-
-test('external GPT policy masks user, conversation, and evidence identifiers in tenant scoped tokens', () => {
-  const masked = maskForExternalGpt('Email ali@example.com or call +1 (555) 123-4567', 'tenant-a');
-  assert.doesNotMatch(masked.text, /ali@example.com|555/);
-  assert.equal(masked.replacements.size, 2);
-  assert.ok([...masked.replacements.keys()].every(token => token.startsWith('[PRIVATE_tenant-a_')));
-  assert.equal(maskConversationForExternalGpt([{ role: 'user', content: 'mail ali@example.com' }], 'tenant-a')[0]!.content.includes('ali@example.com'), false);
-});
-
-test('LangGraph masks messages and retrieved evidence before GPT, then privately restores exact RAG references', async () => {
-  let referenceForAnswer = '';
+test('planner and answer receive masked request, evidence, and source metadata; final sources stay masked', async () => {
+  let answerPrompt = '';
   const planner: PlannerModel = { withStructuredOutput: () => ({ invoke: async messages => {
     const prompt = JSON.stringify(messages);
     assert.doesNotMatch(prompt, /ali@example\.com/);
-    const token = prompt.match(/\[PRIVATE_tenant-a_\d+\]/)?.[0];
+    const token = prompt.match(/\[PRIVATE_\d+\]/)?.[0];
     assert.ok(token);
-    return { operation: 'retrieve', query: `Find ${token} in report` };
+    return { operation: 'retrieve', query: `Find ${token} in the document` };
   } }) };
-  const answer: AnswerModel = { stream: async messages => ({ async *[Symbol.asyncIterator]() {
-    const prompt = (messages as any[]).map(message => typeof message.content === 'string' ? message.content : JSON.stringify(message)).join('\n');
-    assert.doesNotMatch(prompt, /ali@example\.com/);
-    referenceForAnswer = prompt.match(/"sourceRef":"([^"]+)"/)?.[1] ?? '';
-    assert.ok(referenceForAnswer);
-    yield { content: `The contact is listed [[${referenceForAnswer}]].` };
+  const answer: AnswerModel = { withStructuredOutput: () => ({ invoke: async messages => {
+    answerPrompt = JSON.stringify(messages);
+    assert.doesNotMatch(answerPrompt, /ali@example\.com/);
+    const token = answerPrompt.match(/\[PRIVATE_\d+\]/)?.[0];
+    assert.ok(token);
+    return { parsed: { claims: [{ text: `The contact is ${token}.`, evidenceIds: ['E1'] }], missingInformation: [] } };
   } }) };
-  const typegraph = { searchDocuments: async (query: string, _limit: number, tenantId: string) => {
-    assert.equal(tenantId, principal.tenantId); assert.match(query, /ali@example\.com/);
-    return { hits: [{ sourceRef: 'report ali@example.com page 1', content: 'Contact: ali@example.com.', citation: { documentId: 'doc-a', filename: 'report ali@example.com.pdf', chunkIndex: 0 } }] };
+  const typegraph = { searchDocuments: async () => {
+    return { hits: [{ sourceRef: 'contact ali@example.com page 1', content: 'Contact: ali@example.com', citation: { documentId: 'doc-a', filename: 'ali@example.com.pdf', chunkIndex: 0 } }] };
   } } as any;
   const graph = createLangGraphOrchestrator({ typegraph, principal, runtime, models: { planner, answer } });
-  const result = await graph.invoke({ message: 'Find ali@example.com in the report', history: [{ role: 'user', content: 'Use ali@example.com' }], signal: new AbortController().signal });
-  assert.equal(result.answer, 'The contact is listed [[report ali@example.com page 1]].');
-  assert.equal(result.citationValidation, 'valid');
+  const result = await graph.invoke({ message: 'Find ali@example.com in the document', history: [], signal: new AbortController().signal });
+  assert.match(result.answer, /The contact is \[PRIVATE_\d+\]\./);
+  assert.doesNotMatch(result.answer, /ali@example\.com/);
+  assert.doesNotMatch(JSON.stringify(result.sources), /ali@example\.com/);
+  assert.doesNotMatch(answerPrompt, /ali@example\.com/);
 });
 
-test('Atomic tool registration contract rejects write capability', () => {
-  const atomicRead: AtomicToolRegistration = { id: 'atomic_document_metadata', description: 'Read metadata', readOnly: true, inputSchema: { parse: value => value }, authorize: () => true, execute: async value => value };
-  assert.doesNotThrow(() => assertReadOnlyAtomicTool(atomicRead));
-  assert.throws(() => assertReadOnlyAtomicTool({ ...atomicRead, readOnly: false } as any), /ATOMIC_TOOL_REGISTRATION_REJECTED/);
+test('malformed structured model output fails once without repair or another model call', async () => {
+  let calls = 0;
+  const answer: AnswerModel = { withStructuredOutput: () => ({ invoke: async () => { calls++; return { parsed: null }; } }) };
+  const graph = createLangGraphOrchestrator({ typegraph: {} as any, principal, runtime, models: { planner: models({}, { claims: [] }).planner, answer } });
+  await assert.rejects(graph.invoke({ message: 'Hi', history: [], signal: new AbortController().signal }), /ANSWER_GENERATION_INVALID/);
+  assert.equal(calls, 1);
+});
+
+test('workspace claims cannot omit their prepared evidence references', async () => {
+  let answerCalls = 0;
+  const answer: AnswerModel = { withStructuredOutput: () => ({ invoke: async () => { answerCalls++; return { parsed: { claims: [{ text: 'Unsupported fact.', evidenceIds: [] }], missingInformation: [] } }; } }) };
+  const graph = createLangGraphOrchestrator({ typegraph: { searchDocuments: async () => ({ hits: [{ sourceRef: 'doc page 1', content: 'A supported fact.', citation: { documentId: 'd1', filename: 'doc.pdf', chunkIndex: 0 } }] }) } as any,
+    principal, runtime, models: { planner: models({ operation: 'retrieve', query: 'fact' }, { claims: [] }).planner, answer } });
+  await assert.rejects(graph.invoke({ message: 'Find the fact in the document', history: [], signal: new AbortController().signal }), /ANSWER_GENERATION_INVALID/);
+  assert.equal(answerCalls, 1);
+});
+
+test('external GPT policy masks personal data and keeps its replacement mapping private', () => {
+  const masked = maskForExternalGpt('Email ali@example.com or call +1 (555) 123-4567', 'tenant-a');
+  assert.doesNotMatch(masked.text, /ali@example.com|555/);
+  assert.ok(masked.replacements.size >= 2);
+  assert.doesNotMatch(masked.text, /tenant-a/);
+  assert.equal(maskConversationForExternalGpt([{ role: 'user', content: 'mail ali@example.com' }], 'tenant-a')[0]!.content.includes('ali@example.com'), false);
+});
+
+test('Atomic registration contract remains read-only', () => {
+  const registration: AtomicToolRegistration = { id: 'atomic_read', description: 'Read', readOnly: true, inputSchema: { parse: value => value }, authorize: () => true, execute: async value => value };
+  assert.doesNotThrow(() => assertReadOnlyAtomicTool(registration));
+  assert.throws(() => assertReadOnlyAtomicTool({ ...registration, readOnly: false } as any), /ATOMIC_TOOL_REGISTRATION_REJECTED/);
 });

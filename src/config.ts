@@ -10,22 +10,18 @@ export function requireEnv(name: string): string {
 if (!process.env.GOOGLE_API_KEY && process.env.GEMINI_API_KEY) {
   process.env.GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
 }
-const configuredModel = process.env.MASTRA_MODEL?.trim();
-const configuredModelName = process.env.MASTRA_MODEL_NAME?.trim();
+const configuredModel = process.env.AGENT_MODEL?.trim();
+const configuredModelName = process.env.GEMINI_MODEL_ID?.trim();
 const inferredProvider = configuredModel?.startsWith('openrouter/') ? 'openrouter'
+  : configuredModel?.startsWith('openai/') ? 'openai'
   : configuredModel?.startsWith('google/') || configuredModel === 'gemini'
     || configuredModel?.startsWith('gemini-') || configuredModelName?.startsWith('gemini-') ? 'google'
     : 'ollama';
-const modelProvider = (process.env.MASTRA_PROVIDER?.trim() || inferredProvider).toLowerCase();
+const modelProvider = (process.env.AGENT_PROVIDER?.trim() || inferredProvider).toLowerCase();
 const model = modelProvider === 'google'
   ? configuredModel?.startsWith('google/') ? configuredModel
     : `google/${configuredModelName || (configuredModel && configuredModel !== 'gemini' ? configuredModel : 'gemini-3.6-flash')}`
   : configuredModel || (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
-const requestedGeminiThinkingLevel = process.env.GEMINI_THINKING_LEVEL?.trim().toLowerCase();
-const geminiThinkingLevel = ['minimal', 'low', 'medium', 'high'].includes(requestedGeminiThinkingLevel || '')
-  ? requestedGeminiThinkingLevel as 'minimal' | 'low' | 'medium' | 'high'
-  : 'low';
-const modelFallback = process.env.MASTRA_FALLBACK_MODEL?.trim() || undefined;
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
 const explicitCompanyWorkspaceId = process.env.COMPANY_WORKSPACE_ID?.trim();
 const companyWorkspaceId = explicitCompanyWorkspaceId
@@ -51,8 +47,6 @@ export const config = {
     : 0.32,
   modelProvider,
   model,
-  geminiThinkingLevel,
-  modelFallback,
   ollamaThink: process.env.OLLAMA_THINK === 'true',
   maxBytes: Number(process.env.MAX_FILE_BYTES || 10485760),
   uploadDir: process.env.UPLOAD_DIR || '.sitepilot-data/uploads',

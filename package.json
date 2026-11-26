@@ -30,12 +30,10 @@
     "typegraph:deploy": "tsx src/scripts/deploy-typegraph.ts",
     "build": "tsc --noEmit",
     "eval:quality": "node --import tsx scripts/evaluate-agent.ts",
-    "eval:workflow": "node --import tsx scripts/compare-workflow.ts",
     "eval:seed": "node --import tsx scripts/seed-quality-corpus.ts",
     "typecheck:audit": "tsc --project tsconfig.audit.json",
     "eval:live-audit": "node --import tsx scripts/live-audit.ts",
-    "diagnose:footing-e2e": "node --import tsx scripts/diagnose-footing-e2e.ts",
-    "eval:ollama-fixtures": "node --import tsx scripts/evaluate-ollama-fixtures.ts"
+    "diagnose:footing-e2e": "node --import tsx scripts/diagnose-footing-e2e.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.5.1",

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AgentRequestFailure, classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeAgentClientResponse, safeAgentFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
+import { AgentRequestFailure, classifyProviderError, ProviderRequestFailure, safeAgentClientResponse, safeAgentFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
 
 test('provider errors map common upstream statuses to stable safe codes', () => {
   assert.deepEqual(classifyProviderError({ statusCode: 429, responseHeaders: { 'retry-after': '3' } }), {
@@ -21,6 +21,10 @@ test('output truncation remains distinct from provider transport failure in clie
     statusCode: 502,
     body: { code: 'OUTPUT_TRUNCATED', message: 'The model response reached its output limit before the answer was complete. Narrow the request and try again.', retryable: false },
   });
+});
+
+test('malformed structured answer output maps to the clear non-retryable model format error', () => {
+  assert.deepEqual(safeAgentFailure(new Error('ANSWER_GENERATION_INVALID')), { code: 'INVALID_MODEL_OUTPUT', retryable: false });
 });
 
 test('retry-after date and metadata are bounded and do not expose provider response text', () => {
@@ -214,14 +218,6 @@ test('stream hard deadline still bounds a continuously active generation', async
   }), { timeoutMs: 20, firstTokenTimeoutMs: 10, idleTimeoutMs: 10, maxRetries: 0 }), error => error instanceof ProviderRequestFailure && error.safe.code === 'TIMEOUT');
 });
 
-test('model fallback is opt-in and cannot cross provider or Local AI Only boundaries', () => {
-  assert.equal(modelWithExplicitFallback('openrouter/google/a', undefined, 'openrouter'), 'openrouter/google/a');
-  assert.deepEqual(modelWithExplicitFallback('openrouter/google/a', 'openrouter/google/b', 'openrouter'), [
-    { model: 'openrouter/google/a', maxRetries: 0 }, { model: 'openrouter/google/b', maxRetries: 0 },
-  ]);
-  assert.equal(modelWithExplicitFallback('openrouter/google/a', 'anthropic/b', 'openrouter'), 'openrouter/google/a');
-  assert.equal(modelWithExplicitFallback('qwen3:8b', 'cloud/model', 'ollama'), 'qwen3:8b');
-});
 
 test('serialized provider failures retain only allowlisted retry metadata', () => {
   const serialized = JSON.parse(JSON.stringify(new ProviderRequestFailure({ code: 'RATE_LIMITED', retryable: true, httpStatus: 429, retryAfterMs: 90000 })));

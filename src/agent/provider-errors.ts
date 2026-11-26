@@ -244,7 +244,7 @@ export async function withProviderRetry<T>(
 
 export function safeProviderFailure(value: unknown): SafeProviderFailure | undefined {
   if (value instanceof ProviderRequestFailure) return value.safe;
-  // Mastra workflow execution serializes errors, removing their prototype.
+  // Framework execution layers can serialize errors and remove their prototype.
   // Restore only our allowlisted public metadata, never provider response text.
   for (const error of errorChain(value)) {
     const safe = record(error.safe);
@@ -273,6 +273,7 @@ export function safeAgentFailure(value: unknown): { code: AgentErrorCategory; re
       return { code: error.category as AgentErrorCategory, retryable: context?.retryable === true, ...(typeof context?.retryAfterMs === 'number' ? { retryAfterMs: context.retryAfterMs } : {}), ...(typeof context?.requestId === 'string' ? { requestId: context.requestId } : {}), ...(record(context?.telemetry) ? { telemetry: record(context?.telemetry) as Record<string, number> } : {}) };
     }
     if (['ACTIVE_MODEL_UNAVAILABLE', 'FALLBACK_MODEL_UNAVAILABLE'].includes(String(error.message))) return { code: 'MODEL_UNAVAILABLE', retryable: false };
+    if (String(error.message) === 'ANSWER_GENERATION_INVALID') return { code: 'INVALID_MODEL_OUTPUT', retryable: false };
     if (String(error.message) === 'REQUEST_TIMEOUT') return { code: 'TIMEOUT', retryable: false };
     if (String(error.message) === 'MODEL_STREAM_FAILED') return { code: 'CONNECTION_FAILED', retryable: true };
   }
@@ -321,19 +322,4 @@ export function safeAgentClientResponse(value: unknown) {
       ...('requestId' in failure && failure.requestId ? { requestId: failure.requestId } : {}),
     },
   };
-}
-
-export function modelWithExplicitFallback<T>(primary: T, fallback: T | undefined, provider: string): T | Array<{ model: T; maxRetries: number }> {
-  if (!fallback) return primary;
-  // Fallbacks must remain within the already selected provider. Ollama-only
-  // deployments cannot be redirected to a cloud provider through this setting.
-  if (provider === 'ollama') {
-    if (typeof primary === 'string' || typeof fallback === 'string') return primary;
-    return [{ model: primary, maxRetries: 0 }, { model: fallback, maxRetries: 0 }];
-  }
-  if (typeof primary === 'string' && typeof fallback === 'string'
-    && primary.startsWith(`${provider}/`) && fallback.startsWith(`${provider}/`)) {
-    return [{ model: primary as T, maxRetries: 0 }, { model: fallback as T, maxRetries: 0 }];
-  }
-  return primary;
 }

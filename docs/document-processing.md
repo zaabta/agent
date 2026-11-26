@@ -42,6 +42,6 @@ SSE sends the latest snapshot immediately, sends a new event when it changes, us
 
 ## Structured exact lookup
 
-The Mastra `structuredDataLookup` tool is for exact cell values in CSV/Excel data. It is backed by tenant-scoped Prisma cell records and returns the matching row with a source reference. It does not perform semantic or vector retrieval. Other document-content questions use the TypeGraph `documentSearch` tool.
+The LangGraph `structured_data_lookup` capability uses the existing tenant-scoped structured-data service to find exact CSV/Excel cell values and returns source rows. Other document-content questions use the existing authorized TypeGraph RAG search. Both paths retain their existing ingestion, indexing, and provenance services.
 
 Swagger is available at `http://127.0.0.1:3220/api/docs` outside production. Production disables Swagger. The OpenAPI document describes the API key header, multipart schemas, responses, and SSE event names.

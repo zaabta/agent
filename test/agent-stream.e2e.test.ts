@@ -55,7 +55,7 @@ async function cancelAtWorkflowPoint(target: 'planning' | 'searching' | 'model')
     const event = await nextSseEvent(reader, decoder, state);
     if (event.name === 'status') runId = event.data.runId;
     reachedTarget = target === 'model'
-      ? event.name === 'text-delta' && event.data.verification === 'provisional'
+      ? event.name === 'stage' && event.data.stage === 'answer_provider' && event.data.status === 'in_progress'
       : event.name === 'stage' && event.data.stage === target && event.data.status === 'in_progress';
   }
   assert.match(runId ?? '', /^[0-9a-f-]{36}$/i);
@@ -83,7 +83,7 @@ async function cancelAtWorkflowPoint(target: 'planning' | 'searching' | 'model')
   await fetch(`${baseUrl}/api/agent/conversations/${conversation.id}`, { method: 'DELETE', headers });
 }
 
-test('Mastra streams a grounded TypeGraph answer progressively and persists the turn', {
+test('LangGraph emits one prepared TypeGraph answer and persists the turn', {
   skip: !baseUrl || !bearerToken ? 'Set AGENT_E2E_URL and AGENT_E2E_BEARER from an existing valid development session' : false,
 }, async () => {
   const conversationResponse = await fetch(`${baseUrl}/api/agent/conversations`, {
@@ -131,21 +131,18 @@ test('Mastra streams a grounded TypeGraph answer progressively and persists the 
   const runId = events.find(event => event.name === 'status')?.data.runId;
   assert.match(runId ?? '', /^[0-9a-f-]{36}$/i);
   const deltas = events.filter(event => event.name === 'text-delta');
-  const provisionalDeltas = deltas.filter(event => event.data.verification === 'provisional');
-  const verificationReset = events.find(item => item.name === 'text-reset' && item.data.reason === 'citation-verification');
-  assert.ok(provisionalDeltas.length > 1, `Expected incremental model chunks; got ${provisionalDeltas.length}`);
-  assert.ok(verificationReset, 'expected provisional text to be cleared before verified answer');
-  assert.ok(provisionalDeltas.every(event => event.receivedAt < verificationReset.receivedAt));
+  assert.equal(deltas.length, 1, 'expected one assembled final answer delta');
+  assert.equal(events.some(item => item.name === 'text-reset'), false);
   const done = events.find(event => event.name === 'done')?.data;
   assert.ok(done);
   assert.ok(deltas.at(-1)!.receivedAt < events.find(event => event.name === 'done')!.receivedAt);
-  assert.equal(deltas.at(-1)!.data.verification, 'verified');
+  assert.equal(deltas.at(-1)!.data.verification, 'unverified');
   assert.equal(deltas.at(-1)!.data.text, done.answer);
   const firstStatus = events.find(event => event.name === 'stage' || event.name === 'status');
   assert.ok(firstStatus, 'expected a meaningful workflow status');
   assert.equal(done.citationValidation, 'valid');
   assert.match(done.answer, /249/);
-  assert.ok(done.answer.includes('[[sitepilot-e2e-pricing.md (chunk 1)]]'));
+  assert.doesNotMatch(done.answer, /\[\[/);
   assert.ok(done.sources.some((source: { sourceRef: string }) => source.sourceRef === 'sitepilot-e2e-pricing.md (chunk 1)'));
 
   const lateCancellation = await fetch(`${baseUrl}/api/agent/runs/${runId}/cancel`, { method: 'POST', headers });
@@ -161,8 +158,8 @@ test('Mastra streams a grounded TypeGraph answer progressively and persists the 
   console.log(JSON.stringify({
     textDeltaCount: deltas.length,
     timeToFirstStatusMs: Math.round(firstStatus!.receivedAt),
-    timeToFirstTextMs: Math.round(provisionalDeltas[0]!.receivedAt),
-    lastTextDeltaMs: Math.round(provisionalDeltas.at(-1)!.receivedAt),
+    timeToFirstTextMs: Math.round(deltas[0]!.receivedAt),
+    lastTextDeltaMs: Math.round(deltas.at(-1)!.receivedAt),
     telemetry: done.telemetry,
   }));
 });

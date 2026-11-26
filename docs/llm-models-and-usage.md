@@ -48,7 +48,7 @@ Global model and credential administration requires `Authorization: Bearer $TOKE
 | `POST /models/sync` | — | registered model list; includes OpenAI catalog when credentials are available |
 | `POST /models` | `{"provider":"openai","modelId":"gpt-4.1-mini"}` | registered model; call model test before activation |
 
-Credential errors use `UNSUPPORTED_CLOUD_PROVIDER`, `INVALID_API_KEY`, `PROVIDER_CREDENTIAL_NOT_CONFIGURED`, or encryption-key configuration errors. Model selection rejects unavailable or incompatible entries. Provider tests use fixed official provider endpoints; callers cannot supply endpoints or URLs. OpenAI discovery uses the official `/v1/models` catalog and admits only model families supported by this agent's tool and streaming needs. OpenAI calls use the official chat completions API adapter; streaming and tool calls remain within the existing Mastra agent flow.
+Credential errors use `UNSUPPORTED_CLOUD_PROVIDER`, `INVALID_API_KEY`, `PROVIDER_CREDENTIAL_NOT_CONFIGURED`, or encryption-key configuration errors. Model selection rejects unavailable or incompatible entries. Provider tests use fixed official provider endpoints; callers cannot supply endpoints or URLs. OpenAI discovery uses the official `/v1/models` catalog and admits only model families supported by this agent's tool and streaming needs. LangGraph uses one `@langchain/openai` chat adapter for OpenAI, OpenRouter, Ollama, and Google's documented OpenAI-compatible Gemini endpoint. Planner and Answer selections are independent, provider retries and model substitution are disabled, and the integrity gate uses at most one bounded semantic verification call.
 
 ```sh
 curl -X PUT "$BASE/providers/openai/credential" -H "Authorization: Bearer $TOKEN" \

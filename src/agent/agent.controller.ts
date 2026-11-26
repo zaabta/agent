@@ -41,7 +41,7 @@ export class AgentController {
   @Post('stream')
   @ApiOperation({ summary: 'Stream LangGraph agent events as SSE from a POST request' })
   @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
-  @ApiResponse({ status: 200, description: 'SSE events: status (includes runId), stage, tool-start, tool-finish, text-delta, text-reset, sources, step-start, step-finish, cancelled, error, done.' })
+  @ApiResponse({ status: 200, description: 'SSE events: status (includes runId), stage, tool-start, tool-finish, sources, text-delta (assembled final answer), step-start, step-finish, cancelled, error, done.' })
   async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
     const { message, conversationId } = this.validateBody(body, false);
     const controller = new AbortController();
@@ -101,7 +101,6 @@ export class AgentController {
           ...(failure?.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
           ...(failure?.requestId ? { requestId: failure.requestId } : {}),
           ...(failure?.telemetry ? { telemetry: failure.telemetry } : failure ? { telemetry: { providerErrors: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(failure.code) ? 0 : 1 } } : {}),
-          discardProvisional: true,
         }, true);
         response.end();
       }

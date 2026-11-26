@@ -1,5 +1,7 @@
 # Live Ollama / Qwen3 8B follow-up validation
 
+> Historical report from before commit `b3a9773`. Its Mastra implementation and `MASTRA_*` commands are retained as a record of the tests that were run, but the referenced legacy fixture script was removed during the LangGraph migration. Use the current LangGraph test scripts and [capability inventory](../agent-tools-inventory.md) for active behavior.
+
 This supersedes the earlier first-pass environment blockers in `REPORT.md`. The follow-up obtained portable Redis and Ollama binaries, downloaded real models, and exercised the backend with real inference. The resumed 33-case end-to-end run did not get past setup/job polling on the test-only PGlite database. The earlier final run was not saved before the ephemeral environment ended and is not counted. Supplemental real-model runs use fixed retrieval evidence and are explicitly separate from end-to-end RAG validation.
 
 ## Actual test environment

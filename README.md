@@ -1,11 +1,12 @@
-# SitePilot — NestJS + Mastra + TypeGraph + Prisma
+# SitePilot — NestJS + LangGraph + TypeGraph + Prisma
 
 Isolated development backend. The legacy SitePilot backend, database and volumes are not used or modified.
 
 ## Architecture
 
 - NestJS exposes authenticated HTTP endpoints.
-- Mastra `Agent.stream()` runs the agent and its `documentSearch` and `listDocuments` tools.
+- LangGraph is the only agent orchestration path. Its request-scoped graph routes, plans, executes authorized tools, collects evidence, composes answers, and gates citations.
+- Planner and answer models are independently configurable. LangGraph supports OpenAI, OpenRouter, Ollama, and Google/Gemini through one OpenAI-compatible model factory.
 - TypeGraph owns document ingestion, embeddings, pgvector, semantic/BM25 hybrid retrieval and source chunks.
 - Prisma stores application metadata, conversation state, LLM runtime settings, registered models, and redacted per-invocation usage metadata.
 - Ollama provides local `qwen3:8b` inference and `nomic-embed-text` 768-dimensional embeddings.
@@ -24,13 +25,13 @@ pnpm test
 pnpm dev
 ```
 
-Choose the active provider/model and add cloud API keys in the LLM Settings page. The backend needs `LLM_CREDENTIALS_ENCRYPTION_KEY` to encrypt UI-managed keys. Existing `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and model-selection environment values remain supported as backward-compatible fallbacks/bootstrap, but are no longer listed in `.env.example`. `pnpm prisma:deploy` applies additive migrations; it does not reset the database.
+Choose Planner and Answer providers/models and add cloud API keys in the LLM Settings page. The backend needs `LLM_CREDENTIALS_ENCRYPTION_KEY` to encrypt UI-managed keys. `AGENT_PROVIDER` and `AGENT_MODEL` seed the shared model defaults; `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENAI_API_KEY` remain supported as credential fallbacks. `pnpm prisma:deploy` applies additive migrations; it does not reset the database.
 
 Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilot:sitepilot@localhost:5444/sitepilot`.
 
 ### Runtime model registry and token analytics
 
-`MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, and `OLLAMA_THINK` (plus the optional history, timeout, and TypeGraph threshold settings) seed database runtime settings without overwriting existing database values. Each new agent request reads one immutable model snapshot from PostgreSQL, so separate API instances see installation-owner changes on the next request. Ollama discovery reads the trusted `OLLAMA_BASE_URL` and confirms tool capability through `/api/show`; OpenRouter free models are read from its public model catalog and require tool plus structured-output support; Gemini remains available from `GEMINI_API_KEY` or an encrypted installation-owner-managed credential. OpenAI models are discovered from the official model catalog when an `OPENAI_API_KEY` fallback or encrypted credential is configured. Only API keys stay backend-only. UI-managed credentials require `LLM_CREDENTIALS_ENCRYPTION_KEY` (32 random bytes encoded as base64) and are encrypted with AES-256-GCM; environment keys remain supported as fallbacks. Embedding and TypeGraph ingestion configuration remains independent.
+`AGENT_PROVIDER`, `AGENT_MODEL`, and `OLLAMA_THINK` (plus the optional history, timeout, and TypeGraph threshold settings) seed database runtime settings without overwriting existing database values. Each new agent request reads one immutable model snapshot from PostgreSQL, so separate API instances see installation-owner changes on the next request. Ollama discovery reads the trusted `OLLAMA_BASE_URL` and confirms tool capability through `/api/show`; OpenRouter free models are read from its public model catalog and require tool plus structured-output support; OpenAI models are discovered from the official model catalog when an `OPENAI_API_KEY` fallback or encrypted credential is configured. Only API keys stay backend-only. UI-managed credentials require `LLM_CREDENTIALS_ENCRYPTION_KEY` (32 random bytes encoded as base64) and are encrypted with AES-256-GCM; environment keys remain supported as fallbacks. Embedding and TypeGraph ingestion configuration remains independent.
 
 Global provider/model/runtime endpoints require a JWT for the configured installation owner (`INSTALLATION_OWNER_USER_ID`). User usage analytics is authenticated and scoped to the caller:
 
@@ -48,11 +49,11 @@ Example switching and reporting requests:
 ```sh
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3220/api/admin/llm/models
 curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \\
-  -d '{"MASTRA_PROVIDER":"ollama","MASTRA_MODEL":"qwen3:8b"}' http://127.0.0.1:3220/api/admin/llm/settings
+  -d '{"AGENT_PROVIDER":"ollama","AGENT_MODEL":"qwen3:8b"}' http://127.0.0.1:3220/api/admin/llm/settings
 curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:3220/api/admin/llm/usage?period=last7days&groupBy=model'
 ```
 
-Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; model results preserve exact provider/model identifiers. Usage results return `timezone`, UTC `from`/`to`, `groupBy`, and grouped `data` with invocation count, input/output/total/cached/reasoning tokens, missing usage count, and average latency. Provider usage values are recorded when returned by Mastra; unavailable token counts remain null. No prompt or document contents and no prices/costs are stored. The new additive migration is `202611130001_runtime_llm_registry_usage`; run `pnpm prisma:generate` then `pnpm prisma:deploy` after reviewing the migration in the target environment. Stop the local API and document worker before generating Prisma so Windows can replace the query-engine DLL. Do not run the deploy command against production without the normal production approval.
+Settings return `{settings, secrets:{geminiConfigured,openrouterConfigured}}`; model results preserve exact provider/model identifiers. Usage results return `timezone`, UTC `from`/`to`, `groupBy`, and grouped `data` with invocation count, input/output/total/cached/reasoning tokens, missing usage count, and average latency. Provider usage values are recorded by LangGraph callbacks; unavailable token counts remain null. No prompt or document contents and no prices/costs are stored. The new additive migration is `202611130001_runtime_llm_registry_usage`; run `pnpm prisma:generate` then `pnpm prisma:deploy` after reviewing the migration in the target environment. Stop the local API and document worker before generating Prisma so Windows can replace the query-engine DLL. Do not run the deploy command against production without the normal production approval.
 
 ## API
 
@@ -89,7 +90,7 @@ curl -N -X POST http://127.0.0.1:3220/api/agent/stream \
 
 The stream is a POST SSE response, so browser clients should use `fetch()` and read `response.body` with a streaming reader. `EventSource` cannot submit POST requests. Aborting the browser fetch disconnects only the SSE transport; the backend continues generation and persists the result.
 
-Provider retries are bounded to two retries for transient planning and grounded-answer model calls, with exponential jitter and a capped safe `Retry-After`. Optional `MASTRA_FALLBACK_MODEL` is disabled by default; if configured, it must be an already-approved model from the same provider and support this agent's tool/structured-output needs. Ollama fallbacks stay on Ollama, so `MASTRA_PROVIDER=ollama` remains Local AI Only. This service has no separate tenant egress-policy registry; cloud-provider fallback is therefore restricted to the already-selected provider.
+LangGraph currently makes planner and answer calls with provider retries disabled and has no model fallback. Ollama stays local when selected; cloud providers are called only when explicitly selected for a role.
 
 ```js
 const response = await fetch('/api/agent/stream', {
@@ -107,7 +108,7 @@ while (true) {
 }
 ```
 
-Client reducer guidance: append provisional `text-delta` values to a draft buffer; clear that buffer on every `text-reset`; replace visible text with a verified delta; always replace it with `done.answer` on `done`. On `error` or `cancelled`, clear the draft when requested and stop treating the turn as active. Retain the `runId` from `status`; the cancel button should POST the cancel route with the same bearer token. Do not treat `AbortController.abort()` on the stream request as cancellation of backend work.
+Client reducer guidance: display the single assembled `text-delta` after generation and replace visible text with `done.answer` on `done`. On `error` or `cancelled`, stop treating the turn as active. Retain the `runId` from `status`; the cancel button should POST the cancel route with the same bearer token. Do not treat `AbortController.abort()` on the stream request as cancellation of backend work.
 
 ### SSE event contract
 
@@ -123,33 +124,26 @@ event: tool-start
 data: {"toolName":"documentSearch"}
 
 event: text-delta
-data: {"text":"Draft fragment","verification":"provisional"}
-
-event: text-reset
-data: {"reason":"citation-verification"}
-
-event: text-delta
-data: {"text":"Citation-verified answer","verification":"verified"}
+data: {"text":"Prepared answer","verification":"unverified"}
 
 event: done
-data: {"answer":"Citation-verified answer","sources":[],"citationValidation":"valid","discardProvisional":false}
+data: {"answer":"Prepared answer","sources":[],"evidenceReferences":[],"citationValidation":"valid"}
 ```
 
-- `status`: `{status:"started",runId,conversationId,turnId}`. `runId` is opaque and is used by the authenticated cancel endpoint. Workflow mode also includes `orchestration:"workflow"`.
-- `stage`: `{stage,status,message,toolName?}` reports workflow progress. Current stage IDs are `planning`, `discovering`, `searching`, `executing`, `composing`, `validating`, and `completed`; `status` is `in_progress` or `completed`. `toolName` is present when a backend tool is running.
+- `status`: `{status:"started",runId,conversationId,turnId}`. `runId` is opaque and is used by the authenticated cancel endpoint. The response includes `orchestration:"langgraph"`.
+- `stage`: `{stage,status,message,toolName?}` reports graph progress. Current stage IDs include `routing`, `planning`, `tool_execution`, `evidence_collection`, `source_resolution`, `evidence_validation`, `answer_provider`, `finalization`, and `completed`; `status` is `in_progress` or `completed`. `toolName` is present when a backend tool is running.
 - `step-start`, `step-finish`: safe step index and elapsed/token usage values; prompts and model IDs are omitted.
 - `tool-start`: allowlisted `toolName`; arguments are omitted.
 - `sources`: citations produced by TypeGraph retrieval.
 - `tool-finish`: allowlisted tool name, duration and source count; raw tool output is omitted.
-- `text-delta`: workflow answer-generation chunks arrive as `{text,verification:"provisional"}`. Hidden reasoning chunks are suppressed. Workflow mode then sends one `{text,verification:"verified"}` delta after citation validation. Legacy mode may send only provisional chunks; in either mode `done.answer` is authoritative.
-- `text-reset`: `{reason:"provider-retry"}` clears partial provisional text before a bounded retry; `{reason:"citation-verification"}` clears the completed draft before the verified answer is sent. Keep provisional text in a separate buffer and never append the verified answer to it.
+- `text-delta`: one deterministic assembled response arrives as `{text,verification:"unverified"|"not_required"}` after answer generation. `done.answer` is authoritative. Evidence references use structured IDs in `done.evidenceReferences`; resolved source metadata is supplied separately.
 - `done`: final answer, TypeGraph source references, tool names, citation validation state and request telemetry.
-- `error`: safe error code only; no provider error body or credentials. Terminal errors set `discardProvisional:true`.
-- `cancelled`: `{runId,status:"cancelled",executionSettled:true,providerStopConfirmed:false,ackLatencyMs}` means the local Mastra execution settled after its abort signal. It does not assert that a remote provider stopped computation.
+- `error`: safe error code only; no provider error body, credentials, or generated answer text.
+- `cancelled`: `{runId,status:"cancelled",executionSettled:true,providerStopConfirmed:false,ackLatencyMs}` means the local LangGraph execution settled after its abort signal. It does not assert that a remote provider stopped computation.
 
-The initial `status` event includes an opaque `runId`. An authenticated owner can call `POST /api/agent/runs/:runId/cancel`. The route is idempotent and returns `status:"cancelling"` until the local execution settles, `cancelled` when it settles, `finishing` if the verified answer is already being persisted, or the existing terminal state. A foreign or unknown run returns the same `404` response. The in-memory registry is bounded to 48 concurrent runs per API process and 2 per user; terminal records expire after two minutes. Cancellation propagates `AbortSignal` to Mastra, model streams, and TypeGraph search where SDK APIs support it. The provider may continue remote computation after the client abort; this API does not claim otherwise.
+The initial `status` event includes an opaque `runId`. An authenticated owner can call `POST /api/agent/runs/:runId/cancel`. The route is idempotent and returns `status:"cancelling"` until the local execution settles, `cancelled` when it settles, `finishing` if the final response is already being persisted, or the existing terminal state. A foreign or unknown run returns the same `404` response. The in-memory registry is bounded to 48 concurrent runs per API process and 2 per user; terminal records expire after two minutes. Cancellation propagates `AbortSignal` to LangGraph, model calls, and TypeGraph search where SDK APIs support it. The provider may continue remote computation after the client abort; this API does not claim otherwise.
 
-On `done`, set the rendered assistant content to `done.answer` as the authoritative value (replace, do not append). If `done.discardProvisional` is true, discard any provisional content. On `error`, discard provisional text when `discardProvisional` is true and render the safe error code. On `cancelled`, clear provisional content and render a cancelled/interrupted state, not a completed answer. Preserve text exactly as delivered so Arabic/RTL and Markdown are not corrupted; render Markdown only after applying the event protocol. A network disconnect or browser fetch abort does not cancel generation; use the cancel endpoint while connected or reload the persisted conversation after a disconnect. API restart drops process-local run IDs. Graceful shutdown aborts active execution and waits at most 1.5 seconds for local calls to settle; there is no cross-process cancellation recovery. If multiple API replicas are introduced, route cancellation to the originating replica or add authenticated Redis Pub/Sub coordination keyed by opaque run ID and owner identity. Citation validation checks that markers refer to retrieved chunks; it is not an independent fact-checker.
+On `done`, set rendered assistant content to `done.answer` as the authoritative value (replace, do not append). On `error`, render the safe error code. On `cancelled`, render a cancelled/interrupted state, not a completed answer. Preserve text exactly as delivered so Arabic/RTL and Markdown are not corrupted; render Markdown only after applying the event protocol. A network disconnect or browser fetch abort does not cancel generation; use the cancel endpoint while connected or reload the persisted conversation after a disconnect. API restart drops process-local run IDs. Graceful shutdown aborts active execution and waits at most 1.5 seconds for local calls to settle; there is no cross-process cancellation recovery. If multiple API replicas are introduced, route cancellation to the originating replica or add authenticated Redis Pub/Sub coordination keyed by opaque run ID and owner identity. Evidence source identity, tenant scope, source provenance, and structured result provenance are validated before the Answer Provider runs. There is no post-answer verification, source resolution, citation repair, or regeneration.
 
 To start a conversation, POST `/api/agent/conversations`; pass its `id` as `conversationId` to `/ask` or `/stream`. GET `/api/agent/conversations` lists recent owned conversations and each latest message; GET `/api/agent/conversations/:id` returns the bounded message history. Each turn stores the user message and a pending assistant message before generation. Assistant messages include `status` (`processing`, `completed`, `interrupted`, or `failed`) and `stage` (`thinking`, `planning`, `searching`, `executing`, `composing`, `validating`, etc.). Disconnecting the SSE client does not cancel the turn; generation continues and persists its final answer. A process crash is reconciled to `interrupted` when its request timeout has elapsed. Tenant and owner scope come from server authentication, never from request content. While auth is the shared development key, all development requests share the configured owner scope.
 
@@ -181,10 +175,10 @@ Chunk limits can be tuned with `SITEPILOT_CHUNK_MAX_TOKENS`, `SITEPILOT_CHUNK_TA
 - TypeGraph is the only RAG engine. Do not add Prisma chunk/vector tables or custom ranking SQL.
 - TypeGraph uses the server-configured tenant ID; tool arguments cannot choose a tenant.
 - Prisma migrations create application tables only; TypeGraph deployment remains separate.
-- The stream uses Mastra's native `Agent.stream()`/`fullStream`. It forwards only allowlisted lifecycle, tool progress, safe citation metadata and user-facing text events. Reasoning and raw events are not sent.
-- Request timeout defaults to 180 seconds. Client disconnects abort Mastra's run. Incomplete assistant turns are not persisted.
+- The stream emits events from the LangGraph execution. It forwards only allowlisted lifecycle, tool progress, safe citation metadata and user-facing text events. Reasoning and raw events are not sent.
+- Request timeout defaults to 180 seconds. Client disconnects abort the LangGraph run. Incomplete assistant turns are not persisted.
 - Qwen3 `think` is controlled with `OLLAMA_THINK` (default false in `.env.example`). Set true to enable reasoning. Local model and hardware performance varies.
-- Telemetry reports provider-reported token counts when available; otherwise counts, tokens/second and model load time are `null`. Model inference duration is summed from Mastra step start/finish events; TTFT is measured to the first user-visible text delta.
+- Telemetry reports provider-reported token counts when available; otherwise counts, tokens/second and model load time are `null`. Model inference duration is recorded by LangGraph model callbacks; TTFT is measured to the first user-visible text delta.
 
 ## Tests
 
@@ -194,7 +188,7 @@ Chunk limits can be tuned with `SITEPILOT_CHUNK_MAX_TOKENS`, `SITEPILOT_CHUNK_TA
 AGENT_E2E_URL=http://127.0.0.1:3220 AGENT_E2E_BEARER="$TOKEN" pnpm test:e2e:stream
 ```
 
-This real integration test checks Mastra tool events, multiple text deltas before `done`, a verified citation and persisted conversation messages.
+This real integration test checks LangGraph tool events, multiple text deltas before `done`, a verified citation and persisted conversation messages.
 
 The synchronous `/ask` compatibility and two-turn history test is available as `pnpm test:e2e:ask` under the same environment requirements.
 
@@ -265,12 +259,12 @@ Example requests:
 ```sh
 curl -H "Authorization: Bearer $TOKEN" http://localhost:3220/api/admin/llm/settings
 curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"MASTRA_PROVIDER":"ollama","MASTRA_MODEL":"qwen3:8b"}' http://localhost:3220/api/admin/llm/settings
+  -d '{"AGENT_PROVIDER":"ollama","AGENT_MODEL":"qwen3:8b"}' http://localhost:3220/api/admin/llm/settings
 curl -H "Authorization: Bearer $TOKEN" http://localhost:3220/api/admin/llm/models
 curl -H "Authorization: Bearer $TOKEN" 'http://localhost:3220/api/admin/llm/usage?period=monthly&groupBy=model'
 ```
 
-`POST /settings` accepts only `MASTRA_PROVIDER`, `MASTRA_MODEL`, `MASTRA_FALLBACK_MODEL`, `OLLAMA_THINK`, `AGENT_HISTORY_MESSAGES`, `AGENT_HISTORY_MESSAGE_CHARS`, `AGENT_REQUEST_TIMEOUT_MS`, and `TYPEGRAPH_MIN_SCORE`. Secret values are never returned; settings response includes configured flags for Gemini, OpenRouter, and OpenAI. Credential save, revoke, and connection-test endpoints are documented in `docs/llm-models-and-usage.md`; generic runtime settings cannot write credentials. Usage responses contain token counts only and use Europe/Istanbul date buckets.
+`POST /settings` accepts only `AGENT_PROVIDER`, `AGENT_MODEL`, `OLLAMA_THINK`, `AGENT_HISTORY_MESSAGES`, `AGENT_HISTORY_MESSAGE_CHARS`, `AGENT_REQUEST_TIMEOUT_MS`, and `TYPEGRAPH_MIN_SCORE`. Secret values are never returned; settings response includes configured flags for Gemini, OpenRouter, and OpenAI. Credential save, revoke, and connection-test endpoints are documented in `docs/llm-models-and-usage.md`; generic runtime settings cannot write credentials. Usage responses contain token counts only and use Europe/Istanbul date buckets.
 
 On an offline Windows workstation with Prisma engines already installed in pnpm's store, generation can use the local 6.19.3 binaries rather than fetching checksums:
 

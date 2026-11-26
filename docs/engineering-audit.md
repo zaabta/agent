@@ -1,5 +1,7 @@
 # SitePilot AI backend engineering audit
 
+> Historical audit from before the LangGraph migration. Its Mastra workflow/configuration recommendations are superseded by the current [LangGraph capability inventory](agent-tools-inventory.md); do not use this document as the active architecture guide.
+
 **Scope and limits.** Reviewed the current backend source, tracked tests, local runtime configuration, available local document fixtures, GitNexus index, and the tracked PostgreSQL dump. No production service, remote database, or document index was changed. The GitNexus index is one commit behind the checkout; its results below are corroborated against source and are not treated as complete where it reports stale coverage. An index refresh was attempted but blocked by an `EPERM` writing the GitNexus lock under `/Users/ali/.gitnexus`.
 
 ## Priority findings
