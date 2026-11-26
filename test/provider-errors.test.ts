@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentRequestFailure, classifyProviderError, modelWithExplicitFallback, ProviderRequestFailure, safeAgentClientResponse, safeAgentFailure, safeProviderClientResponse, safeProviderFailure, withProviderRetry } from '../src/agent/provider-errors.js';
-import { createSitePilotStorageExporter } from '../src/mastra/observability.js';
 
 test('provider errors map common upstream statuses to stable safe codes', () => {
   assert.deepEqual(classifyProviderError({ statusCode: 429, responseHeaders: { 'retry-after': '3' } }), {
@@ -224,16 +223,7 @@ test('model fallback is opt-in and cannot cross provider or Local AI Only bounda
   assert.equal(modelWithExplicitFallback('qwen3:8b', 'cloud/model', 'ollama'), 'qwen3:8b');
 });
 
-test('observability exporter starts and degrades safely when storage initialization fails; log export is disabled only', async () => {
-  const exporter = createSitePilotStorageExporter();
-  await assert.doesNotReject(exporter.onLogEvent({} as any));
-  assert.equal(typeof exporter._exportTracingEvent, 'function');
-  const unavailableMastra = { getStorage: () => ({ getStore: async () => { throw new Error('storage unavailable'); } }) };
-  await assert.doesNotReject(exporter.init({ mastra: unavailableMastra as any }));
-  await exporter.shutdown();
-});
-
-test('serialized Mastra provider failures retain only allowlisted retry metadata', () => {
+test('serialized provider failures retain only allowlisted retry metadata', () => {
   const serialized = JSON.parse(JSON.stringify(new ProviderRequestFailure({ code: 'RATE_LIMITED', retryable: true, httpStatus: 429, retryAfterMs: 90000 })));
   assert.deepEqual(safeProviderFailure(serialized), { code: 'RATE_LIMITED', retryable: true, httpStatus: 429, retryAfterMs: 60000 });
   assert.equal(safeProviderFailure({ name: 'ProviderRequestFailure', safe: { code: 'INVENTED', message: 'secret' } }), undefined);

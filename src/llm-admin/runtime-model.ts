@@ -1,7 +1,5 @@
 import type { PrismaService } from '../prisma/prisma.service.js';
 import { config } from '../config.js';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { effectiveCredential, type CloudProvider } from '../llm-admin/provider-credentials.js';
 
 export type LlmRole = 'PLANNER' | 'ANSWER';
@@ -49,16 +47,4 @@ export function modelForRole(runtime:RuntimeModelInput|undefined,role:LlmRole):R
 export function modelRequestTimeoutMs(runtime:RuntimeModelSnapshot):number {
   const configured=Number.isFinite(runtime.requestTimeoutMs)?runtime.requestTimeoutMs!:config.agentTimeoutMs;
   return Math.max(1_000, configured);
-}
-
-function providerModel(provider:string,id:string,apiKey?:string) {
-  if(provider==='ollama')return {providerId:'ollama',modelId:id,url:`${config.ollamaUrl.replace(/\/+$/,'')}/v1`,apiKey:'local-ollama',api:'chat' as const};
-  if(provider==='google')return apiKey?createGoogleGenerativeAI({apiKey})(id.replace(/^google\//,'')):`google/${id.replace(/^google\//,'')}`;
-  if(provider==='openai')return createOpenAI({apiKey}).chat(id.replace(/^openai\//,''));
-  if(provider==='openrouter')return apiKey?createOpenAI({name:'openrouter',baseURL:'https://openrouter.ai/api/v1',apiKey}).chat(id.replace(/^openrouter\//,'')):`openrouter/${id.replace(/^openrouter\//,'')}`;
-  return id;
-}
-
-export function asMastraModel(snapshot:RuntimeModelSnapshot){
-  return {primary:providerModel(snapshot.provider,snapshot.model,snapshot.apiKey),fallback:snapshot.fallback?providerModel(snapshot.provider,snapshot.fallback,snapshot.apiKey):undefined};
 }

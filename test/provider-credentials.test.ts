@@ -8,7 +8,6 @@ import { LlmController } from '../src/llm-admin/llm.controller.js';
 import { CustomToolsController } from '../src/agent/custom-tools.controller.js';
 import { decryptCredential, encryptCredential } from '../src/llm-admin/provider-credentials.js';
 import { LlmAdminService, supportsOpenAITools } from '../src/llm-admin/llm-admin.service.js';
-import { asMastraModel } from '../src/mastra/runtime-model.js';
 
 test('cloud API credentials encrypt and decrypt with AES-GCM and reject tampering', () => {
   const previous = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
@@ -95,14 +94,6 @@ test('credential replacement is encrypted at rest, effective immediately, audite
     if (previous === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
     else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previous;
   }
-});
-
-test('OpenAI model IDs create the official chat adapter used for tool and streaming calls', () => {
-  const model: any = asMastraModel({ provider: 'openai', model: 'gpt-4.1-mini', ollamaThink: false, apiKey: 'test-only-key' }).primary;
-  assert.equal(model.modelId, 'gpt-4.1-mini');
-  assert.equal(model.config.provider, 'openai.chat');
-  assert.equal(typeof model.doGenerate, 'function');
-  assert.equal(typeof model.doStream, 'function');
 });
 
 test('GPT-6 model family is recognized as compatible during catalog discovery and model testing', () => {

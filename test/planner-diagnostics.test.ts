@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { persistPlannerDiagnostic, readTenantTrace } from '../src/mastra/observability.js';
+import { persistPlannerDiagnostic, readTenantTrace } from '../src/agent/trace-diagnostics.js';
 
 test('planner diagnostics persist only the bounded allowlist and prune expired rows', async () => {
   let saved: any;

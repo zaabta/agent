@@ -23,7 +23,7 @@ export class AgentController {
   constructor(@Inject(AgentService) private readonly agent: AgentService) {}
 
   @Post('ask')
-  @ApiOperation({ summary: 'Ask Mastra and return a synchronous JSON answer' })
+  @ApiOperation({ summary: 'Ask SitePilot and return a synchronous JSON answer' })
   @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
   @ApiResponse({ status: 200, description: 'Assistant answer and retrieved source citations.' })
   @ApiResponse({ status: 400, description: 'INVALID_MESSAGE or INVALID_CONVERSATION_ID.' })
@@ -39,7 +39,7 @@ export class AgentController {
   }
 
   @Post('stream')
-  @ApiOperation({ summary: 'Stream native Mastra Agent events as SSE from a POST request' })
+  @ApiOperation({ summary: 'Stream LangGraph agent events as SSE from a POST request' })
   @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
   @ApiResponse({ status: 200, description: 'SSE events: status (includes runId), stage, tool-start, tool-finish, text-delta, text-reset, sources, step-start, step-finish, cancelled, error, done.' })
   async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
@@ -217,7 +217,7 @@ export class AgentController {
 
   @Get('traces/:traceId')
   @InstallationOwnerOnly()
-  @ApiOperation({ summary: 'Read redacted Mastra diagnostics for the installation' })
+  @ApiOperation({ summary: 'Read redacted agent diagnostics for the installation' })
   @ApiParam({ name: 'traceId', description: '32-character hexadecimal trace identifier.' })
   @ApiResponse({ status: 200, description: 'Redacted trace metadata and spans.' })
   @ApiResponse({ status: 403, description: 'Installation owner required.' })

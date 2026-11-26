@@ -5,7 +5,7 @@ export function requireEnv(name: string): string {
   if (!v) throw new Error(`Missing ${name}; see .env.example`);
   return v;
 }
-// Mastra's Google model router reads GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY.
+// Provider credentials are resolved by the existing model settings service.
 // Keep the project's documented Gemini-specific secret name as the source of truth.
 if (!process.env.GOOGLE_API_KEY && process.env.GEMINI_API_KEY) {
   process.env.GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
@@ -67,7 +67,6 @@ export const config = {
   answerMaxContextChars: 12000,
   answerStreamMaxDurationMs: 360000,
   agentTrace: process.env.AGENT_TRACE === 'true',
-  agentOrchestration: process.env.SITEPILOT_AGENT_ORCHESTRATION === 'workflow' ? 'workflow' : 'legacy',
   conversationOwnerId: process.env.DEV_CONVERSATION_OWNER_ID || 'diagnostic-user',
   conversationHistoryMessages: Math.max(0, Number(process.env.AGENT_HISTORY_MESSAGES || 10)),
   conversationHistoryChars: Math.max(256, Number(process.env.AGENT_HISTORY_MESSAGE_CHARS || 3000)),

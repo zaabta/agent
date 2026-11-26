@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { instrumentAgent, persistUsage, persistUsageEvent, type UsageContext } from '../src/llm-admin/usage-recorder.js';
+import { persistUsage, persistUsageEvent, type UsageContext } from '../src/llm-admin/usage-recorder.js';
 import type { PrismaService } from '../src/prisma/prisma.service.js';
-import { asMastraModel, modelForRole, modelRequestTimeoutMs, resolveRuntimeModel, resolveRuntimeModels } from '../src/mastra/runtime-model.js';
+import { modelForRole, modelRequestTimeoutMs, resolveRuntimeModel, resolveRuntimeModels } from '../src/llm-admin/runtime-model.js';
 
 function setup(){const rows:any[]=[];const prisma={llmUsage:{create:async({data}:any)=>{rows.push(data);return data;}}} as unknown as PrismaService;const context:UsageContext={tenantId:'tenant-a',userId:'user-a',conversationId:'00000000-0000-4000-8000-000000000001',logicalRequestId:'request-a',runtime:{provider:'openrouter',model:'provider/model:free',ollamaThink:false}};return{prisma,context,rows};}
 
@@ -28,20 +28,15 @@ test('usage write failures emit a structured warning without record values',asyn
   assert.deepEqual(warnings.map(value=>JSON.parse(value)),[{event:'llm_usage_persistence_failed',errorType:'Error'}]);
 });
 
-test('legacy agent generate and streamed model steps record usage once per actual model response',async()=>{
-  const {prisma,context,rows}=setup();const base:any={generate:async()=>({text:'answer',steps:[{usage:{inputTokens:2,outputTokens:3,totalTokens:5},response:{modelId:'openrouter/actual:free'}}]}),stream:async()=>({fullStream:(async function*(){yield{type:'step-start',payload:{}};yield{type:'step-finish',payload:{output:{usage:{inputTokens:4,outputTokens:6,totalTokens:10},response:{modelId:'ollama/qwen3:8b'}}}};})()})};
-  const agent=instrumentAgent(base,prisma,context);await agent.generate([]);const stream=await agent.stream([]);for await(const _chunk of stream.fullStream){};assert.equal(rows.length,2);assert.equal(rows[0].modelId,'openrouter/actual:free');assert.equal(rows[1].modelId,'ollama/qwen3:8b');assert.equal(rows[1].totalTokens,10);assert.notEqual(rows[0].invocationId,rows[1].invocationId);
-});
-
 test('runtime resolver observes a new database model snapshot on the next request',async()=>{
   let provider='ollama',selected='qwen3:4b-instruct-2507-q4_K_M';const prisma:any={runtimeSetting:{findMany:async()=>[{key:'MASTRA_PROVIDER',value:provider},{key:'MASTRA_MODEL',value:selected},{key:'OLLAMA_THINK',value:'false'}]},registeredModel:{findUnique:async({where}:any)=>where.provider_modelId.provider===provider&&where.provider_modelId.modelId===selected?{enabled:true,available:true,compatible:true}:null}};
-  const first=await resolveRuntimeModel(prisma);selected='qwen3:8b';const second=await resolveRuntimeModel(prisma);provider='openrouter';selected='provider/model-a:free';const third=await resolveRuntimeModel(prisma);selected='provider/model-b:free';const fourth=await resolveRuntimeModel(prisma);assert.equal(first.model,'qwen3:4b-instruct-2507-q4_K_M');assert.equal(second.model,'qwen3:8b');assert.equal((asMastraModel(second).primary as any).modelId,'qwen3:8b');assert.equal(third.provider,'openrouter');assert.equal((asMastraModel(third).primary as any).modelId??asMastraModel(third).primary,'openrouter/provider/model-a:free');assert.equal((asMastraModel(fourth).primary as any).modelId??asMastraModel(fourth).primary,'openrouter/provider/model-b:free');
+  const first=await resolveRuntimeModel(prisma);selected='qwen3:8b';const second=await resolveRuntimeModel(prisma);provider='openrouter';selected='provider/model-a:free';const third=await resolveRuntimeModel(prisma);selected='provider/model-b:free';const fourth=await resolveRuntimeModel(prisma);assert.equal(first.model,'qwen3:4b-instruct-2507-q4_K_M');assert.equal(second.model,'qwen3:8b');assert.equal(third.provider,'openrouter');assert.equal(third.model,'provider/model-a:free');assert.equal(fourth.model,'provider/model-b:free');
 });
 
 test('runtime resolver selects planner and answer models independently and keeps a request snapshot',async()=>{
   const values:any={MASTRA_PROVIDER:'ollama',MASTRA_MODEL:'shared',PLANNER_PROVIDER:'google',PLANNER_MODEL:'gemini-test',ANSWER_PROVIDER:'ollama',ANSWER_MODEL:'answer-v1',ANSWER_MAX_OUTPUT_TOKENS:'384',ANSWER_MAX_CONTEXT_CHARS:'8000',AGENT_REQUEST_TIMEOUT_MS:'180000'};
   const prisma:any={runtimeSetting:{findMany:async()=>Object.entries(values).map(([key,value])=>({key,value}))},registeredModel:{findUnique:async({where}:any)=>({enabled:true,available:true,compatible:true,provider:where.provider_modelId.provider,modelId:where.provider_modelId.modelId})}};
-  const snapshot=await resolveRuntimeModels(prisma);assert.equal(snapshot.planner.provider,'google');assert.equal(snapshot.planner.model,'gemini-test');assert.equal(snapshot.answer.provider,'ollama');assert.equal(snapshot.answer.model,'answer-v1');assert.equal(snapshot.answer.maxOutputTokens,384);assert.equal(snapshot.answer.maxContextChars,8000);assert.equal(modelRequestTimeoutMs(snapshot.answer),180000);assert.equal(modelRequestTimeoutMs(snapshot.planner),180000);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(modelForRole(snapshot,'ANSWER').model,'answer-v1');assert.equal((asMastraModel(snapshot.planner).primary as any).modelId,'gemini-test');
+  const snapshot=await resolveRuntimeModels(prisma);assert.equal(snapshot.planner.provider,'google');assert.equal(snapshot.planner.model,'gemini-test');assert.equal(snapshot.answer.provider,'ollama');assert.equal(snapshot.answer.model,'answer-v1');assert.equal(snapshot.answer.maxOutputTokens,384);assert.equal(snapshot.answer.maxContextChars,8000);assert.equal(modelRequestTimeoutMs(snapshot.answer),180000);assert.equal(modelRequestTimeoutMs(snapshot.planner),180000);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(modelForRole(snapshot,'ANSWER').model,'answer-v1');
   values.PLANNER_MODEL='gemini-next';const next=await resolveRuntimeModels(prisma);assert.equal(modelForRole(snapshot,'PLANNER').model,'gemini-test');assert.equal(next.planner.model,'gemini-next');
   delete values.PLANNER_PROVIDER;delete values.PLANNER_MODEL;delete values.ANSWER_PROVIDER;delete values.ANSWER_MODEL;const legacy=await resolveRuntimeModels(prisma);assert.equal(legacy.planner.provider,'ollama');assert.equal(legacy.answer.model,'shared');
 });
@@ -51,20 +46,4 @@ test('an unset role output budget follows provider defaults and a known model ma
   const prisma:any={runtimeSetting:{findMany:async()=>Object.entries(values).map(([key,value])=>({key,value}))},registeredModel:{findUnique:async({where}:any)=>({enabled:true,available:true,compatible:true,capabilities:{maxOutputTokens:8192},provider:where.provider_modelId.provider,modelId:where.provider_modelId.modelId})}};
   const snapshot=await resolveRuntimeModels(prisma);assert.equal(snapshot.planner.maxOutputTokens,undefined);assert.equal(snapshot.answer.maxOutputTokens,undefined);
   values.PLANNER_MAX_OUTPUT_TOKENS='9000';await assert.rejects(resolveRuntimeModels(prisma),/OUTPUT_TOKEN_LIMIT_EXCEEDS_MODEL_MAXIMUM/);
-});
-
-test('Answer stream usage persists completion metadata and never records truncation as success',async()=>{
-  const saved:any[]=[];const prisma:any={llmUsage:{create:async({data}:any)=>{saved.push(data);}}};
-  const runtime:any={provider:'google',model:'gemini-answer',role:'ANSWER',ollamaThink:false,maxOutputTokens:384};
-  const agent=instrumentAgent({stream:async()=>({fullStream:(async function*(){yield{type:'step-start'};yield{type:'step-finish',payload:{output:{usage:{inputTokens:12,outputTokens:384,totalTokens:396},response:{modelId:'gemini-answer'}},stepResult:{reason:'length'}}};})()})} as any,prisma,{tenantId:'tenant',userId:'user',logicalRequestId:'request',runtime} as any);
-  const result=await (agent as any).stream('question',{modelSettings:{maxOutputTokens:1024}});for await(const _chunk of result.fullStream){}
-  assert.equal(saved.length,1);assert.equal(saved[0].status,'failed');assert.equal(saved[0].errorCategory,'OUTPUT_TRUNCATED');assert.equal(saved[0].finishReason,'length');assert.equal(saved[0].maxOutputTokens,1024);assert.equal(saved[0].inputTokens,12);assert.equal(saved[0].outputTokens,384);
-});
-
-test('provider continuation finish is recorded without falsely marking output truncated',async()=>{
-  const saved:any[]=[];const prisma:any={llmUsage:{create:async({data}:any)=>{saved.push(data);}}};
-  const runtime:any={provider:'google',model:'gemini-answer',role:'ANSWER',ollamaThink:false};
-  const agent=instrumentAgent({stream:async()=>({fullStream:(async function*(){yield{type:'step-start'};yield{type:'step-finish',payload:{output:{usage:{inputTokens:12,outputTokens:256},response:{modelId:'gemini-answer'},providerMetadata:{google:{continuationToken:'next-segment'}}},stepResult:{reason:'length'}}};})()})} as any,prisma,{tenantId:'tenant',userId:'user',logicalRequestId:'request',runtime} as any);
-  const result=await (agent as any).stream('question');for await(const _chunk of result.fullStream){}
-  assert.equal(saved[0].finishReason,'length');assert.equal(saved[0].status,'success');assert.equal(saved[0].errorCategory,null);assert.equal(saved[0].maxOutputTokens,null);
 });
