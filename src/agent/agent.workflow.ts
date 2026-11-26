@@ -7,7 +7,7 @@ import { localGenerationOptions } from '../mastra/generation-options.js';
 import { boundedConversationContext, retrievalQueries, mergeRetrievalEvidence, isEvidenceFollowUp, type ContextTurn } from './retrieval-policy.js';
 import { evidenceReferencesForRequest } from './conversation-context.js';
 import { createEvidencePackage, type AgentEvidence, type DocumentEvidence } from './evidence.js';
-import { answerClaimSpans, extractEvidenceClaims, hasUnreferencedFactualClaim, removeRejectedEvidenceClaims, unreferencedFactualSpans, verifyEvidenceClaims } from './evidence-verification.js';
+import { answerClaimSpans, extractEvidenceClaims, hasUnreferencedFactualClaim, removeRejectedEvidenceClaims, renderCitationMarkersAtClaimEnd, unreferencedFactualSpans, verifyEvidenceClaims } from './evidence-verification.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Agent } from '@mastra/core/agent';
 import { createStep, createWorkflow } from '@mastra/core/workflows';
@@ -1096,7 +1096,7 @@ export function createAgentWorkflow(typegraph: TypegraphService, structured: Str
             return { answer: 'I could not verify that every factual claim is supported by the cited evidence. Please narrow the request and try again.', outcome: 'failure' as const, citationFailure: 'unsupported' as const };
           }
           const sourceRefs = [...new Set(citedEvidence.map(item => item.sourceRef))];
-          const verifiedAnswer = draft.replace(/\[(E\d+|T\d+|S\d+)\]/g, (_label, id: string) => id.startsWith('E') ? `[[${evidenceById.get(id)!.sourceRef}]]`
+          const verifiedAnswer = renderCitationMarkersAtClaimEnd(draft).replace(/\[(E\d+|T\d+|S\d+)\]/g, (_label, id: string) => id.startsWith('E') ? `[[${evidenceById.get(id)!.sourceRef}]]`
             : id.startsWith('T') ? `(API: ${toolEvidenceById.get(id)!.toolId})`
               : ((structuredEvidenceById.get(id)!.data as any)?.sources ?? []).map((source: any) => `[[${source.sourceRef}]]`).join(' '));
           const visual = citedEvidence.some(item => isDrawing(item.hit.citation?.filename ?? ''));

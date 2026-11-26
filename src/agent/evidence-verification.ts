@@ -10,6 +10,10 @@ function references(text: string) {
   return [...new Set(found)];
 }
 
+function withoutCitationMarkers(text: string) {
+  return text.replace(/[ \t]*\[(?:E|T|S)\d+\]|[ \t]*\[\[[^\]]+\]\]|[ \t]*\(API: [^)]+\)/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 function isTableSeparator(line: string) {
   const cells = line.trim().replace(/^\||\|$/g, '').split('|');
   return cells.length > 0 && cells.every(cell => /^\s*:?-{3,}:?\s*$/.test(cell));
@@ -33,7 +37,7 @@ export function answerClaimSpans(answer: string): AnswerClaimSpan[] {
   const pushSentenceSpans = (kind: 'paragraph' | 'list-item', text: string, startOffset: number, startLine: number, endLine: number) => {
     let segmentStart = 0;
     const boundaries = [...text.matchAll(/[.!?;؛](?:\s*\[(?:E|T|S)\d+\])*(?=\s|$)/gu)].map(match => (match.index ?? 0) + match[0].length)
-      .filter(end => !/\b(?:e\.g|i\.e|mr|mrs|ms|dr|prof|fig|no|vs)\.$/iu.test(text.slice(segmentStart, end).trim()));
+      .filter(end => !/\b(?:e\.g|i\.e|mr|mrs|ms|dr|prof|fig|no|rev|vs)\.$/iu.test(withoutCitationMarkers(text.slice(segmentStart, end))));
     for (const segmentEnd of [...boundaries, text.length]) {
       const raw = text.slice(segmentStart, segmentEnd);
       const claim = raw.trim();
@@ -106,7 +110,25 @@ export function unreferencedFactualSpans(answer: string): AnswerClaimSpan[] {
 
 export function extractEvidenceClaims(answer: string): EvidenceClaim[] {
   return answerClaimSpans(answer).filter(span => span.evidenceIds.length > 0)
-    .map((span, claimId) => ({ claimId, text: span.text, evidenceIds: span.evidenceIds }));
+    .map((span, claimId) => ({ claimId, text: withoutCitationMarkers(span.text), evidenceIds: span.evidenceIds }));
+}
+
+/** Reposition citation markers at a complete claim boundary before rendering
+ * provenance. Citation tokens are metadata and must not split values or IDs. */
+export function renderCitationMarkersAtClaimEnd(answer: string): string {
+  const spans = answerClaimSpans(answer).filter(span => span.evidenceIds.length).sort((a, b) => b.startOffset - a.startOffset);
+  let result = answer.replace(/\r\n/g, '\n');
+  for (const span of spans) {
+    const raw = result.slice(span.startOffset, span.endOffset);
+    const markers = [...new Set([...raw.matchAll(/\[(?:E|T|S)\d+\]/g)].map(match => match[0]))];
+    if (!markers.length) continue;
+    const clean = raw.replace(/\s*\[(?:E|T|S)\d+\]/g, '').replace(/[ \t]{2,}/g, ' ').trimEnd();
+    const rendered = span.kind === 'table-row' && /\|\s*$/.test(clean)
+      ? `${clean.replace(/\s*\|\s*$/, '')} ${markers.join(' ')} |`
+      : `${clean} ${markers.join(' ')}`;
+    result = `${result.slice(0, span.startOffset)}${rendered}${result.slice(span.endOffset)}`;
+  }
+  return result;
 }
 
 /** Remove only rejected, cited claim spans while retaining independently verified prose and rows. */

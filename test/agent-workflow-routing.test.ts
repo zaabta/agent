@@ -400,8 +400,7 @@ for (const scenario of ['narrative', 'citation-table-label', 'unknown-column', '
         if (scenario === 'continued-answer') {
           assert.equal(result.status, 'success');
           assert.equal(result.result.outcome, 'success', JSON.stringify({ answer: result.result.answer, tools: result.result.toolsCalled, diagnostic: readLocalWorkflowDiagnostic(result.result.requestId.replace(/-/g, ''), 'tenant') }));
-          assert.match(result.result.answer, /CF3 \[\[risks\]\]/);
-          assert.match(result.result.answer, /CF4 \[\[risks\]\]/);
+          assert.match(result.result.answer, /Footing schedule \| CF3 \| CF4 \[\[risks\]\]/, 'citations render at the complete claim boundary after a streamed continuation');
           assert.equal(continuationOptions.length, 2);
           assert.deepEqual(textDeltas, ['Footing schedule | CF3 [E1]', ' | CF4 [E1]']);
           assert.equal(usageEvents.filter(item => item.finishReason === 'length').length, 1);

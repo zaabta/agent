@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createEvidencePackage } from '../src/agent/evidence.js';
-import { answerClaimSpans, extractEvidenceClaims, removeRejectedEvidenceClaims, unreferencedFactualSpans, verifyEvidenceClaims } from '../src/agent/evidence-verification.js';
+import { answerClaimSpans, extractEvidenceClaims, removeRejectedEvidenceClaims, renderCitationMarkersAtClaimEnd, unreferencedFactualSpans, verifyEvidenceClaims } from '../src/agent/evidence-verification.js';
 
 const scope = { tenantId: 'tenant-a', userId: 'user-a' };
 const evidence = createEvidencePackage({ requestId: 'request-a', scope, history: [], toolResults: [
@@ -92,6 +92,42 @@ test('sentence spans preserve exact offsets so mixed paragraphs can repair suppo
   assert.equal(spans[0]!.evidenceIds[0], 'E1', 'a citation after sentence punctuation remains attached to that sentence');
   assert.equal(spans[1]!.evidenceIds.length, 0);
   for (const span of spans) assert.equal(answer.slice(span.startOffset, span.endOffset), span.text);
+});
+
+test('revision citations stay outside identifiers, dates, decimals, and complete claims', () => {
+  const revisionEvidence = createEvidencePackage({ requestId: 'revision-claim-boundaries', scope, history: [], toolResults: [{ name: 'documentSearch', result: { hits: [
+    { sourceRef: 'revisions.pdf (row 1)', content: 'Rev. 1 — 17-09-09 — For Execution.', citation: { documentId: 'revisions', filename: 'revisions.pdf', chunkIndex: 0, pageNumber: 1 } },
+    { sourceRef: 'revisions.pdf (row 2)', content: 'Rev. 2 — 20-09-09 — C10 and C11 dimensions revised.', citation: { documentId: 'revisions', filename: 'revisions.pdf', chunkIndex: 1, pageNumber: 1 } },
+    { sourceRef: 'revisions.pdf (row 2, dimensions)', content: 'C10: 1.25 x 0.75 m. C11: 0.80 x 0.60 m.', citation: { documentId: 'revisions', filename: 'revisions.pdf', chunkIndex: 2, pageNumber: 1 } },
+  ] } }] });
+  const corrupted = 'Rev. [E1] 1 — 17-09-09 — For Execution. Rev. [E2] [E3] 2 — 20-09-09 — C10 [E3]/C11 dimensions revised to 1.25 x 0.75 m and 0.80 x 0.60 m.';
+  const claims = extractEvidenceClaims(corrupted);
+  assert.equal(claims.length, 2, 'Rev. is an abbreviation, not a sentence boundary even with a citation after it');
+  assert.equal(claims[0]!.text, 'Rev. 1 — 17-09-09 — For Execution.');
+  assert.deepEqual(claims[0]!.evidenceIds, ['E1']);
+  assert.equal(claims[1]!.text, 'Rev. 2 — 20-09-09 — C10/C11 dimensions revised to 1.25 x 0.75 m and 0.80 x 0.60 m.');
+  assert.deepEqual(claims[1]!.evidenceIds, ['E2', 'E3']);
+  assert.deepEqual(verifyEvidenceClaims({ answer: corrupted, evidence: revisionEvidence, ...scope }).reasonCodes, []);
+
+  const rendered = renderCitationMarkersAtClaimEnd(corrupted);
+  assert.equal(rendered, 'Rev. 1 — 17-09-09 — For Execution. [E1] Rev. 2 — 20-09-09 — C10/C11 dimensions revised to 1.25 x 0.75 m and 0.80 x 0.60 m. [E2] [E3]');
+  assert.deepEqual(verifyEvidenceClaims({ answer: rendered, evidence: revisionEvidence, ...scope }).reasonCodes, []);
+});
+
+test('citation rendering moves identifiers and multiple references to the end of multilingual claims and table rows', () => {
+  const examples = [
+    { answer: 'Rev. [E1] 1 — 17-09-09 — For Execution.', expected: 'Rev. 1 — 17-09-09 — For Execution. [E1]' },
+    { answer: 'Rev. [E1] 2 — 20-09-09 — dimensions changed.', expected: 'Rev. 2 — 20-09-09 — dimensions changed. [E1]' },
+    { answer: 'C10 [E1]/C11 ölçüleri 1.25 x 0.75 m [E2].', expected: 'C10/C11 ölçüleri 1.25 x 0.75 m. [E1] [E2]' },
+    { answer: 'تُظهر المراجعة [E1] 2 أبعاد C10/C11 وهي 1.25 م [E2].', expected: 'تُظهر المراجعة 2 أبعاد C10/C11 وهي 1.25 م. [E1] [E2]' },
+    { answer: '| F1 [E1] | 2800 x 2800 mm | [E2] |', expected: '| F1 | 2800 x 2800 mm | [E1] [E2] |' },
+    { answer: '| Footing | Size |\n| --- | --- |\n| F1 [E1] | 2800 x 2800 mm |\n| F2 [E2] | 2500 x 3200 mm |', expected: '| Footing | Size |\n| --- | --- |\n| F1 | 2800 x 2800 mm [E1] |\n| F2 | 2500 x 3200 mm [E2] |' },
+  ];
+  for (const { answer, expected } of examples) {
+    const rendered = renderCitationMarkersAtClaimEnd(answer);
+    assert.equal(rendered, expected);
+    assert.doesNotMatch(rendered, /(?:Rev\.|F1|F2|C10) \[(?:E|T|S)\d+\]/);
+  }
 });
 
 test('claim-level repair removes only a rejected table row or sentence and retains supported content', () => {
