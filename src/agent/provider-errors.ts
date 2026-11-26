@@ -6,9 +6,17 @@ export type ProviderErrorCode =
   | 'TIMEOUT'
   | 'PROVIDER_UNAVAILABLE'
   | 'PROVIDER_AUTH_FAILED'
-  | 'PROVIDER_CREDITS_EXHAUSTED';
+  | 'PROVIDER_CREDITS_EXHAUSTED'
+  | 'UNSUPPORTED_MODEL_PARAMETER'
+  | 'MODEL_CONFIGURATION_FAILED';
 
-export type AgentErrorCategory = ProviderErrorCode | 'INVALID_MODEL_OUTPUT' | 'OUTPUT_TRUNCATED' | 'TOOL_EXECUTION_FAILED';
+export type AgentErrorCategory =
+  | ProviderErrorCode
+  | 'INVALID_MODEL_OUTPUT'
+  | 'OUTPUT_TRUNCATED'
+  | 'TOOL_EXECUTION_FAILED'
+  | 'TOOL_CATALOG_FAILED'
+  | 'ROUTER_FAILED';
 
 export interface SafeProviderFailure {
   code: ProviderErrorCode;
@@ -32,23 +40,72 @@ export class ProviderRequestFailure extends Error {
 }
 
 export class AgentRequestFailure extends Error {
-  constructor(readonly category: AgentErrorCategory, readonly context: { requestId?: string; retryable?: boolean; retryAfterMs?: number; telemetry?: Record<string, number> } = {}) {
+  constructor(
+    readonly category: AgentErrorCategory,
+    readonly context: {
+      requestId?: string;
+      retryable?: boolean;
+      retryAfterMs?: number;
+      telemetry?: Record<string, number>;
+    } = {},
+  ) {
     super(category);
     this.name = 'AgentRequestFailure';
   }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
 }
 
-function errorChain(value: unknown, depth = 0, output: Record<string, unknown>[] = []): Record<string, unknown>[] {
+function errorChain(
+  value: unknown,
+  depth = 0,
+  output: Record<string, unknown>[] = [],
+): Record<string, unknown>[] {
   const current = record(value);
   if (!current || depth > 5 || output.includes(current)) return output;
   output.push(current);
   const errors = Array.isArray(current.errors) ? current.errors : [];
-  for (const nested of [current.cause, current.lastError, record(current.data)?.error, ...errors.slice(-1)]) errorChain(nested, depth + 1, output);
+  for (const nested of [current.cause, current.lastError, record(current.data)?.error, ...errors.slice(-1)])
+    errorChain(nested, depth + 1, output);
   return output;
+}
+
+/** Return only a bounded HTTP status from an error chain for server diagnostics. */
+export function safeUpstreamHttpStatus(value: unknown): number | undefined {
+  const owner = errorChain(value).find((item) => Number.isFinite(Number(item.statusCode ?? item.status)));
+  const status = Number(owner?.statusCode ?? owner?.status);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+}
+
+/** Return only machine identifiers from known provider error fields; never return message/body text. */
+export function safeProviderErrorIdentifiers(value: unknown): {
+  code?: string;
+  type?: string;
+  parameter?: string;
+} {
+  const queue: unknown[] = [...errorChain(value), ...errorChain(value).flatMap(providerPayload)];
+  const result: { code?: string; type?: string; parameter?: string } = {};
+  const visited = new Set<object>();
+  for (let index = 0; index < queue.length && index < 100; index++) {
+    const item = record(queue[index]);
+    if (!item || visited.has(item)) continue;
+    visited.add(item);
+    for (const key of ['error', 'details', 'response']) {
+      const nested = item[key];
+      if (Array.isArray(nested)) queue.push(...nested.slice(0, 20));
+      else if (nested && typeof nested === 'object') queue.push(nested);
+    }
+    const identifier = (candidate: unknown) =>
+      typeof candidate === 'string' && /^[a-z][a-z0-9_-]{0,63}$/i.test(candidate)
+        ? candidate.toLowerCase()
+        : undefined;
+    result.code ??= identifier(item.code);
+    result.type ??= identifier(item.type);
+    result.parameter ??= identifier(item.param ?? item.parameter);
+  }
+  return result;
 }
 
 function responseHeader(error: Record<string, unknown>, name: string): string | undefined {
@@ -84,13 +141,21 @@ function providerPayload(error: Record<string, unknown>): unknown[] {
   for (const key of ['responseBody', 'body', 'data']) {
     const value = error[key];
     if (typeof value === 'string' && value.length <= 100_000) {
-      try { values.push(JSON.parse(value)); } catch { /* provider payload is not JSON */ }
+      try {
+        values.push(JSON.parse(value));
+      } catch {
+        /* provider payload is not JSON */
+      }
     } else if (value && typeof value === 'object') values.push(value);
   }
   return values;
 }
 
-function quotaDetails(chain: Record<string, unknown>[]): { exhausted: boolean; temporary: boolean; retryAfterMs?: number } {
+function quotaDetails(chain: Record<string, unknown>[]): {
+  exhausted: boolean;
+  temporary: boolean;
+  retryAfterMs?: number;
+} {
   const queue = chain.flatMap(providerPayload);
   let exhausted = false;
   let temporary = false;
@@ -99,9 +164,15 @@ function quotaDetails(chain: Record<string, unknown>[]): { exhausted: boolean; t
     const item = record(queue[index]);
     if (!item) continue;
     let marker = '';
-    try { marker = JSON.stringify(item).toLowerCase(); } catch { /* ignore cyclic SDK error internals */ }
-    if (/requestsperday|per_day|daily.?quota|quota.?exceeded|quota.?exhausted/i.test(marker)) exhausted = true;
-    if (/per_minute|perminute|per_second|persecond|requests.?per.?minute|rate_limit_exceeded/i.test(marker)) temporary = true;
+    try {
+      marker = JSON.stringify(item).toLowerCase();
+    } catch {
+      /* ignore cyclic SDK error internals */
+    }
+    if (/requestsperday|per_day|daily.?quota|quota.?exceeded|quota.?exhausted/i.test(marker))
+      exhausted = true;
+    if (/per_minute|perminute|per_second|persecond|requests.?per.?minute|rate_limit_exceeded/i.test(marker))
+      temporary = true;
     const details = Array.isArray(item.details) ? item.details : [];
     for (const detail of details) {
       const entry = record(detail);
@@ -109,14 +180,22 @@ function quotaDetails(chain: Record<string, unknown>[]): { exhausted: boolean; t
       const type = String(entry['@type'] ?? '');
       if (type.endsWith('RetryInfo') && typeof entry.retryDelay === 'string') {
         const match = /^(\d+(?:\.\d+)?)(s|ms)$/i.exec(entry.retryDelay);
-        if (match) retryAfter = Math.max(retryAfter ?? 0, Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))));
+        if (match)
+          retryAfter = Math.max(
+            retryAfter ?? 0,
+            Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))),
+          );
       }
       queue.push(entry);
     }
     for (const [key, value] of Object.entries(item)) {
       if (/(retryinfo|retrydelay)/i.test(key) && typeof value === 'string') {
         const match = /^(\d+(?:\.\d+)?)(s|ms)$/i.exec(value);
-        if (match) retryAfter = Math.max(retryAfter ?? 0, Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))));
+        if (match)
+          retryAfter = Math.max(
+            retryAfter ?? 0,
+            Math.min(86_400_000, Math.ceil(Number(match[1]) * (match[2]!.toLowerCase() === 's' ? 1000 : 1))),
+          );
       }
       if (value && typeof value === 'object' && !Array.isArray(value)) queue.push(value);
     }
@@ -128,72 +207,187 @@ function quotaDetails(chain: Record<string, unknown>[]): { exhausted: boolean; t
 export function classifyProviderError(value: unknown, now = Date.now()): SafeProviderFailure | undefined {
   const chain = errorChain(value);
   if (!chain.length) return undefined;
-  const statusOwner = chain.find(item => Number.isFinite(Number(item.statusCode ?? item.status)));
+  const statusOwner = chain.find((item) => Number.isFinite(Number(item.statusCode ?? item.status)));
   const status = Number(statusOwner?.statusCode ?? statusOwner?.status);
-  const codes = chain.map(item => String(item.code ?? ''));
-  const marker = chain.flatMap(providerPayload).map(item => { try { return JSON.stringify(item).toLowerCase(); } catch { return ''; } }).join(' ');
-  const name = String(chain.map(item => item.name).find(item => typeof item === 'string' && /timeout|timed.?out/i.test(item)) ?? chain[0]?.name ?? '');
-  const timeout = /timeout|timed.?out/i.test(name) || chain.some(item => /request_timeout|timeout|timed.?out/i.test(String(item.message ?? ''))) || codes.some(code => ['ETIMEDOUT', 'ECONNABORTED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code));
-  const connection = codes.some(code => ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT', 'UND_ERR_SOCKET'].includes(code))
-    || chain.some(item => item.name === 'TypeError' && /fetch failed/i.test(String(item.message ?? '')));
+  const codes = chain.map((item) => String(item.code ?? ''));
+  const marker = chain
+    .flatMap(providerPayload)
+    .map((item) => {
+      try {
+        return JSON.stringify(item).toLowerCase();
+      } catch {
+        return '';
+      }
+    })
+    .join(' ');
+  const name = String(
+    chain
+      .map((item) => item.name)
+      .find((item) => typeof item === 'string' && /timeout|timed.?out/i.test(item)) ??
+      chain[0]?.name ??
+      '',
+  );
+  const timeout =
+    /timeout|timed.?out/i.test(name) ||
+    chain.some((item) => /request_timeout|timeout|timed.?out/i.test(String(item.message ?? ''))) ||
+    codes.some((code) => ['ETIMEDOUT', 'ECONNABORTED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code));
+  const connection =
+    codes.some((code) =>
+      [
+        'ECONNREFUSED',
+        'ECONNRESET',
+        'EHOSTUNREACH',
+        'ENETUNREACH',
+        'ENOTFOUND',
+        'EAI_AGAIN',
+        'UND_ERR_CONNECT',
+        'UND_ERR_SOCKET',
+      ].includes(code),
+    ) || chain.some((item) => item.name === 'TypeError' && /fetch failed/i.test(String(item.message ?? '')));
   const quota = quotaDetails(chain);
-  const providerRetryAfter = chain.map(item => retryAfterMs(item, now)).find(item => item !== undefined);
+  const providerRetryAfter = chain.map((item) => retryAfterMs(item, now)).find((item) => item !== undefined);
   const resourceExhausted = /resource_exhausted/i.test(marker);
-  const exhaustedQuota = quota.exhausted || (status === 429 && ((quota.retryAfterMs ?? providerRetryAfter ?? 0) >= 3_600_000 || resourceExhausted && !quota.temporary));
+  const unsupportedParameter =
+    status === 400 &&
+    (/unsupported[_\s-]?(?:value|parameter|argument)/i.test(codes.join(' ')) ||
+      /unsupported[_\s-]?(?:value|parameter|argument)/i.test(marker) ||
+      ['reasoning_effort', 'response_format', 'temperature'].includes(
+        safeProviderErrorIdentifiers(value).parameter ?? '',
+      ));
+  const exhaustedQuota =
+    quota.exhausted ||
+    (status === 429 &&
+      ((quota.retryAfterMs ?? providerRetryAfter ?? 0) >= 3_600_000 ||
+        (resourceExhausted && !quota.temporary)));
   let resultCode: ProviderErrorCode;
   let httpStatus: number;
-  if (status === 401 || status === 403) { resultCode = 'PROVIDER_AUTH_FAILED'; httpStatus = 502; }
-  else if (status === 402) { resultCode = 'PROVIDER_CREDITS_EXHAUSTED'; httpStatus = 503; }
-  else if (status === 404 || /model_not_found|model .*not found|model.*does not exist/i.test(`${codes.join(' ')} ${marker}`)) { resultCode = 'MODEL_UNAVAILABLE'; httpStatus = 503; }
-  else if (status === 429 && exhaustedQuota) { resultCode = 'QUOTA_EXCEEDED'; httpStatus = 429; }
-  else if (status === 429) { resultCode = 'RATE_LIMITED'; httpStatus = 429; }
-  else if (timeout || status === 408 || status === 504) { resultCode = 'TIMEOUT'; httpStatus = 504; }
-  else if (connection) { resultCode = 'CONNECTION_FAILED'; httpStatus = 503; }
-  else if (status >= 500 || status === 425 || status === 0 || !Number.isFinite(status) && chain.some(item => item.isRetryable === true)) { resultCode = 'PROVIDER_UNAVAILABLE'; httpStatus = 503; }
-  else return undefined;
-  const retryable = ['RATE_LIMITED', 'CONNECTION_FAILED', 'PROVIDER_UNAVAILABLE', 'TIMEOUT'].includes(resultCode);
+  if (status === 401 || status === 403) {
+    resultCode = 'PROVIDER_AUTH_FAILED';
+    httpStatus = 502;
+  } else if (status === 402) {
+    resultCode = 'PROVIDER_CREDITS_EXHAUSTED';
+    httpStatus = 503;
+  } else if (
+    status === 404 ||
+    /model_not_found|model .*not found|model.*does not exist/i.test(`${codes.join(' ')} ${marker}`)
+  ) {
+    resultCode = 'MODEL_UNAVAILABLE';
+    httpStatus = 503;
+  } else if (unsupportedParameter) {
+    resultCode = 'UNSUPPORTED_MODEL_PARAMETER';
+    httpStatus = 502;
+  } else if (status === 400 || status === 422) {
+    resultCode = 'MODEL_CONFIGURATION_FAILED';
+    httpStatus = 502;
+  } else if (status === 429 && exhaustedQuota) {
+    resultCode = 'QUOTA_EXCEEDED';
+    httpStatus = 429;
+  } else if (status === 429) {
+    resultCode = 'RATE_LIMITED';
+    httpStatus = 429;
+  } else if (timeout || status === 408 || status === 504) {
+    resultCode = 'TIMEOUT';
+    httpStatus = 504;
+  } else if (connection) {
+    resultCode = 'CONNECTION_FAILED';
+    httpStatus = 503;
+  } else if (
+    status >= 500 ||
+    status === 425 ||
+    status === 0 ||
+    (!Number.isFinite(status) && chain.some((item) => item.isRetryable === true))
+  ) {
+    resultCode = 'PROVIDER_UNAVAILABLE';
+    httpStatus = 503;
+  } else return undefined;
+  const retryable = ['RATE_LIMITED', 'CONNECTION_FAILED', 'PROVIDER_UNAVAILABLE', 'TIMEOUT'].includes(
+    resultCode,
+  );
   const retryAfter = quota.retryAfterMs ?? providerRetryAfter;
-  return { code: resultCode, retryable, httpStatus, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
+  return {
+    code: resultCode,
+    retryable,
+    httpStatus,
+    ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}),
+  };
 }
 
 export async function withProviderRetry<T>(
   operation: (signal?: AbortSignal, onProgress?: () => void) => Promise<T>,
-  options: { maxRetries?: number; timeoutMs?: number; firstTokenTimeoutMs?: number; idleTimeoutMs?: number; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; random?: () => number; now?: () => number; shouldRetry?: (failure: SafeProviderFailure) => boolean; onRetry?: (failure: SafeProviderFailure) => Promise<void>; onFailure?: (failure: SafeProviderFailure, timeoutSource?: 'request-deadline' | 'first-token' | 'idle' | 'stage-deadline' | 'provider') => Promise<void> } = {},
+  options: {
+    maxRetries?: number;
+    timeoutMs?: number;
+    firstTokenTimeoutMs?: number;
+    idleTimeoutMs?: number;
+    signal?: AbortSignal;
+    sleep?: (ms: number) => Promise<void>;
+    random?: () => number;
+    now?: () => number;
+    shouldRetry?: (failure: SafeProviderFailure) => boolean;
+    onRetry?: (failure: SafeProviderFailure) => Promise<void>;
+    onFailure?: (
+      failure: SafeProviderFailure,
+      timeoutSource?: 'request-deadline' | 'first-token' | 'idle' | 'stage-deadline' | 'provider',
+    ) => Promise<void>;
+  } = {},
 ): Promise<T> {
   const maxRetries = Math.max(0, Math.min(1, options.maxRetries ?? 1));
   const timeoutMs = Math.max(1, Math.min(600_000, options.timeoutMs ?? 60_000));
-  const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const random = options.random ?? Math.random;
   for (let attempt = 0; ; attempt++) {
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('REQUEST_ABORTED');
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const idleController = new AbortController();
-    const signal = AbortSignal.any([timeoutSignal, idleController.signal, ...(options.signal ? [options.signal] : [])]);
+    const signal = AbortSignal.any([
+      timeoutSignal,
+      idleController.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
     let progressObserved = false;
     let onAbort: (() => void) | undefined;
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutError = () => Object.assign(new Error('Provider stream timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    const timeoutError = () =>
+      Object.assign(new Error('Provider stream timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
     if (options.firstTokenTimeoutMs !== undefined && options.idleTimeoutMs !== undefined) {
-      inactivityTimer = setTimeout(() => idleController.abort(timeoutError()), Math.max(1, options.firstTokenTimeoutMs));
+      inactivityTimer = setTimeout(
+        () => idleController.abort(timeoutError()),
+        Math.max(1, options.firstTokenTimeoutMs),
+      );
     }
     const onProgress = () => {
       progressObserved = true;
       if (options.idleTimeoutMs === undefined || idleController.signal.aborted) return;
       if (inactivityTimer) clearTimeout(inactivityTimer);
-      inactivityTimer = setTimeout(() => idleController.abort(timeoutError()), Math.max(1, options.idleTimeoutMs));
+      inactivityTimer = setTimeout(
+        () => idleController.abort(timeoutError()),
+        Math.max(1, options.idleTimeoutMs),
+      );
     };
     try {
       const aborted = new Promise<never>((_, reject) => {
-        onAbort = () => reject(options.signal?.aborted
-          ? options.signal.reason ?? new Error('REQUEST_ABORTED')
-          : Object.assign(new Error('Provider request timed out'), { name: 'TimeoutError', code: 'ETIMEDOUT' }));
+        onAbort = () =>
+          reject(
+            options.signal?.aborted
+              ? (options.signal.reason ?? new Error('REQUEST_ABORTED'))
+              : Object.assign(new Error('Provider request timed out'), {
+                  name: 'TimeoutError',
+                  code: 'ETIMEDOUT',
+                }),
+          );
         signal.addEventListener('abort', onAbort, { once: true });
       });
       return await Promise.race([Promise.resolve().then(() => operation(signal, onProgress)), aborted]);
     } catch (error) {
-      const timeoutSource = options.signal?.aborted ? 'request-deadline'
-        : idleController.signal.aborted ? progressObserved ? 'idle' : 'first-token'
-          : timeoutSignal.aborted ? 'stage-deadline' : 'provider';
+      const timeoutSource = options.signal?.aborted
+        ? 'request-deadline'
+        : idleController.signal.aborted
+          ? progressObserved
+            ? 'idle'
+            : 'first-token'
+          : timeoutSignal.aborted
+            ? 'stage-deadline'
+            : 'provider';
       if (options.signal?.aborted) {
         const reason = options.signal.reason ?? error;
         const abortedFailure = classifyProviderError(reason, options.now?.() ?? Date.now());
@@ -206,7 +400,13 @@ export async function withProviderRetry<T>(
       const safe = classifyProviderError(error, options.now?.() ?? Date.now());
       if (!safe) throw error;
       await options.onFailure?.(safe, safe.code === 'TIMEOUT' ? timeoutSource : undefined);
-      if (!safe.retryable || options.shouldRetry?.(safe) === false || attempt >= maxRetries || (safe.retryAfterMs ?? 0) > 2_000) throw new ProviderRequestFailure(safe);
+      if (
+        !safe.retryable ||
+        options.shouldRetry?.(safe) === false ||
+        attempt >= maxRetries ||
+        (safe.retryAfterMs ?? 0) > 2_000
+      )
+        throw new ProviderRequestFailure(safe);
       const exponential = Math.min(4_000, 250 * 2 ** attempt);
       const jittered = Math.round(exponential * (0.5 + Math.max(0, Math.min(1, random()))));
       const delay = safe.retryAfterMs === undefined ? jittered : Math.max(jittered, safe.retryAfterMs);
@@ -229,9 +429,19 @@ export async function withProviderRetry<T>(
         }
       } else {
         await new Promise<void>((resolve, reject) => {
-          if (options.signal!.aborted) { reject(options.signal!.reason ?? new Error('REQUEST_ABORTED')); return; }
-          const timer = setTimeout(() => { options.signal!.removeEventListener('abort', onAbort); resolve(); }, boundedDelay);
-          const onAbort = () => { clearTimeout(timer); options.signal!.removeEventListener('abort', onAbort); reject(options.signal!.reason ?? new Error('REQUEST_ABORTED')); };
+          if (options.signal!.aborted) {
+            reject(options.signal!.reason ?? new Error('REQUEST_ABORTED'));
+            return;
+          }
+          const timer = setTimeout(() => {
+            options.signal!.removeEventListener('abort', onAbort);
+            resolve();
+          }, boundedDelay);
+          const onAbort = () => {
+            clearTimeout(timer);
+            options.signal!.removeEventListener('abort', onAbort);
+            reject(options.signal!.reason ?? new Error('REQUEST_ABORTED'));
+          };
           options.signal!.addEventListener('abort', onAbort, { once: true });
         });
       }
@@ -249,36 +459,114 @@ export function safeProviderFailure(value: unknown): SafeProviderFailure | undef
   for (const error of errorChain(value)) {
     const safe = record(error.safe);
     if (error.name !== 'ProviderRequestFailure' || !safe) continue;
-    const statuses: Record<string, number> = { RATE_LIMITED: 429, QUOTA_EXCEEDED: 429, MODEL_UNAVAILABLE: 503, CONNECTION_FAILED: 503, TIMEOUT: 504, PROVIDER_UNAVAILABLE: 503, PROVIDER_AUTH_FAILED: 401, PROVIDER_CREDITS_EXHAUSTED: 402 };
+    const statuses: Record<string, number> = {
+      RATE_LIMITED: 429,
+      QUOTA_EXCEEDED: 429,
+      MODEL_UNAVAILABLE: 503,
+      CONNECTION_FAILED: 503,
+      TIMEOUT: 504,
+      PROVIDER_UNAVAILABLE: 503,
+      PROVIDER_AUTH_FAILED: 401,
+      PROVIDER_CREDITS_EXHAUSTED: 402,
+      UNSUPPORTED_MODEL_PARAMETER: 502,
+      MODEL_CONFIGURATION_FAILED: 502,
+    };
     const status = statuses[String(safe.code)];
     if (!status) continue;
     const restored = classifyProviderError({ statusCode: status });
     if (!restored) continue;
-    if (safe.code === 'QUOTA_EXCEEDED') return { ...restored, code: 'QUOTA_EXCEEDED', retryable: false, httpStatus: 429 };
-    if (safe.code === 'MODEL_UNAVAILABLE') return { ...restored, code: 'MODEL_UNAVAILABLE', retryable: false, httpStatus: 503 };
-    if (safe.code === 'CONNECTION_FAILED') return { ...restored, code: 'CONNECTION_FAILED', retryable: true, httpStatus: 503 };
+    if (safe.code === 'QUOTA_EXCEEDED')
+      return { ...restored, code: 'QUOTA_EXCEEDED', retryable: false, httpStatus: 429 };
+    if (safe.code === 'MODEL_UNAVAILABLE')
+      return { ...restored, code: 'MODEL_UNAVAILABLE', retryable: false, httpStatus: 503 };
+    if (safe.code === 'CONNECTION_FAILED')
+      return { ...restored, code: 'CONNECTION_FAILED', retryable: true, httpStatus: 503 };
     if (safe.code === 'TIMEOUT') return { ...restored, code: 'TIMEOUT', retryable: true, httpStatus: 504 };
-    if (safe.code === 'PROVIDER_UNAVAILABLE') return { ...restored, code: 'PROVIDER_UNAVAILABLE', retryable: true, httpStatus: 503 };
+    if (safe.code === 'PROVIDER_UNAVAILABLE')
+      return { ...restored, code: 'PROVIDER_UNAVAILABLE', retryable: true, httpStatus: 503 };
+    if (safe.code === 'UNSUPPORTED_MODEL_PARAMETER')
+      return { ...restored, code: 'UNSUPPORTED_MODEL_PARAMETER', retryable: false, httpStatus: 502 };
+    if (safe.code === 'MODEL_CONFIGURATION_FAILED')
+      return { ...restored, code: 'MODEL_CONFIGURATION_FAILED', retryable: false, httpStatus: 502 };
     const retry = safe.retryAfterMs;
-    return { ...restored, ...(typeof retry === 'number' && Number.isFinite(retry) && retry >= 0 ? { retryAfterMs: Math.min(60000, Math.round(retry)) } : {}) };
+    return {
+      ...restored,
+      ...(typeof retry === 'number' && Number.isFinite(retry) && retry >= 0
+        ? { retryAfterMs: Math.min(60000, Math.round(retry)) }
+        : {}),
+    };
   }
   return classifyProviderError(value);
 }
 
-export function safeAgentFailure(value: unknown): { code: AgentErrorCategory; retryable: boolean; retryAfterMs?: number; requestId?: string; telemetry?: Record<string, number> } | undefined {
-  if (value instanceof AgentRequestFailure) return { code: value.category, retryable: value.context.retryable ?? false, ...(value.context.retryAfterMs !== undefined ? { retryAfterMs: value.context.retryAfterMs } : {}), ...(value.context.requestId ? { requestId: value.context.requestId } : {}), ...(value.context.telemetry ? { telemetry: value.context.telemetry } : {}) };
-  for (const error of errorChain(value)) {
-    if (error.name === 'AgentRequestFailure' && Object.hasOwn({ INVALID_MODEL_OUTPUT: true, OUTPUT_TRUNCATED: true, TOOL_EXECUTION_FAILED: true, QUOTA_EXCEEDED: true, RATE_LIMITED: true, TIMEOUT: true, CONNECTION_FAILED: true, MODEL_UNAVAILABLE: true, PROVIDER_UNAVAILABLE: true, PROVIDER_AUTH_FAILED: true, PROVIDER_CREDITS_EXHAUSTED: true }, String(error.category))) {
-      const context = record(error.context);
-      return { code: error.category as AgentErrorCategory, retryable: context?.retryable === true, ...(typeof context?.retryAfterMs === 'number' ? { retryAfterMs: context.retryAfterMs } : {}), ...(typeof context?.requestId === 'string' ? { requestId: context.requestId } : {}), ...(record(context?.telemetry) ? { telemetry: record(context?.telemetry) as Record<string, number> } : {}) };
+export function safeAgentFailure(value: unknown):
+  | {
+      code: AgentErrorCategory;
+      retryable: boolean;
+      retryAfterMs?: number;
+      requestId?: string;
+      telemetry?: Record<string, number>;
     }
-    if (['ACTIVE_MODEL_UNAVAILABLE', 'FALLBACK_MODEL_UNAVAILABLE'].includes(String(error.message))) return { code: 'MODEL_UNAVAILABLE', retryable: false };
-    if (String(error.message) === 'ANSWER_GENERATION_INVALID') return { code: 'INVALID_MODEL_OUTPUT', retryable: false };
+  | undefined {
+  if (value instanceof AgentRequestFailure)
+    return {
+      code: value.category,
+      retryable: value.context.retryable ?? false,
+      ...(value.context.retryAfterMs !== undefined ? { retryAfterMs: value.context.retryAfterMs } : {}),
+      ...(value.context.requestId ? { requestId: value.context.requestId } : {}),
+      ...(value.context.telemetry ? { telemetry: value.context.telemetry } : {}),
+    };
+  for (const error of errorChain(value)) {
+    if (
+      error.name === 'AgentRequestFailure' &&
+      Object.hasOwn(
+        {
+          INVALID_MODEL_OUTPUT: true,
+          OUTPUT_TRUNCATED: true,
+          TOOL_EXECUTION_FAILED: true,
+          QUOTA_EXCEEDED: true,
+          RATE_LIMITED: true,
+          TIMEOUT: true,
+          CONNECTION_FAILED: true,
+          MODEL_UNAVAILABLE: true,
+          PROVIDER_UNAVAILABLE: true,
+          PROVIDER_AUTH_FAILED: true,
+          PROVIDER_CREDITS_EXHAUSTED: true,
+          UNSUPPORTED_MODEL_PARAMETER: true,
+          MODEL_CONFIGURATION_FAILED: true,
+          TOOL_CATALOG_FAILED: true,
+          ROUTER_FAILED: true,
+        },
+        String(error.category),
+      )
+    ) {
+      const context = record(error.context);
+      return {
+        code: error.category as AgentErrorCategory,
+        retryable: context?.retryable === true,
+        ...(typeof context?.retryAfterMs === 'number' ? { retryAfterMs: context.retryAfterMs } : {}),
+        ...(typeof context?.requestId === 'string' ? { requestId: context.requestId } : {}),
+        ...(record(context?.telemetry)
+          ? { telemetry: record(context?.telemetry) as Record<string, number> }
+          : {}),
+      };
+    }
+    if (['ACTIVE_MODEL_UNAVAILABLE', 'FALLBACK_MODEL_UNAVAILABLE'].includes(String(error.message)))
+      return { code: 'MODEL_UNAVAILABLE', retryable: false };
+    if (['ANSWER_GENERATION_INVALID', 'ROUTING_DECISION_INVALID'].includes(String(error.message)))
+      return { code: 'INVALID_MODEL_OUTPUT', retryable: false };
     if (String(error.message) === 'REQUEST_TIMEOUT') return { code: 'TIMEOUT', retryable: false };
-    if (String(error.message) === 'MODEL_STREAM_FAILED') return { code: 'CONNECTION_FAILED', retryable: true };
+    if (String(error.message) === 'MODEL_STREAM_FAILED')
+      return { code: 'CONNECTION_FAILED', retryable: true };
   }
   const provider = safeProviderFailure(value);
-  return provider ? { code: provider.code, retryable: provider.retryable, ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}) } : undefined;
+  return provider
+    ? {
+        code: provider.code,
+        retryable: provider.retryable,
+        ...(provider.retryAfterMs !== undefined ? { retryAfterMs: provider.retryAfterMs } : {}),
+      }
+    : undefined;
 }
 
 export function safeAgentErrorMessage(code: AgentErrorCategory): string {
@@ -286,14 +574,22 @@ export function safeAgentErrorMessage(code: AgentErrorCategory): string {
     QUOTA_EXCEEDED: 'The selected AI provider has exhausted its quota. Try again after it resets.',
     RATE_LIMITED: 'The selected AI provider is temporarily rate limiting requests. Please retry shortly.',
     TIMEOUT: 'The selected model did not respond before the request timeout.',
-    CONNECTION_FAILED: 'Could not connect to the selected AI provider. Check that it is reachable and try again.',
+    CONNECTION_FAILED:
+      'Could not connect to the selected AI provider. Check that it is reachable and try again.',
     MODEL_UNAVAILABLE: 'The selected model is unavailable. Check the selected model and provider.',
     INVALID_MODEL_OUTPUT: 'The model returned output that did not match the required format. Please retry.',
-    OUTPUT_TRUNCATED: 'The model response reached its output limit before the answer was complete. Narrow the request and try again.',
+    OUTPUT_TRUNCATED:
+      'The model response reached its output limit before the answer was complete. Narrow the request and try again.',
     TOOL_EXECUTION_FAILED: 'The selected capability could not be completed.',
     PROVIDER_UNAVAILABLE: 'The selected AI provider is temporarily unavailable. Please retry shortly.',
     PROVIDER_AUTH_FAILED: 'The selected AI provider rejected its configured credentials.',
     PROVIDER_CREDITS_EXHAUSTED: 'The selected AI provider has no available credits.',
+    UNSUPPORTED_MODEL_PARAMETER:
+      'The selected model does not support one of its configured parameters. Check its model settings.',
+    MODEL_CONFIGURATION_FAILED:
+      'The selected model rejected its configuration. Check the provider and structured output settings.',
+    TOOL_CATALOG_FAILED: 'SitePilot could not load the available workspace capabilities. Please retry.',
+    ROUTER_FAILED: 'SitePilot could not classify this request. Please retry.',
   };
   return messages[code];
 }
@@ -303,7 +599,12 @@ export function safeProviderClientResponse(value: unknown): SafeProviderClientRe
   if (!failure) return undefined;
   return {
     statusCode: failure.httpStatus,
-    body: { code: failure.code, message: safeAgentErrorMessage(failure.code), retryable: failure.retryable, ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}) },
+    body: {
+      code: failure.code,
+      message: safeAgentErrorMessage(failure.code),
+      retryable: failure.retryable,
+      ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
+    },
   };
 }
 
@@ -311,7 +612,15 @@ export function safeAgentClientResponse(value: unknown) {
   const failure = safeAgentFailure(value);
   if (!failure) return undefined;
   const provider = safeProviderClientResponse(value);
-  const statusCode = provider?.statusCode ?? (failure.code === 'TIMEOUT' ? 504 : failure.code === 'RATE_LIMITED' || failure.code === 'QUOTA_EXCEEDED' ? 429 : 502);
+  const statusCode =
+    provider?.statusCode ??
+    (failure.code === 'TIMEOUT'
+      ? 504
+      : failure.code === 'RATE_LIMITED' || failure.code === 'QUOTA_EXCEEDED'
+        ? 429
+        : failure.code === 'TOOL_CATALOG_FAILED' || failure.code === 'MODEL_UNAVAILABLE'
+          ? 503
+          : 502);
   return {
     statusCode,
     body: {

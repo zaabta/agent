@@ -11,9 +11,34 @@ import { LlmAdminModule } from './llm-admin/llm-admin.module.js';
 @ApiTags('system')
 class HealthController {
   @ApiOperation({ summary: 'Check API process availability and configured service adapters' })
-  @ApiResponse({ status: 200, schema: { type: 'object', required: ['ok', 'service', 'database', 'retrieval'], properties: { ok: { type: 'boolean', example: true }, service: { type: 'string', example: 'sitepilot-langgraph' }, prototype: { type: 'boolean' }, database: { type: 'string', example: 'prisma' }, retrieval: { type: 'string', example: 'typegraph' } } } })
-  @Get('health') health() { return { ok: true, service: 'sitepilot-langgraph', prototype: true, database: 'prisma', retrieval: 'typegraph' }; }
+  @ApiResponse({
+    status: 200,
+    schema: {
+      type: 'object',
+      required: ['ok', 'service', 'database', 'retrieval'],
+      properties: {
+        ok: { type: 'boolean', example: true },
+        service: { type: 'string', example: 'sitepilot-langgraph' },
+        prototype: { type: 'boolean' },
+        database: { type: 'string', example: 'prisma' },
+        retrieval: { type: 'string', example: 'typegraph' },
+      },
+    },
+  })
+  @Get('health')
+  health() {
+    return {
+      ok: true,
+      service: 'sitepilot-langgraph',
+      prototype: true,
+      database: 'prisma',
+      retrieval: 'typegraph',
+    };
+  }
 }
 
-@Module({imports: [PrismaModule, TypegraphModule, AuthModule, DocumentsModule, AgentModule, LlmAdminModule],controllers: [HealthController]})
+@Module({
+  imports: [PrismaModule, TypegraphModule, AuthModule, DocumentsModule, AgentModule, LlmAdminModule],
+  controllers: [HealthController],
+})
 export class AppModule {}

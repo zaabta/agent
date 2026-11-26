@@ -4,16 +4,42 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import type { StructuredSelection } from '../agent/structured-selection.js';
 import { config } from '../config.js';
 
-type CellFilter = { columnName: string; operator: 'EQ' | 'CONTAINS' | 'GT' | 'GTE' | 'LT' | 'LTE'; value: string };
-type DatasetFilter = { documentId?: string; sheetName?: string; filters?: CellFilter[]; groupLimit?: number; selection?: StructuredSelection };
-export type StructuredSource = { documentId: string; filename: string; sourceRef: string; chunkIndex: number; documentVersionId?: string; chunkId?: string; contentHash?: string };
+type CellFilter = {
+  columnName: string;
+  operator: 'EQ' | 'CONTAINS' | 'GT' | 'GTE' | 'LT' | 'LTE';
+  value: string;
+};
+type DatasetFilter = {
+  documentId?: string;
+  sheetName?: string;
+  filters?: CellFilter[];
+  groupLimit?: number;
+  selection?: StructuredSelection;
+};
+export type StructuredSource = {
+  documentId: string;
+  filename: string;
+  sourceRef: string;
+  chunkIndex: number;
+  documentVersionId?: string;
+  chunkId?: string;
+  contentHash?: string;
+};
 type QueryRow = Record<string, unknown>;
 
 function joinClauses(clauses: Prisma.Sql[]): Prisma.Sql {
   return clauses.length ? Prisma.join(clauses, ' ') : Prisma.empty;
 }
 
-function normalizeSchemaLabel(value: string): string { return value.normalize('NFKD').toLocaleLowerCase('tr-TR').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); }
+function normalizeSchemaLabel(value: string): string {
+  return value
+    .normalize('NFKD')
+    .toLocaleLowerCase('tr-TR')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ı/g, 'i')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
 
 function rowRanges(values: number[]): string {
   const rows = [...new Set(values)].sort((a, b) => a - b);
@@ -22,7 +48,10 @@ function rowRanges(values: number[]): string {
   let start = rows[0]!;
   let end = start;
   for (const row of rows.slice(1)) {
-    if (row === end + 1) { end = row; continue; }
+    if (row === end + 1) {
+      end = row;
+      continue;
+    }
     ranges.push(start === end ? String(start) : `${start}-${end}`);
     start = end = row;
   }
@@ -30,54 +59,105 @@ function rowRanges(values: number[]): string {
   return `rows ${ranges.join(', ')}`;
 }
 
-function source(documentId: string, filename: string, sheetName: string, rows: number[], chunkIndex: number, documentVersionId?: string): StructuredSource {
-  return { documentId, ...(documentVersionId ? { documentVersionId } : {}), filename, sourceRef: `${filename} [${documentId.slice(0, 8)}] (${sheetName}, ${rowRanges(rows)})`, chunkIndex };
+function source(
+  documentId: string,
+  filename: string,
+  sheetName: string,
+  rows: number[],
+  chunkIndex: number,
+  documentVersionId?: string,
+): StructuredSource {
+  return {
+    documentId,
+    ...(documentVersionId ? { documentVersionId } : {}),
+    filename,
+    sourceRef: `${filename} [${documentId.slice(0, 8)}] (${sheetName}, ${rowRanges(rows)})`,
+    chunkIndex,
+  };
 }
 
 @Injectable()
 export class StructuredDataService {
-  constructor(@Inject(PrismaService) private readonly prisma: Pick<PrismaService, 'appDocument' | 'appDocumentCell' | '$queryRaw'>) {}
+  constructor(
+    @Inject(PrismaService)
+    private readonly prisma: Pick<PrismaService, 'appDocument' | 'appDocumentCell' | '$queryRaw'>,
+  ) {}
 
   private async activeVersionIds(tenantId: string, documentId?: string) {
-    const documents = await this.prisma.appDocument.findMany({ where: { tenantId, status: 'ready', activeVersionId: { not: null }, ...(documentId ? { id: documentId } : {}) }, select: { activeVersionId: true } });
-    return [...new Set(documents.flatMap(document => document.activeVersionId ? [document.activeVersionId] : []))];
+    const documents = await this.prisma.appDocument.findMany({
+      where: {
+        tenantId,
+        status: 'ready',
+        activeVersionId: { not: null },
+        ...(documentId ? { id: documentId } : {}),
+      },
+      select: { activeVersionId: true },
+    });
+    return [
+      ...new Set(
+        documents.flatMap((document) => (document.activeVersionId ? [document.activeVersionId] : [])),
+      ),
+    ];
   }
 
   private versionSql(ids: string[], alias = 'c'): Prisma.Sql {
     if (!ids.length) return Prisma.sql`AND FALSE`;
-    return Prisma.sql`AND ${Prisma.raw(`${alias}.version_id`)} IN (${Prisma.join(ids.map(id => Prisma.sql`${id}::uuid`))})`;
+    return Prisma.sql`AND ${Prisma.raw(`${alias}.version_id`)} IN (${Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`))})`;
   }
 
-  private async structuredColumns(tenantId: string, documentId?: string, sheetName?: string): Promise<string[]> {
+  private async structuredColumns(
+    tenantId: string,
+    documentId?: string,
+    sheetName?: string,
+  ): Promise<string[]> {
     const activeVersionIds = await this.activeVersionIds(tenantId, documentId);
     const columns = await this.prisma.appDocumentCell.findMany({
-      where: { tenantId, versionId: { in: activeVersionIds }, ...(documentId ? { documentId } : {}), ...(sheetName ? { sheetName } : {}), document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } } },
-      distinct: ['columnName'], select: { columnName: true }, orderBy: { columnName: 'asc' }, take: 500,
+      where: {
+        tenantId,
+        versionId: { in: activeVersionIds },
+        ...(documentId ? { documentId } : {}),
+        ...(sheetName ? { sheetName } : {}),
+        document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } },
+      },
+      distinct: ['columnName'],
+      select: { columnName: true },
+      orderBy: { columnName: 'asc' },
+      take: 500,
     });
-    return columns.map(column => column.columnName);
+    return columns.map((column) => column.columnName);
   }
 
-  private async rowFilterClauses(tenantId: string, filters: CellFilter[] = [], documentId?: string, sheetName?: string): Promise<Prisma.Sql[]> {
+  private async rowFilterClauses(
+    tenantId: string,
+    filters: CellFilter[] = [],
+    documentId?: string,
+    sheetName?: string,
+  ): Promise<Prisma.Sql[]> {
     if (filters.length === 0) return [];
     const available = await this.structuredColumns(tenantId, documentId, sheetName);
-    return filters.map(filter => {
-      const matches = available.filter(column => normalizeSchemaLabel(column) === normalizeSchemaLabel(filter.columnName));
+    return filters.map((filter) => {
+      const matches = available.filter(
+        (column) => normalizeSchemaLabel(column) === normalizeSchemaLabel(filter.columnName),
+      );
       if (matches.length !== 1) {
-        const error = new Error(matches.length ? `FILTER_COLUMN_AMBIGUOUS:${matches.join(',')}` : 'FILTER_COLUMN_NOT_FOUND');
+        const error = new Error(
+          matches.length ? `FILTER_COLUMN_AMBIGUOUS:${matches.join(',')}` : 'FILTER_COLUMN_NOT_FOUND',
+        );
         throw error;
       }
       const column = matches[0]!;
       const numericValue = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(filter.value.trim());
       const dateValue = /^\d{4}-\d{2}-\d{2}(?:$|T)/.test(filter.value.trim());
-      const compare = filter.operator === 'EQ'
-        ? Prisma.sql`LOWER(BTRIM(f.value)) = LOWER(BTRIM(${filter.value}))`
-        : filter.operator === 'CONTAINS'
-          ? Prisma.sql`POSITION(LOWER(${filter.value}) IN LOWER(f.value)) > 0`
-          : numericValue
-            ? Prisma.sql`CASE WHEN BTRIM(f.value) ~ '^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)$' THEN BTRIM(f.value)::numeric END ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} ${filter.value}::numeric`
-            : dateValue
-              ? Prisma.sql`BTRIM(f.value) ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} ${filter.value}`
-              : Prisma.sql`LOWER(BTRIM(f.value)) ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} LOWER(BTRIM(${filter.value}))`;
+      const compare =
+        filter.operator === 'EQ'
+          ? Prisma.sql`LOWER(BTRIM(f.value)) = LOWER(BTRIM(${filter.value}))`
+          : filter.operator === 'CONTAINS'
+            ? Prisma.sql`POSITION(LOWER(${filter.value}) IN LOWER(f.value)) > 0`
+            : numericValue
+              ? Prisma.sql`CASE WHEN BTRIM(f.value) ~ '^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)$' THEN BTRIM(f.value)::numeric END ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} ${filter.value}::numeric`
+              : dateValue
+                ? Prisma.sql`BTRIM(f.value) ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} ${filter.value}`
+                : Prisma.sql`LOWER(BTRIM(f.value)) ${filter.operator === 'GT' ? Prisma.sql`>` : filter.operator === 'GTE' ? Prisma.sql`>=` : filter.operator === 'LT' ? Prisma.sql`<` : Prisma.sql`<=`} LOWER(BTRIM(${filter.value}))`;
       return Prisma.sql`AND EXISTS (
         SELECT 1 FROM app_document_cells f
         WHERE f.tenant_id = c.tenant_id AND f.document_id = c.document_id
@@ -98,11 +178,19 @@ export class StructuredDataService {
         document: { tenantId, status: 'ready', fileType: { in: ['csv', 'xls', 'xlsx'] } },
       },
       distinct: ['documentId', 'sheetName', 'columnName'],
-      select: { documentId: true, sheetName: true, columnName: true, document: { select: { filename: true } } },
+      select: {
+        documentId: true,
+        sheetName: true,
+        columnName: true,
+        document: { select: { filename: true } },
+      },
       orderBy: [{ documentId: 'asc' }, { sheetName: 'asc' }, { columnName: 'asc' }],
       take: 5000,
     });
-    const datasets = new Map<string, { documentId: string; filename: string; sheets: Map<string, Set<string>> }>();
+    const datasets = new Map<
+      string,
+      { documentId: string; filename: string; sheets: Map<string, Set<string>> }
+    >();
     for (const row of rows) {
       let dataset = datasets.get(row.documentId);
       if (!dataset) {
@@ -113,10 +201,13 @@ export class StructuredDataService {
       columns.add(row.columnName);
       dataset.sheets.set(row.sheetName, columns);
     }
-    return [...datasets.values()].map(dataset => ({
+    return [...datasets.values()].map((dataset) => ({
       documentId: dataset.documentId,
       filename: dataset.filename,
-      sheets: [...dataset.sheets.entries()].map(([sheetName, columns]) => ({ sheetName, columns: [...columns] })),
+      sheets: [...dataset.sheets.entries()].map(([sheetName, columns]) => ({
+        sheetName,
+        columns: [...columns],
+      })),
     }));
   }
 
@@ -129,14 +220,21 @@ export class StructuredDataService {
         WHERE cohort.tenant_id = c.tenant_id AND cohort.document_id = c.document_id
           AND cohort.version_id = c.version_id AND cohort.sheet_name = c.sheet_name AND cohort.row_number = c.row_number
           AND cohort.column_name = ${selection.columnName}
-          AND LOWER(BTRIM(cohort.value)) IN (${Prisma.join(selection.values.map(value => Prisma.sql`LOWER(BTRIM(${value}))`))})
+          AND LOWER(BTRIM(cohort.value)) IN (${Prisma.join(selection.values.map((value) => Prisma.sql`LOWER(BTRIM(${value}))`))})
       )`;
   }
 
   async countRecords(tenantId = config.tenantId, filter: DatasetFilter = {}) {
     const startedAt = performance.now();
-    const rowFilters = await this.rowFilterClauses(tenantId, filter.filters, filter.documentId, filter.sheetName);
-    const documentClause = filter.documentId ? Prisma.sql`AND d.id = ${filter.documentId}::uuid` : Prisma.empty;
+    const rowFilters = await this.rowFilterClauses(
+      tenantId,
+      filter.filters,
+      filter.documentId,
+      filter.sheetName,
+    );
+    const documentClause = filter.documentId
+      ? Prisma.sql`AND d.id = ${filter.documentId}::uuid`
+      : Prisma.empty;
     const sheetClause = filter.sheetName ? Prisma.sql`AND c.sheet_name = ${filter.sheetName}` : Prisma.empty;
     const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
       SELECT r.document_id AS "documentId", r.version_id AS "versionId", d.filename, r.sheet_name AS "sheetName",
@@ -162,26 +260,49 @@ export class StructuredDataService {
       GROUP BY r.document_id, r.version_id, d.filename, r.sheet_name
       ORDER BY d.filename, r.sheet_name
     `);
-    const datasets = rows.map(row => ({
-      documentId: String(row.documentId), documentVersionId: String(row.versionId), filename: String(row.filename), sheetName: String(row.sheetName),
-      count: Number(row.count), firstRow: Number(row.firstRow), lastRow: Number(row.lastRow),
+    const datasets = rows.map((row) => ({
+      documentId: String(row.documentId),
+      documentVersionId: String(row.versionId),
+      filename: String(row.filename),
+      sheetName: String(row.sheetName),
+      count: Number(row.count),
+      firstRow: Number(row.firstRow),
+      lastRow: Number(row.lastRow),
     }));
     const total = datasets.reduce((sum, dataset) => sum + dataset.count, 0);
-    const sources = datasets.map((dataset, index) => source(
-      dataset.documentId, dataset.filename, dataset.sheetName,
-      dataset.firstRow <= dataset.lastRow ? [dataset.firstRow, dataset.lastRow] : [], index, dataset.documentVersionId,
-    ));
+    const sources = datasets.map((dataset, index) =>
+      source(
+        dataset.documentId,
+        dataset.filename,
+        dataset.sheetName,
+        dataset.firstRow <= dataset.lastRow ? [dataset.firstRow, dataset.lastRow] : [],
+        index,
+        dataset.documentVersionId,
+      ),
+    );
     return {
-      operation: 'COUNT', total, definition: 'A record is one distinct source row containing at least one nonblank cell. The first used row in each sheet is treated as the header and excluded.',
-      datasets, sources, durationMs: Math.round(performance.now() - startedAt),
+      operation: 'COUNT',
+      total,
+      definition:
+        'A record is one distinct source row containing at least one nonblank cell. The first used row in each sheet is treated as the header and excluded.',
+      datasets,
+      sources,
+      durationMs: Math.round(performance.now() - startedAt),
     };
   }
 
-  async lookupRows(filters: CellFilter[], tenantId = config.tenantId, filter: Omit<DatasetFilter, 'filters'> = {}, limit = 10) {
+  async lookupRows(
+    filters: CellFilter[],
+    tenantId = config.tenantId,
+    filter: Omit<DatasetFilter, 'filters'> = {},
+    limit = 10,
+  ) {
     if (!filters.length) throw new Error('ROW_LOOKUP_REQUIRES_FILTER');
     const safeLimit = Math.max(1, Math.min(25, Math.floor(limit)));
     const clauses = await this.rowFilterClauses(tenantId, filters, filter.documentId, filter.sheetName);
-    const documentClause = filter.documentId ? Prisma.sql`AND d.id = ${filter.documentId}::uuid` : Prisma.empty;
+    const documentClause = filter.documentId
+      ? Prisma.sql`AND d.id = ${filter.documentId}::uuid`
+      : Prisma.empty;
     const sheetClause = filter.sheetName ? Prisma.sql`AND c.sheet_name = ${filter.sheetName}` : Prisma.empty;
     const rows = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
       SELECT c.document_id AS "documentId", c.version_id AS "versionId", d.filename, c.sheet_name AS "sheetName", c.row_number AS "rowNumber"
@@ -200,7 +321,8 @@ export class StructuredDataService {
       const rowNumber = Number(row.rowNumber);
       const cells = await this.prisma.appDocumentCell.findMany({
         where: { tenantId, documentId, versionId: String(row.versionId ?? ''), sheetName, rowNumber },
-        orderBy: { address: 'asc' }, select: { address: true, columnName: true, value: true },
+        orderBy: { address: 'asc' },
+        select: { address: true, columnName: true, value: true },
       });
       const versionId = String(row.versionId);
       const ref = source(documentId, String(row.filename), sheetName, [rowNumber], sources.length, versionId);
@@ -218,12 +340,30 @@ export class StructuredDataService {
   ) {
     if (operation === 'COUNT') return this.countRecords(tenantId, filter);
     const startedAt = performance.now();
-    const rowFilters = await this.rowFilterClauses(tenantId, filter.filters, filter.documentId, filter.sheetName);
+    const rowFilters = await this.rowFilterClauses(
+      tenantId,
+      filter.filters,
+      filter.documentId,
+      filter.sheetName,
+    );
     const columns = await this.structuredColumns(tenantId, filter.documentId, filter.sheetName);
-    const matches = columns.filter(column => normalizeSchemaLabel(column) === normalizeSchemaLabel(columnName || ''));
-    if (!columnName || matches.length !== 1) return { operation, columnName: null, candidates: matches.length ? matches : columns, value: null, groups: [], sources: [], durationMs: Math.round(performance.now() - startedAt) };
+    const matches = columns.filter(
+      (column) => normalizeSchemaLabel(column) === normalizeSchemaLabel(columnName || ''),
+    );
+    if (!columnName || matches.length !== 1)
+      return {
+        operation,
+        columnName: null,
+        candidates: matches.length ? matches : columns,
+        value: null,
+        groups: [],
+        sources: [],
+        durationMs: Math.round(performance.now() - startedAt),
+      };
     const safeColumn = matches[0]!;
-    const documentClause = filter.documentId ? Prisma.sql`AND d.id = ${filter.documentId}::uuid` : Prisma.empty;
+    const documentClause = filter.documentId
+      ? Prisma.sql`AND d.id = ${filter.documentId}::uuid`
+      : Prisma.empty;
     const sheetClause = filter.sheetName ? Prisma.sql`AND c.sheet_name = ${filter.sheetName}` : Prisma.empty;
     const numberPattern = '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$';
 
@@ -257,27 +397,58 @@ export class StructuredDataService {
         const group = groups.get(key) ?? { value: String(row.label), count: 0, sources: [] };
         group.count += Number(row.count);
         const rowNumbers = Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [];
-        const ref = source(String(row.documentId), String(row.filename), String(row.sheetName), rowNumbers, allSources.length, String(row.versionId));
-        group.sources.push(ref); allSources.push(ref); groups.set(key, group);
+        const ref = source(
+          String(row.documentId),
+          String(row.filename),
+          String(row.sheetName),
+          rowNumbers,
+          allSources.length,
+          String(row.versionId),
+        );
+        group.sources.push(ref);
+        allSources.push(ref);
+        groups.set(key, group);
       }
       const values = [...groups.values()];
       const firstRow = rows[0];
-      const selection = operation === 'GROUP_BY' && filter.groupLimit !== undefined && firstRow
-        && rows.every(row => row.documentId === firstRow.documentId && row.sheetName === firstRow.sheetName && row.versionId === firstRow.versionId)
-        ? { documentId: firstRow.documentId, versionId: firstRow.versionId, sheetName: firstRow.sheetName, columnName: safeColumn, values: values.map(group => group.value), filters: filter.filters ?? [] }
-        : undefined;
+      const selection =
+        operation === 'GROUP_BY' &&
+        filter.groupLimit !== undefined &&
+        firstRow &&
+        rows.every(
+          (row) =>
+            row.documentId === firstRow.documentId &&
+            row.sheetName === firstRow.sheetName &&
+            row.versionId === firstRow.versionId,
+        )
+          ? {
+              documentId: firstRow.documentId,
+              versionId: firstRow.versionId,
+              sheetName: firstRow.sheetName,
+              columnName: safeColumn,
+              values: values.map((group) => group.value),
+              filters: filter.filters ?? [],
+            }
+          : undefined;
       return {
-        operation, columnName: safeColumn,
-        value: operation === 'DISTINCT' ? values.map(group => group.value) : undefined,
-        groups: values, sources: allSources, selection,
+        operation,
+        columnName: safeColumn,
+        value: operation === 'DISTINCT' ? values.map((group) => group.value) : undefined,
+        groups: values,
+        sources: allSources,
+        selection,
         durationMs: Math.round(performance.now() - startedAt),
       };
     }
 
-    const numericOperation = operation === 'SUM' ? Prisma.sql`SUM(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
-      : operation === 'AVG' ? Prisma.sql`AVG(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
-      : operation === 'MIN' ? Prisma.sql`MIN(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
-      : Prisma.sql`MAX(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`;
+    const numericOperation =
+      operation === 'SUM'
+        ? Prisma.sql`SUM(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
+        : operation === 'AVG'
+          ? Prisma.sql`AVG(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
+          : operation === 'MIN'
+            ? Prisma.sql`MIN(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`
+            : Prisma.sql`MAX(CASE WHEN BTRIM(c.value) ~ ${numberPattern} THEN BTRIM(c.value)::numeric END)`;
     const numeric = await this.prisma.$queryRaw<QueryRow[]>(Prisma.sql`
       SELECT ${numericOperation}::text AS value,
         COUNT(*) FILTER (WHERE BTRIM(c.value) ~ ${numberPattern})::int AS "numericCount",
@@ -298,14 +469,24 @@ export class StructuredDataService {
         AND (d.file_type = 'csv' OR c.row_number > (SELECT MIN(h.row_number) FROM app_document_cells h WHERE h.tenant_id = c.tenant_id AND h.document_id = c.document_id AND h.version_id = c.version_id AND h.sheet_name = c.sheet_name))
       GROUP BY c.document_id, c.version_id, d.filename, c.sheet_name
     `);
-    const sources = provenanceRows.map((row, index) => source(
-      String(row.documentId), String(row.filename), String(row.sheetName),
-      Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [], index, String(row.versionId),
-    ));
+    const sources = provenanceRows.map((row, index) =>
+      source(
+        String(row.documentId),
+        String(row.filename),
+        String(row.sheetName),
+        Array.isArray(row.rowNumbers) ? row.rowNumbers.map(Number) : [],
+        index,
+        String(row.versionId),
+      ),
+    );
     return {
-      operation, columnName: safeColumn, value,
-      numericCount: Number(numeric[0]?.numericCount ?? 0), nonnumericCount: Number(numeric[0]?.nonnumericCount ?? 0),
-      sources, durationMs: Math.round(performance.now() - startedAt),
+      operation,
+      columnName: safeColumn,
+      value,
+      numericCount: Number(numeric[0]?.numericCount ?? 0),
+      nonnumericCount: Number(numeric[0]?.nonnumericCount ?? 0),
+      sources,
+      durationMs: Math.round(performance.now() - startedAt),
     };
   }
 
@@ -314,7 +495,7 @@ export class StructuredDataService {
   }
 
   async lookupAnyExact(values: string[], tenantId = config.tenantId) {
-    const candidates = [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, 40);
+    const candidates = [...new Set(values.map((value) => value.trim()).filter(Boolean))].slice(0, 40);
     if (!candidates.length) return { query: '', hits: [], durationMs: 0 };
     const startedAt = performance.now();
     const activeVersionIds = await this.activeVersionIds(tenantId);
@@ -322,14 +503,14 @@ export class StructuredDataService {
       where: {
         tenantId,
         versionId: { in: activeVersionIds },
-        OR: candidates.map(value => ({ value: { equals: value, mode: 'insensitive' as const } })),
+        OR: candidates.map((value) => ({ value: { equals: value, mode: 'insensitive' as const } })),
         document: { status: 'ready', tenantId },
       },
       include: { document: { select: { id: true, filename: true, activeVersionId: true } } },
       orderBy: [{ documentId: 'asc' }, { sheetName: 'asc' }, { rowNumber: 'asc' }],
       take: 5,
     });
-    const groups = new Map<string, { match: typeof matches[number]; columns: Set<string> }>();
+    const groups = new Map<string, { match: (typeof matches)[number]; columns: Set<string> }>();
     for (const match of matches) {
       const key = `${match.documentId}:${match.sheetName}:${match.rowNumber}`;
       const group = groups.get(key) ?? { match, columns: new Set<string>() };
@@ -347,13 +528,32 @@ export class StructuredDataService {
         select: { address: true, columnName: true, value: true, formula: true },
       });
       const sourceRef = `${match.document.filename} (${sheetName} row ${rowNumber})`;
-      const content = `Source reference: [[${sourceRef}]]\n${match.document.filename} — ${sheetName} row ${rowNumber}: ${cells.map(cell => `${cell.columnName}=${cell.value}${cell.formula ? ` (formula ${cell.formula})` : ''}`).join(' | ')}`;
+      const content = `Source reference: [[${sourceRef}]]\n${match.document.filename} — ${sheetName} row ${rowNumber}: ${cells.map((cell) => `${cell.columnName}=${cell.value}${cell.formula ? ` (formula ${cell.formula})` : ''}`).join(' | ')}`;
       hits.push({
-        content, score: 1, sourceRef,
-        citation: { documentId: match.documentId, documentVersionId: match.versionId, filename: match.document.filename, bucketId: 'structured-data', chunkIndex: index, chunkCount: groups.size },
-        metadata: { sheetName, rowNumber, matchedCell: match.address, matchedColumn: match.columnName, matchedColumns: [...group.columns] },
+        content,
+        score: 1,
+        sourceRef,
+        citation: {
+          documentId: match.documentId,
+          documentVersionId: match.versionId,
+          filename: match.document.filename,
+          bucketId: 'structured-data',
+          chunkIndex: index,
+          chunkCount: groups.size,
+        },
+        metadata: {
+          sheetName,
+          rowNumber,
+          matchedCell: match.address,
+          matchedColumn: match.columnName,
+          matchedColumns: [...group.columns],
+        },
       });
     }
-    return { query: candidates.length === 1 ? candidates[0]! : '[authorized exact-value candidates]', hits, durationMs: Math.round(performance.now() - startedAt) };
+    return {
+      query: candidates.length === 1 ? candidates[0]! : '[authorized exact-value candidates]',
+      hits,
+      durationMs: Math.round(performance.now() - startedAt),
+    };
   }
 }

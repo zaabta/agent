@@ -9,10 +9,10 @@ if (!['unit', 'integration'].includes(mode)) {
 }
 
 const testFiles = readdirSync('test')
-  .filter(name => name.endsWith('.test.ts'))
-  .filter(name => mode === 'integration' ? name.endsWith('.e2e.test.ts') : !name.endsWith('.e2e.test.ts'))
+  .filter((name) => name.endsWith('.test.ts'))
+  .filter((name) => (mode === 'integration' ? name.endsWith('.e2e.test.ts') : !name.endsWith('.e2e.test.ts')))
   .sort()
-  .map(name => resolve('test', name));
+  .map((name) => resolve('test', name));
 
 const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...testFiles], { stdio: 'inherit' });
 if (result.error) throw result.error;

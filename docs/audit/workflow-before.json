@@ -5,9 +5,7 @@
       "kind": "simple",
       "question": "What is the Orion budget?",
       "historySeen": false,
-      "queries": [
-        "Orion budget"
-      ],
+      "queries": ["Orion budget"],
       "latencyMs": 18,
       "result": {
         "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
@@ -19,10 +17,7 @@
             "chunkIndex": 0
           }
         ],
-        "toolsCalled": [
-          "datasetDiscovery",
-          "documentSearch"
-        ],
+        "toolsCalled": ["datasetDiscovery", "documentSearch"],
         "citationValidation": "valid",
         "outcome": "success",
         "requestId": "59d08f17-92a0-4c69-8986-cbb7a557cab1",
@@ -44,9 +39,7 @@
       "kind": "complex",
       "question": "Compare Orion costs and risks across documents",
       "historySeen": false,
-      "queries": [
-        "Orion budget"
-      ],
+      "queries": ["Orion budget"],
       "latencyMs": 4,
       "result": {
         "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
@@ -58,10 +51,7 @@
             "chunkIndex": 0
           }
         ],
-        "toolsCalled": [
-          "datasetDiscovery",
-          "documentSearch"
-        ],
+        "toolsCalled": ["datasetDiscovery", "documentSearch"],
         "citationValidation": "valid",
         "outcome": "success",
         "requestId": "790fc02b-ed76-4c7c-a438-a446fb4e7ad8",
@@ -83,9 +73,7 @@
       "kind": "followup",
       "question": "قارن بينهما",
       "historySeen": false,
-      "queries": [
-        "Orion budget"
-      ],
+      "queries": ["Orion budget"],
       "latencyMs": 3,
       "result": {
         "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
@@ -97,10 +85,7 @@
             "chunkIndex": 0
           }
         ],
-        "toolsCalled": [
-          "datasetDiscovery",
-          "documentSearch"
-        ],
+        "toolsCalled": ["datasetDiscovery", "documentSearch"],
         "citationValidation": "valid",
         "outcome": "success",
         "requestId": "f2b4b46c-927c-4b2b-9f94-f4cb9c28d0c7",
@@ -122,9 +107,7 @@
       "kind": "followup",
       "question": "İkisini karşılaştır",
       "historySeen": false,
-      "queries": [
-        "Orion budget"
-      ],
+      "queries": ["Orion budget"],
       "latencyMs": 2,
       "result": {
         "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
@@ -136,10 +119,7 @@
             "chunkIndex": 0
           }
         ],
-        "toolsCalled": [
-          "datasetDiscovery",
-          "documentSearch"
-        ],
+        "toolsCalled": ["datasetDiscovery", "documentSearch"],
         "citationValidation": "valid",
         "outcome": "success",
         "requestId": "0d7e348f-1673-4ca6-ae04-828b5accc2de",
@@ -161,9 +141,7 @@
       "kind": "followup",
       "question": "Compare them",
       "historySeen": false,
-      "queries": [
-        "Orion budget"
-      ],
+      "queries": ["Orion budget"],
       "latencyMs": 2,
       "result": {
         "answer": "Controlled fixture answer.\n\nSources: [[costs]]",
@@ -175,10 +153,7 @@
             "chunkIndex": 0
           }
         ],
-        "toolsCalled": [
-          "datasetDiscovery",
-          "documentSearch"
-        ],
+        "toolsCalled": ["datasetDiscovery", "documentSearch"],
         "citationValidation": "valid",
         "outcome": "success",
         "requestId": "55448744-9cff-47a2-8c3d-c89338d94411",

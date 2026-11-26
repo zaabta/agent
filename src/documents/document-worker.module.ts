@@ -6,5 +6,8 @@ import { DocumentProcessorService } from './document-processor.service.js';
 import { DocumentQueueModule } from './document-queue.module.js';
 import { WorkerMonitoringService } from './worker-monitoring.service.js';
 
-@Module({ imports: [PrismaModule, TypegraphModule, DocumentQueueModule], providers: [DocumentStorageService, DocumentProcessorService, WorkerMonitoringService] })
+@Module({
+  imports: [PrismaModule, TypegraphModule, DocumentQueueModule],
+  providers: [DocumentStorageService, DocumentProcessorService, WorkerMonitoringService],
+})
 export class DocumentWorkerModule {}

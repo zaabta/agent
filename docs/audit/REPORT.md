@@ -38,11 +38,11 @@ These tests do **not** prove PostgreSQL transaction durability, actual JWT/sessi
 
 `workflow-before.json` runs the original workflow source from the baseline commit. `workflow-after.json` runs the updated workflow. Both use injected deterministic plans, model drafts, validators and search results. Their wall times are local harness timings, not production latency.
 
-| Controlled case | Before model calls | After model calls | Before searches / cited documents | After searches / cited documents |
-| --- | ---: | ---: | --- | --- |
-| Simple document question | 4 | 3 | 1 / 1 | 1 / 1 |
-| Multi-document question | 4 | 3 | 1 / 1 | 2 / 2 |
-| Follow-up (each of AR/TR/EN) | 4 | 3 | 1 / 1 | 2 / 2 |
+| Controlled case              | Before model calls | After model calls | Before searches / cited documents | After searches / cited documents |
+| ---------------------------- | -----------------: | ----------------: | --------------------------------- | -------------------------------- |
+| Simple document question     |                  4 |                 3 | 1 / 1                             | 1 / 1                            |
+| Multi-document question      |                  4 |                 3 | 1 / 1                             | 2 / 2                            |
+| Follow-up (each of AR/TR/EN) |                  4 |                 3 | 1 / 1                             | 2 / 2                            |
 
 History was absent in the original planner and present in the updated planner. This demonstrates execution behavior with injected plans, **not** autonomous decomposition accuracy or real answer-quality improvement. Citation checks verify references and expected fixture facts; semantic entailment still needs human review.
 

@@ -509,9 +509,7 @@
       "referenceIdentityValid": true,
       "arabicPresent": true,
       "latencyMs": 43492,
-      "queries": [
-        "What are the main risks associated with Orion?"
-      ],
+      "queries": ["What are the main risks associated with Orion?"],
       "firstTextMs": 22996,
       "deltaCount": 14,
       "provisionalText": "الخطر الرئيسي هو تأخير الموردين.",
@@ -622,9 +620,7 @@
       "referenceIdentityValid": true,
       "arabicPresent": true,
       "latencyMs": 43792,
-      "queries": [
-        "What is the name of the insurance company for project Orion?"
-      ],
+      "queries": ["What is the name of the insurance company for project Orion?"],
       "firstTextMs": 15216,
       "deltaCount": 19,
       "provisionalText": "لا يوجد اسم لشركة التأمين لمشروع Orion في الأدلة المقدمة.",

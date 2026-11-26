@@ -9,11 +9,16 @@ const baseUrl = `http://127.0.0.1:${config.port}`;
 const password = `S!tePilot-${randomUUID()}-secure`;
 type Account = { user: { id: string }; accessToken: string; cookie: string };
 
-async function json(response: Response) { return response.json() as Promise<Record<string, any>>; }
-async function bearer(accessToken: string) { return { authorization: `Bearer ${accessToken}` }; }
+async function json(response: Response) {
+  return response.json() as Promise<Record<string, any>>;
+}
+async function bearer(accessToken: string) {
+  return { authorization: `Bearer ${accessToken}` };
+}
 async function register(username: string) {
   const response = await fetch(`${baseUrl}/api/auth/register`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username, password, displayName: 'Shared Workspace E2E' }),
   });
   assert.equal(response.status, 201);
@@ -24,7 +29,8 @@ async function register(username: string) {
 }
 async function login(username: string): Promise<Account> {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   assert.equal(response.status, 200);
@@ -37,21 +43,33 @@ async function login(username: string): Promise<Account> {
 async function upload(accessToken: string, filename: string, text: string) {
   const form = new FormData();
   form.append('file', new Blob([text], { type: 'text/plain' }), filename);
-  const response = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: await bearer(accessToken), body: form });
+  const response = await fetch(`${baseUrl}/api/documents/upload`, {
+    method: 'POST',
+    headers: await bearer(accessToken),
+    body: form,
+  });
   assert.equal(response.status, 202);
   return (await json(response)).document as { id: string; jobId: string };
 }
 async function uploadCsv(accessToken: string, filename: string, text: string) {
   const form = new FormData();
   form.append('file', new Blob([text], { type: 'text/csv' }), filename);
-  const response = await fetch(`${baseUrl}/api/documents/upload`, { method: 'POST', headers: await bearer(accessToken), body: form });
+  const response = await fetch(`${baseUrl}/api/documents/upload`, {
+    method: 'POST',
+    headers: await bearer(accessToken),
+    body: form,
+  });
   assert.equal(response.status, 202);
   return (await json(response)).document as { id: string; jobId: string };
 }
 async function uploadVersion(accessToken: string, documentId: string, filename: string, text: string) {
   const form = new FormData();
   form.append('file', new Blob([text], { type: 'text/plain' }), filename);
-  const response = await fetch(`${baseUrl}/api/documents/${documentId}/versions`, { method: 'POST', headers: await bearer(accessToken), body: form });
+  const response = await fetch(`${baseUrl}/api/documents/${documentId}/versions`, {
+    method: 'POST',
+    headers: await bearer(accessToken),
+    body: form,
+  });
   assert.equal(response.status, 202);
   return (await json(response)).version as { id: string; jobId: string };
 }
@@ -62,14 +80,40 @@ async function waitReady(accessToken: string, jobId: string, prisma: PrismaClien
     const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, { headers: await bearer(accessToken) });
     assert.equal(response.status, 200);
     const job = await json(response);
-    lastState = { status: job.status, stage: job.stage, progress: job.progress, failureCode: job.failureCode, queueState: job.queueState };
+    lastState = {
+      status: job.status,
+      stage: job.stage,
+      progress: job.progress,
+      failureCode: job.failureCode,
+      queueState: job.queueState,
+    };
     if (job.status === 'ready') return;
     assert.ok(!['failed', 'cancelled'].includes(job.status), `job reached terminal state ${job.status}`);
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   const [version, document] = await Promise.all([
-    prisma.appDocumentVersion.findFirst({ where: { jobId }, select: { id: true, status: true, cancelRequested: true, jobId: true, documentId: true, tenantId: true } }),
-    prisma.appDocument.findFirst({ where: { jobId }, select: { id: true, status: true, stage: true, activeVersionId: true, cancelRequested: true, tenantId: true } }),
+    prisma.appDocumentVersion.findFirst({
+      where: { jobId },
+      select: {
+        id: true,
+        status: true,
+        cancelRequested: true,
+        jobId: true,
+        documentId: true,
+        tenantId: true,
+      },
+    }),
+    prisma.appDocument.findFirst({
+      where: { jobId },
+      select: {
+        id: true,
+        status: true,
+        stage: true,
+        activeVersionId: true,
+        cancelRequested: true,
+        tenantId: true,
+      },
+    }),
   ]);
   const detail = {
     ...lastState,
@@ -86,115 +130,221 @@ async function waitReady(accessToken: string, jobId: string, prisma: PrismaClien
 }
 async function search(accessToken: string | undefined, query: string) {
   return fetch(`${baseUrl}/api/documents/search`, {
-    method: 'POST', headers: { ...(accessToken ? await bearer(accessToken) : {}), 'content-type': 'application/json' },
+    method: 'POST',
+    headers: { ...(accessToken ? await bearer(accessToken) : {}), 'content-type': 'application/json' },
     body: JSON.stringify({ query, limit: 8 }),
   });
 }
 
-test('authorized company users share documents and datasets while conversations stay private', {
-  skip: process.env.RUN_AUTH_E2E !== 'true' ? 'Set RUN_AUTH_E2E=true with the local API, PostgreSQL, Redis, TypeGraph, worker, and Ollama' : false,
-  timeout: 300000,
-}, async () => {
-  const workspaceId = config.companyWorkspaceId;
-  assert.ok(workspaceId, 'COMPANY_WORKSPACE_ID must point at the existing installation workspace');
-  const prisma = new PrismaClient();
-  const suffix = randomUUID();
-  const usernameX = `company-user-x-${suffix}`;
-  const usernameY = `company-user-y-${suffix}`;
-  const usernameZ = `company-user-z-${suffix}`;
-  let userX: { id: string } | undefined;
-  let userY: { id: string } | undefined;
-  let userZ: { id: string } | undefined;
-  let docX: { id: string; jobId: string } | undefined;
-  let csvX: { id: string; jobId: string } | undefined;
-  let conversationX: string | undefined;
-  let conversationY: string | undefined;
-  let accountX: Account | undefined;
-  let accountY: Account | undefined;
-  try {
-    const beforeTenants = await prisma.tenant.count();
-    userX = await register(usernameX);
-    userY = await register(usernameY);
-    userZ = await register(usernameZ);
-    assert.equal(await prisma.tenant.count(), beforeTenants, 'registration must not provision per-user workspaces');
-    accountX = await login(usernameX);
-    accountY = await login(usernameY);
-    const accountZ = await login(usernameZ);
-    assert.equal('tenant' in accountX, false, 'frontend auth responses omit workspace data');
-    const hiddenGlobalSettings = await fetch(`${baseUrl}/api/admin/llm/settings`, { headers: await bearer(accountZ.accessToken) });
-    assert.ok([403, 503].includes(hiddenGlobalSettings.status), 'ordinary users cannot access global provider settings');
+test(
+  'authorized company users share documents and datasets while conversations stay private',
+  {
+    skip:
+      process.env.RUN_AUTH_E2E !== 'true'
+        ? 'Set RUN_AUTH_E2E=true with the local API, PostgreSQL, Redis, TypeGraph, worker, and Ollama'
+        : false,
+    timeout: 300000,
+  },
+  async () => {
+    const workspaceId = config.companyWorkspaceId;
+    assert.ok(workspaceId, 'COMPANY_WORKSPACE_ID must point at the existing installation workspace');
+    const prisma = new PrismaClient();
+    const suffix = randomUUID();
+    const usernameX = `company-user-x-${suffix}`;
+    const usernameY = `company-user-y-${suffix}`;
+    const usernameZ = `company-user-z-${suffix}`;
+    let userX: { id: string } | undefined;
+    let userY: { id: string } | undefined;
+    let userZ: { id: string } | undefined;
+    let docX: { id: string; jobId: string } | undefined;
+    let csvX: { id: string; jobId: string } | undefined;
+    let conversationX: string | undefined;
+    let conversationY: string | undefined;
+    let accountX: Account | undefined;
+    let accountY: Account | undefined;
+    try {
+      const beforeTenants = await prisma.tenant.count();
+      userX = await register(usernameX);
+      userY = await register(usernameY);
+      userZ = await register(usernameZ);
+      assert.equal(
+        await prisma.tenant.count(),
+        beforeTenants,
+        'registration must not provision per-user workspaces',
+      );
+      accountX = await login(usernameX);
+      accountY = await login(usernameY);
+      const accountZ = await login(usernameZ);
+      assert.equal('tenant' in accountX, false, 'frontend auth responses omit workspace data');
+      const hiddenGlobalSettings = await fetch(`${baseUrl}/api/admin/llm/settings`, {
+        headers: await bearer(accountZ.accessToken),
+      });
+      assert.ok(
+        [403, 503].includes(hiddenGlobalSettings.status),
+        'ordinary users cannot access global provider settings',
+      );
 
-    const existingLegacy = await prisma.appDocumentVersion.findFirst({
-      where: { tenantId: workspaceId, status: 'ready', chunkingStrategy: 'legacy' },
-      include: { document: { select: { id: true, filename: true, activeVersionId: true, status: true } } },
-    });
-    if (existingLegacy?.document.status === 'ready' && existingLegacy.document.activeVersionId === existingLegacy.id) {
-      const legacySearch = await search(accountY.accessToken, existingLegacy.document.filename);
-      assert.equal(legacySearch.status, 200);
-      const legacyHits = (await json(legacySearch)).hits as Array<{ citation: { documentId: string; documentVersionId?: string } }>;
-      assert.ok(legacyHits.some(hit => hit.citation.documentId === existingLegacy.document.id && hit.citation.documentVersionId === existingLegacy.id), 'a pre-existing active legacy index remains searchable by another authorized user');
+      const existingLegacy = await prisma.appDocumentVersion.findFirst({
+        where: { tenantId: workspaceId, status: 'ready', chunkingStrategy: 'legacy' },
+        include: { document: { select: { id: true, filename: true, activeVersionId: true, status: true } } },
+      });
+      if (
+        existingLegacy?.document.status === 'ready' &&
+        existingLegacy.document.activeVersionId === existingLegacy.id
+      ) {
+        const legacySearch = await search(accountY.accessToken, existingLegacy.document.filename);
+        assert.equal(legacySearch.status, 200);
+        const legacyHits = (await json(legacySearch)).hits as Array<{
+          citation: { documentId: string; documentVersionId?: string };
+        }>;
+        assert.ok(
+          legacyHits.some(
+            (hit) =>
+              hit.citation.documentId === existingLegacy.document.id &&
+              hit.citation.documentVersionId === existingLegacy.id,
+          ),
+          'a pre-existing active legacy index remains searchable by another authorized user',
+        );
+      }
+
+      const anonymous = await search(undefined, 'unauthorized access check');
+      assert.equal(anonymous.status, 401, 'anonymous users cannot access company documents');
+
+      const marker = `SHARED-COMPANY-${suffix}`;
+      const oldMarker = `SUPERSEDED-${suffix}`;
+      const newMarker = `CURRENT-${suffix}`;
+      docX = await upload(
+        accountX.accessToken,
+        `shared-company-${suffix}.txt`,
+        `${marker} company report with ${oldMarker} financial total.`,
+      );
+      await waitReady(accountX.accessToken, docX.jobId, prisma);
+      const rowKey = `ROW-${suffix}`;
+      csvX = await uploadCsv(
+        accountX.accessToken,
+        `shared-company-data-${suffix}.csv`,
+        `reference,value\n${rowKey},SHARED-VALUE-${suffix}`,
+      );
+      await waitReady(accountX.accessToken, csvX.jobId, prisma);
+
+      const [searchX, searchY] = await Promise.all([
+        search(accountX.accessToken, marker),
+        search(accountY.accessToken, marker),
+      ]);
+      assert.equal(searchX.status, 200);
+      assert.equal(searchY.status, 200);
+      const hitsX = (await json(searchX)).hits as Array<{
+        citation: { documentId: string; documentVersionId?: string; filename: string };
+      }>;
+      const hitsY = (await json(searchY)).hits as Array<{
+        citation: { documentId: string; documentVersionId?: string; filename: string };
+      }>;
+      assert.ok(hitsX.some((hit) => hit.citation.documentId === docX!.id));
+      assert.ok(
+        hitsY.some((hit) => hit.citation.documentId === docX!.id),
+        'User Y must retrieve User X document evidence',
+      );
+      assert.ok(
+        hitsY.find((hit) => hit.citation.documentId === docX!.id)?.citation.documentVersionId,
+        'shared result must carry a version citation',
+      );
+      assert.deepEqual(
+        hitsY.map((hit) => hit.citation.documentId),
+        hitsX.map((hit) => hit.citation.documentId),
+        'authorized users receive the same ranked workspace result IDs',
+      );
+
+      const structured = await new StructuredDataService(prisma).lookup(rowKey, workspaceId);
+      assert.ok(
+        structured.hits.some((hit) => hit.citation.documentId === csvX!.id && hit.citation.documentVersionId),
+        'User Y can query User X structured dataset with active-version citation in the shared workspace',
+      );
+
+      const version = await uploadVersion(
+        accountX.accessToken,
+        docX.id,
+        `shared-company-${suffix}.txt`,
+        `${marker} company report now says ${newMarker} financial total.`,
+      );
+      await waitReady(accountX.accessToken, version.jobId, prisma);
+      const [supersededSearch, currentSearch] = await Promise.all([
+        search(accountY.accessToken, oldMarker),
+        search(accountY.accessToken, newMarker),
+      ]);
+      assert.equal(supersededSearch.status, 200);
+      assert.equal(currentSearch.status, 200);
+      const oldHits = (await json(supersededSearch)).hits as Array<{
+        content: string;
+        citation: { documentId: string; documentVersionId?: string };
+      }>;
+      const currentHits = (await json(currentSearch)).hits as Array<{
+        content: string;
+        citation: { documentId: string; documentVersionId?: string };
+      }>;
+      const supersededEvidence = oldHits.filter((hit) => hit.content.includes(oldMarker));
+      assert.equal(
+        supersededEvidence.length,
+        0,
+        `superseded passage content must not be returned; versions=${JSON.stringify(oldHits.filter((hit) => hit.citation.documentId === docX!.id).map((hit) => hit.citation.documentVersionId))}`,
+      );
+      assert.ok(
+        currentHits.some(
+          (hit) => hit.citation.documentId === docX!.id && hit.citation.documentVersionId === version.id,
+        ),
+      );
+
+      const createX = await fetch(`${baseUrl}/api/agent/conversations`, {
+        method: 'POST',
+        headers: await bearer(accountX.accessToken),
+      });
+      const createY = await fetch(`${baseUrl}/api/agent/conversations`, {
+        method: 'POST',
+        headers: await bearer(accountY.accessToken),
+      });
+      assert.equal(createX.status, 201);
+      assert.equal(createY.status, 201);
+      conversationX = (await json(createX)).id as string;
+      conversationY = (await json(createY)).id as string;
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/agent/conversations/${conversationX}`, {
+            headers: await bearer(accountY.accessToken),
+          })
+        ).status,
+        404,
+      );
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/agent/conversations/${conversationY}`, {
+            headers: await bearer(accountX.accessToken),
+          })
+        ).status,
+        404,
+      );
+
+      const wrongPassword = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: usernameX, password: 'incorrect-password' }),
+      });
+      assert.equal(wrongPassword.status, 401);
+    } finally {
+      if (accountX && docX)
+        await fetch(`${baseUrl}/api/documents/${docX.id}`, {
+          method: 'DELETE',
+          headers: await bearer(accountX.accessToken),
+        }).catch(() => undefined);
+      if (accountX && csvX)
+        await fetch(`${baseUrl}/api/documents/${csvX.id}`, {
+          method: 'DELETE',
+          headers: await bearer(accountX.accessToken),
+        }).catch(() => undefined);
+      const userIds = [userX?.id, userY?.id, userZ?.id].filter((id): id is string => Boolean(id));
+      if (userIds.length) {
+        await prisma.conversation.deleteMany({ where: { ownerId: { in: userIds } } }).catch(() => undefined);
+        await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
+      }
+      await prisma.$disconnect();
     }
-
-    const anonymous = await search(undefined, 'unauthorized access check');
-    assert.equal(anonymous.status, 401, 'anonymous users cannot access company documents');
-
-    const marker = `SHARED-COMPANY-${suffix}`;
-    const oldMarker = `SUPERSEDED-${suffix}`;
-    const newMarker = `CURRENT-${suffix}`;
-    docX = await upload(accountX.accessToken, `shared-company-${suffix}.txt`, `${marker} company report with ${oldMarker} financial total.`);
-    await waitReady(accountX.accessToken, docX.jobId, prisma);
-    const rowKey = `ROW-${suffix}`;
-    csvX = await uploadCsv(accountX.accessToken, `shared-company-data-${suffix}.csv`, `reference,value\n${rowKey},SHARED-VALUE-${suffix}`);
-    await waitReady(accountX.accessToken, csvX.jobId, prisma);
-
-    const [searchX, searchY] = await Promise.all([search(accountX.accessToken, marker), search(accountY.accessToken, marker)]);
-    assert.equal(searchX.status, 200);
-    assert.equal(searchY.status, 200);
-    const hitsX = (await json(searchX)).hits as Array<{ citation: { documentId: string; documentVersionId?: string; filename: string } }>;
-    const hitsY = (await json(searchY)).hits as Array<{ citation: { documentId: string; documentVersionId?: string; filename: string } }>;
-    assert.ok(hitsX.some(hit => hit.citation.documentId === docX!.id));
-    assert.ok(hitsY.some(hit => hit.citation.documentId === docX!.id), 'User Y must retrieve User X document evidence');
-    assert.ok(hitsY.find(hit => hit.citation.documentId === docX!.id)?.citation.documentVersionId, 'shared result must carry a version citation');
-    assert.deepEqual(hitsY.map(hit => hit.citation.documentId), hitsX.map(hit => hit.citation.documentId), 'authorized users receive the same ranked workspace result IDs');
-
-    const structured = await new StructuredDataService(prisma).lookup(rowKey, workspaceId);
-    assert.ok(structured.hits.some(hit => hit.citation.documentId === csvX!.id && hit.citation.documentVersionId), 'User Y can query User X structured dataset with active-version citation in the shared workspace');
-
-    const version = await uploadVersion(accountX.accessToken, docX.id, `shared-company-${suffix}.txt`, `${marker} company report now says ${newMarker} financial total.`);
-    await waitReady(accountX.accessToken, version.jobId, prisma);
-    const [supersededSearch, currentSearch] = await Promise.all([
-      search(accountY.accessToken, oldMarker), search(accountY.accessToken, newMarker),
-    ]);
-    assert.equal(supersededSearch.status, 200);
-    assert.equal(currentSearch.status, 200);
-    const oldHits = (await json(supersededSearch)).hits as Array<{ content: string; citation: { documentId: string; documentVersionId?: string } }>;
-    const currentHits = (await json(currentSearch)).hits as Array<{ content: string; citation: { documentId: string; documentVersionId?: string } }>;
-    const supersededEvidence = oldHits.filter(hit => hit.content.includes(oldMarker));
-    assert.equal(supersededEvidence.length, 0, `superseded passage content must not be returned; versions=${JSON.stringify(oldHits.filter(hit => hit.citation.documentId === docX!.id).map(hit => hit.citation.documentVersionId))}`);
-    assert.ok(currentHits.some(hit => hit.citation.documentId === docX!.id && hit.citation.documentVersionId === version.id));
-
-    const createX = await fetch(`${baseUrl}/api/agent/conversations`, { method: 'POST', headers: await bearer(accountX.accessToken) });
-    const createY = await fetch(`${baseUrl}/api/agent/conversations`, { method: 'POST', headers: await bearer(accountY.accessToken) });
-    assert.equal(createX.status, 201);
-    assert.equal(createY.status, 201);
-    conversationX = (await json(createX)).id as string;
-    conversationY = (await json(createY)).id as string;
-    assert.equal((await fetch(`${baseUrl}/api/agent/conversations/${conversationX}`, { headers: await bearer(accountY.accessToken) })).status, 404);
-    assert.equal((await fetch(`${baseUrl}/api/agent/conversations/${conversationY}`, { headers: await bearer(accountX.accessToken) })).status, 404);
-
-    const wrongPassword = await fetch(`${baseUrl}/api/auth/login`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: usernameX, password: 'incorrect-password' }),
-    });
-    assert.equal(wrongPassword.status, 401);
-  } finally {
-    if (accountX && docX) await fetch(`${baseUrl}/api/documents/${docX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
-    if (accountX && csvX) await fetch(`${baseUrl}/api/documents/${csvX.id}`, { method: 'DELETE', headers: await bearer(accountX.accessToken) }).catch(() => undefined);
-    const userIds = [userX?.id, userY?.id, userZ?.id].filter((id): id is string => Boolean(id));
-    if (userIds.length) {
-      await prisma.conversation.deleteMany({ where: { ownerId: { in: userIds } } }).catch(() => undefined);
-      await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
-    }
-    await prisma.$disconnect();
-  }
-});
+  },
+);

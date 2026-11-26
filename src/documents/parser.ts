@@ -7,14 +7,37 @@ import { configuredVisionModel, isDrawing, parseDrawing, transcribePdfPage } fro
 import { BadRequestException } from '@nestjs/common';
 import type { ParseProgressCallback } from './parse-progress.js';
 
-export const SUPPORTED_EXTENSIONS = ['.md', '.txt', '.docx', '.pdf', '.xlsx', '.xls', '.csv', '.png', '.jpg', '.jpeg'] as const;
-export interface StructuredCell { sheetName: string; rowNumber: number; address: string; columnName: string; value: string; valueType: string; formula?: string; }
-export interface ParsedDocument { extension: string; text: string; structuredCells?: StructuredCell[]; }
+export const SUPPORTED_EXTENSIONS = [
+  '.md',
+  '.txt',
+  '.docx',
+  '.pdf',
+  '.xlsx',
+  '.xls',
+  '.csv',
+  '.png',
+  '.jpg',
+  '.jpeg',
+] as const;
+export interface StructuredCell {
+  sheetName: string;
+  rowNumber: number;
+  address: string;
+  columnName: string;
+  value: string;
+  valueType: string;
+  formula?: string;
+}
+export interface ParsedDocument {
+  extension: string;
+  text: string;
+  structuredCells?: StructuredCell[];
+}
 
 export function extractableTextCoverage(text: string, width: number, height: number) {
   const meaningfulChars = [...text.normalize('NFKC').matchAll(/[\p{L}\p{N}]/gu)].length;
   const area = width > 0 && height > 0 ? width * height : 500_000;
-  const expectedChars = 500 * area / 500_000;
+  const expectedChars = (500 * area) / 500_000;
   return Math.min(1, meaningfulChars / Math.max(1, expectedChars));
 }
 
@@ -22,22 +45,39 @@ const MIN_PDF_TEXT_COVERAGE = 0.16;
 
 export function formatPdfTables(tables: Array<Array<Array<string>>>): string[] {
   return tables.flatMap((table, tableIndex) => {
-    if (table.length < 2 || Math.max(...table.map(row => row.length)) < 2) return [];
+    if (table.length < 2 || Math.max(...table.map((row) => row.length)) < 2) return [];
     const headers = table[0]!.map((value, column) => value.trim() || `column ${column + 1}`);
-    const rows = table.slice(1).map((row, rowIndex) => `Table ${tableIndex + 1}, row ${rowIndex + 1}: ${headers.map((header, column) => `${header}=${(row[column] ?? '').trim()}`).join(' | ')}`);
+    const rows = table
+      .slice(1)
+      .map(
+        (row, rowIndex) =>
+          `Table ${tableIndex + 1}, row ${rowIndex + 1}: ${headers.map((header, column) => `${header}=${(row[column] ?? '').trim()}`).join(' | ')}`,
+      );
     return [`Extracted PDF table ${tableIndex + 1}; headers: ${headers.join(' | ')}\n${rows.join('\n')}`];
   });
 }
 
 function decodeUtf8(buffer: Buffer): string {
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, ''); }
-  catch { throw new BadRequestException('INVALID_UTF8'); }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, '');
+  } catch {
+    throw new BadRequestException('INVALID_UTF8');
+  }
 }
 
 function parseSpreadsheet(buffer: Buffer): { text: string; structuredCells: StructuredCell[] } {
   let workbook: XLSX.WorkBook;
-  try { workbook = XLSX.read(buffer, { type: 'buffer', cellFormula: true, cellDates: true, cellNF: true, cellStyles: false }); }
-  catch { throw new BadRequestException('INVALID_SPREADSHEET'); }
+  try {
+    workbook = XLSX.read(buffer, {
+      type: 'buffer',
+      cellFormula: true,
+      cellDates: true,
+      cellNF: true,
+      cellStyles: false,
+    });
+  } catch {
+    throw new BadRequestException('INVALID_SPREADSHEET');
+  }
   if (!workbook.SheetNames.length) throw new BadRequestException('INVALID_SPREADSHEET');
   const output: string[] = [`Workbook: ${workbook.Props?.Title || 'uploaded workbook'}`];
   const structuredCells: StructuredCell[] = [];
@@ -46,9 +86,12 @@ function parseSpreadsheet(buffer: Buffer): { text: string; structuredCells: Stru
     if (!sheet) continue;
     output.push(`\nSheet: ${sheetName}`);
     const ref = sheet['!ref'];
-    if (!ref) { output.push('(empty sheet)'); continue; }
+    if (!ref) {
+      output.push('(empty sheet)');
+      continue;
+    }
     const range = XLSX.utils.decode_range(ref);
-    const merges = (sheet['!merges'] || []).map(m => XLSX.utils.encode_range(m));
+    const merges = (sheet['!merges'] || []).map((m) => XLSX.utils.encode_range(m));
     if (merges.length) output.push(`Merged cells: ${merges.join(', ')}`);
     for (let row = range.s.r; row <= range.e.r; row++) {
       const cells: string[] = [];
@@ -60,11 +103,16 @@ function parseSpreadsheet(buffer: Buffer): { text: string; structuredCells: Stru
         const headerAddress = XLSX.utils.encode_cell({ r: range.s.r, c: col });
         const headerCell = sheet[headerAddress] as XLSX.CellObject | undefined;
         const columnName = headerCell?.w ?? String(headerCell?.v ?? `Column ${col - range.s.c + 1}`);
-        cells.push(`${address}=${cell.f ? `formula=${cell.f}; cached=${display}` : display}${row > range.s.r ? ` [${columnName}]` : ''}`);
+        cells.push(
+          `${address}=${cell.f ? `formula=${cell.f}; cached=${display}` : display}${row > range.s.r ? ` [${columnName}]` : ''}`,
+        );
         structuredCells.push({
-          sheetName, rowNumber: row + 1, address,
+          sheetName,
+          rowNumber: row + 1,
+          address,
           columnName,
-          value: String(display), valueType: cell.t || typeof cell.v,
+          value: String(display),
+          valueType: cell.t || typeof cell.v,
           ...(cell.f ? { formula: cell.f } : {}),
         });
       }
@@ -78,26 +126,58 @@ function parseSpreadsheet(buffer: Buffer): { text: string; structuredCells: Stru
 function parseCsvDocument(text: string): { text: string; structuredCells: StructuredCell[] } {
   const sample = text.split(/\r?\n/).slice(0, 5).join('\n');
   const delimiters = [',', ';', '\t', '|'];
-  const delimiter = delimiters.map(value => ({ value, count: sample.split(value).length - 1 }))
-    .sort((a, b) => b.count - a.count)[0]?.value || ',';
+  const delimiter =
+    delimiters
+      .map((value) => ({ value, count: sample.split(value).length - 1 }))
+      .sort((a, b) => b.count - a.count)[0]?.value || ',';
   let rows: string[][];
-  try { rows = parseCsv(text, { bom: true, delimiter, relax_quotes: false, skip_empty_lines: false, record_delimiter: ['\r\n', '\n', '\r'] }); }
-  catch { throw new BadRequestException('MALFORMED_CSV'); }
+  try {
+    rows = parseCsv(text, {
+      bom: true,
+      delimiter,
+      relax_quotes: false,
+      skip_empty_lines: false,
+      record_delimiter: ['\r\n', '\n', '\r'],
+    });
+  } catch {
+    throw new BadRequestException('MALFORMED_CSV');
+  }
   if (rows.length < 1) throw new BadRequestException('EMPTY_DOCUMENT');
   const headers = rows[0].map((value, i) => value.trim() || `Column ${i + 1}`);
   const structuredCells: StructuredCell[] = [];
-  const lines = [`CSV headers: ${headers.join(' | ')}`, ...rows.slice(1).map((row, index) => {
-    row.forEach((value, col) => structuredCells.push({ sheetName: 'CSV', rowNumber: index + 2, address: `${index + 2}:${col + 1}`, columnName: headers[col] || `Column ${col + 1}`, value, valueType: 'string' }));
-    const values = headers.map((header, col) => `${header} (column ${col + 1})=${row[col] ?? ''} [cell ${index + 2}:${col + 1}]`);
-    return `Row ${index + 2}: ${values.join(' | ')}`;
-  })];
+  const lines = [
+    `CSV headers: ${headers.join(' | ')}`,
+    ...rows.slice(1).map((row, index) => {
+      row.forEach((value, col) =>
+        structuredCells.push({
+          sheetName: 'CSV',
+          rowNumber: index + 2,
+          address: `${index + 2}:${col + 1}`,
+          columnName: headers[col] || `Column ${col + 1}`,
+          value,
+          valueType: 'string',
+        }),
+      );
+      const values = headers.map(
+        (header, col) => `${header} (column ${col + 1})=${row[col] ?? ''} [cell ${index + 2}:${col + 1}]`,
+      );
+      return `Row ${index + 2}: ${values.join(' | ')}`;
+    }),
+  ];
   return { text: lines.join('\n'), structuredCells };
 }
 
-export async function parseDocument(filename: string, buffer: Buffer, signal?: AbortSignal, onProgress?: ParseProgressCallback): Promise<ParsedDocument> {
+export async function parseDocument(
+  filename: string,
+  buffer: Buffer,
+  signal?: AbortSignal,
+  onProgress?: ParseProgressCallback,
+): Promise<ParsedDocument> {
   const extension = extname(filename).toLowerCase();
-  if (!SUPPORTED_EXTENSIONS.includes(extension as typeof SUPPORTED_EXTENSIONS[number])) throw new BadRequestException('UNSUPPORTED_FILE_TYPE');
-  if (isDrawing(filename)) return { extension, text: await parseDrawing(filename, buffer, signal, onProgress) };
+  if (!SUPPORTED_EXTENSIONS.includes(extension as (typeof SUPPORTED_EXTENSIONS)[number]))
+    throw new BadRequestException('UNSUPPORTED_FILE_TYPE');
+  if (isDrawing(filename))
+    return { extension, text: await parseDrawing(filename, buffer, signal, onProgress) };
   let text: string;
   let structuredCells: StructuredCell[] | undefined;
   if (extension === '.docx') {
@@ -110,31 +190,49 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
         .replace(/<li\b[^>]*>/gi, '- ')
         .replace(/<\/li>/gi, '\n')
         .replace(/<tr\b[^>]*>/gi, 'Table row: ')
-        .replace(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi, (_match, cell: string) => `${cell.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()} | `)
+        .replace(
+          /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi,
+          (_match, cell: string) =>
+            `${cell
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()} | `,
+        )
         .replace(/<\/tr>/gi, '\n')
         .replace(/<\/(?:p|div|table|ul|ol)>/gi, '\n\n')
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<[^>]+>/g, '')
-        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'");
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;|&apos;/g, "'");
+    } catch {
+      throw new BadRequestException('INVALID_DOCX');
     }
-    catch { throw new BadRequestException('INVALID_DOCX'); }
   } else if (extension === '.pdf') {
     if (buffer.subarray(0, 5).toString('ascii') !== '%PDF-') throw new BadRequestException('INVALID_PDF');
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {
       const result = await parser.getText();
       const tableResult = await parser.getTable().catch(() => undefined);
-      const tablesByPage = new Map((tableResult?.pages ?? []).map(page => [page.num, formatPdfTables(page.tables)]));
+      const tablesByPage = new Map(
+        (tableResult?.pages ?? []).map((page) => [page.num, formatPdfTables(page.tables)]),
+      );
       const info = await parser.getInfo({ parsePageInfo: true });
-      const pageInfo = new Map(info.pages.map(page => [page.pageNumber, page]));
-      const needsVision = result.pages.filter(page => {
+      const pageInfo = new Map(info.pages.map((page) => [page.pageNumber, page]));
+      const needsVision = result.pages.filter((page) => {
         const dimensions = pageInfo.get(page.num);
-        return extractableTextCoverage(page.text ?? '', dimensions?.width ?? 0, dimensions?.height ?? 0) < MIN_PDF_TEXT_COVERAGE;
+        return (
+          extractableTextCoverage(page.text ?? '', dimensions?.width ?? 0, dimensions?.height ?? 0) <
+          MIN_PDF_TEXT_COVERAGE
+        );
       });
       const visionModel = needsVision.length ? configuredVisionModel() : undefined;
       if (needsVision.length && !visionModel) {
-        throw new BadRequestException('OCR_VISION_NOT_CONFIGURED: set OLLAMA_VISION_MODEL to an installed local Ollama vision model');
+        throw new BadRequestException(
+          'OCR_VISION_NOT_CONFIGURED: set OLLAMA_VISION_MODEL to an installed local Ollama vision model',
+        );
       }
       const pageTexts: string[] = [];
       let rendered = 0;
@@ -142,41 +240,95 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
       for (const page of result.pages) {
         const nativeText = (page.text ?? '').trim();
         const extractedTables = tablesByPage.get(page.num) ?? [];
-        if (!needsVision.some(item => item.num === page.num)) {
-          if (nativeText || extractedTables.length) pageTexts.push(`Page ${page.num}:\n${[nativeText, ...extractedTables].filter(Boolean).join('\n\n')}`);
+        if (!needsVision.some((item) => item.num === page.num)) {
+          if (nativeText || extractedTables.length)
+            pageTexts.push(
+              `Page ${page.num}:\n${[nativeText, ...extractedTables].filter(Boolean).join('\n\n')}`,
+            );
           continue;
         }
         signal?.throwIfAborted();
         const dimensions = pageInfo.get(page.num);
-        if (!dimensions || !(dimensions.width > 0 && dimensions.height > 0)) throw new BadRequestException('INVALID_PDF_PAGE_DIMENSIONS');
-        await onProgress?.({ stage: 'pdf_rendering', status: 'in_progress', completedUnits: rendered, totalUnits: needsVision.length, unit: 'pages' });
-        const desiredWidth = Math.max(1, Math.floor(1800 * Math.min(1, dimensions.width / dimensions.height)));
-        const screenshot = await parser.getScreenshot({ partial: [page.num], desiredWidth, imageDataUrl: false, imageBuffer: true });
+        if (!dimensions || !(dimensions.width > 0 && dimensions.height > 0))
+          throw new BadRequestException('INVALID_PDF_PAGE_DIMENSIONS');
+        await onProgress?.({
+          stage: 'pdf_rendering',
+          status: 'in_progress',
+          completedUnits: rendered,
+          totalUnits: needsVision.length,
+          unit: 'pages',
+        });
+        const desiredWidth = Math.max(
+          1,
+          Math.floor(1800 * Math.min(1, dimensions.width / dimensions.height)),
+        );
+        const screenshot = await parser.getScreenshot({
+          partial: [page.num],
+          desiredWidth,
+          imageDataUrl: false,
+          imageBuffer: true,
+        });
         const image = screenshot.pages[0]?.data;
         if (!image?.length) throw new Error('PDF_PAGE_RENDER_FAILED');
         rendered++;
-        await onProgress?.({ stage: 'pdf_rendering', status: 'in_progress', completedUnits: rendered, totalUnits: needsVision.length, unit: 'pages' });
-        await onProgress?.({ stage: 'vision_extraction', status: 'in_progress', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+        await onProgress?.({
+          stage: 'pdf_rendering',
+          status: 'in_progress',
+          completedUnits: rendered,
+          totalUnits: needsVision.length,
+          unit: 'pages',
+        });
+        await onProgress?.({
+          stage: 'vision_extraction',
+          status: 'in_progress',
+          completedUnits: extractedByVision,
+          totalUnits: needsVision.length,
+          unit: 'pages',
+        });
         const visualText = await transcribePdfPage(image, signal);
         extractedByVision++;
-        await onProgress?.({ stage: 'vision_extraction', status: 'in_progress', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+        await onProgress?.({
+          stage: 'vision_extraction',
+          status: 'in_progress',
+          completedUnits: extractedByVision,
+          totalUnits: needsVision.length,
+          unit: 'pages',
+        });
         const combinedText = [nativeText, ...extractedTables, visualText].filter(Boolean).join('\n');
         if (combinedText) pageTexts.push(`Page ${page.num}:\n${combinedText}`);
       }
       if (needsVision.length) {
-        await onProgress?.({ stage: 'vision_extraction', status: 'completed', completedUnits: extractedByVision, totalUnits: needsVision.length, unit: 'pages' });
+        await onProgress?.({
+          stage: 'vision_extraction',
+          status: 'completed',
+          completedUnits: extractedByVision,
+          totalUnits: needsVision.length,
+          unit: 'pages',
+        });
       }
       text = pageTexts.join('\n\n');
-      if (!text.trim()) throw new BadRequestException(needsVision.length ? 'OCR_NO_READABLE_TEXT' : 'EMPTY_DOCUMENT');
+      if (!text.trim())
+        throw new BadRequestException(needsVision.length ? 'OCR_NO_READABLE_TEXT' : 'EMPTY_DOCUMENT');
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
-      if (error instanceof Error && (/^(?:OCR_VISION_|OLLAMA_VISION_)/.test(error.message)
-        || (error as Error & { retryable?: boolean }).retryable === true)) throw error;
+      if (
+        error instanceof Error &&
+        (/^(?:OCR_VISION_|OLLAMA_VISION_)/.test(error.message) ||
+          (error as Error & { retryable?: boolean }).retryable === true)
+      )
+        throw error;
       throw new BadRequestException('INVALID_PDF');
-    } finally { await parser.destroy(); }
+    } finally {
+      await parser.destroy();
+    }
   } else if (extension === '.xlsx' || extension === '.xls') {
-    if (extension === '.xlsx' && !(buffer[0] === 0x50 && buffer[1] === 0x4b)) throw new BadRequestException('INVALID_SPREADSHEET');
-    if (extension === '.xls' && !(buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0)) throw new BadRequestException('INVALID_SPREADSHEET');
+    if (extension === '.xlsx' && !(buffer[0] === 0x50 && buffer[1] === 0x4b))
+      throw new BadRequestException('INVALID_SPREADSHEET');
+    if (
+      extension === '.xls' &&
+      !(buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0)
+    )
+      throw new BadRequestException('INVALID_SPREADSHEET');
     const spreadsheet = parseSpreadsheet(buffer);
     text = spreadsheet.text;
     structuredCells = spreadsheet.structuredCells;
@@ -187,7 +339,11 @@ export async function parseDocument(filename: string, buffer: Buffer, signal?: A
       const csv = parseCsvDocument(text);
       text = csv.text;
       structuredCells = csv.structuredCells;
-    } else text = text.split(/\r?\n/).map((line, i) => `Line ${i + 1}: ${line}`).join('\n');
+    } else
+      text = text
+        .split(/\r?\n/)
+        .map((line, i) => `Line ${i + 1}: ${line}`)
+        .join('\n');
   }
   if (!text.trim()) throw new BadRequestException('EMPTY_DOCUMENT');
   return { extension, text, ...(structuredCells ? { structuredCells } : {}) };

@@ -16,12 +16,19 @@ import { runWithUsageContext } from '../llm-admin/usage-recorder.js';
 
 function isTransientFailure(error: unknown): boolean {
   if (error instanceof HttpException || error instanceof UnrecoverableError) return false;
-  if (error && typeof error === 'object' && (error as { retryable?: unknown }).retryable === true) return true;
+  if (error && typeof error === 'object' && (error as { retryable?: unknown }).retryable === true)
+    return true;
   const current = error as { status?: number; statusCode?: number; code?: string; cause?: unknown } | null;
   const status = current?.status ?? current?.statusCode;
-  if (status === 408 || status === 425 || status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  if (status === 408 || status === 425 || status === 429 || (typeof status === 'number' && status >= 500))
+    return true;
   const code = current?.code ?? '';
-  if (/^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|P1001|P1002|P1008|P1017|P2024)$/.test(code)) return true;
+  if (
+    /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|P1001|P1002|P1008|P1017|P2024)$/.test(
+      code,
+    )
+  )
+    return true;
   if (/^(?:08|40)[0-9A-Z]{3}$/.test(code)) return true;
   return current?.cause ? isTransientFailure(current.cause) : false;
 }
@@ -44,27 +51,51 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    this.worker = new Worker<ProcessDocumentJob>(config.documentQueue, job => this.processWithRetryPolicy(job), {
-      connection: redisConnection(config.redisUrl), concurrency: config.documentWorkerConcurrency,
-    });
+    this.worker = new Worker<ProcessDocumentJob>(
+      config.documentQueue,
+      (job) => this.processWithRetryPolicy(job),
+      {
+        connection: redisConnection(config.redisUrl),
+        concurrency: config.documentWorkerConcurrency,
+      },
+    );
     this.monitoring.startHeartbeat();
-    this.worker.on('active', job => { if (job.id) this.activeJobIds.add(job.id); this.updateWorkerActivity(); });
-    this.worker.on('completed', job => { if (job.id) this.activeJobIds.delete(job.id); this.updateWorkerActivity(); });
-    this.worker.on('failed', (job, error) => { if (job) void this.failed(job, error); });
-    this.worker.on('failed', job => { if (job?.id) this.activeJobIds.delete(job.id); this.updateWorkerActivity(); });
-    this.worker.on('error', error => this.logger.error(`Document worker transport error: ${error.message}`));
-    this.worker.on('completed', job => { if (!job.data.versionId) void this.storage.cleanup(job.data.storageKey).catch(() => undefined); });
+    this.worker.on('active', (job) => {
+      if (job.id) this.activeJobIds.add(job.id);
+      this.updateWorkerActivity();
+    });
+    this.worker.on('completed', (job) => {
+      if (job.id) this.activeJobIds.delete(job.id);
+      this.updateWorkerActivity();
+    });
+    this.worker.on('failed', (job, error) => {
+      if (job) void this.failed(job, error);
+    });
+    this.worker.on('failed', (job) => {
+      if (job?.id) this.activeJobIds.delete(job.id);
+      this.updateWorkerActivity();
+    });
+    this.worker.on('error', (error) =>
+      this.logger.error(`Document worker transport error: ${error.message}`),
+    );
+    this.worker.on('completed', (job) => {
+      if (!job.data.versionId) void this.storage.cleanup(job.data.storageKey).catch(() => undefined);
+    });
   }
 
-  async onModuleDestroy() { await this.monitoring.stopHeartbeat(); await this.worker?.close(); }
+  async onModuleDestroy() {
+    await this.monitoring.stopHeartbeat();
+    await this.worker?.close();
+  }
 
   private updateWorkerActivity() {
     this.monitoring.setActivity(this.activeJobIds.size ? 'busy' : 'idle');
   }
 
   private async processWithRetryPolicy(job: Job<ProcessDocumentJob>) {
-    try { return await this.process(job); }
-    catch (error) {
+    try {
+      return await this.process(job);
+    } catch (error) {
       if (error instanceof UnrecoverableError || isTransientFailure(error)) throw error;
       throw new UnrecoverableError(safeFailureCode(error));
     }
@@ -73,47 +104,116 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
   private async process(job: Job<ProcessDocumentJob>) {
     const data = job.data;
     const attempt = job.attemptsMade + 1;
-    const owned = await this.prisma.appDocument.findFirst({ where: { id: data.documentId, tenantId: data.tenantId } });
-    const version = data.versionId ? await this.prisma.appDocumentVersion.findFirst({ where: { id: data.versionId, documentId: data.documentId, tenantId: data.tenantId, jobId: job.id } }) : null;
+    const owned = await this.prisma.appDocument.findFirst({
+      where: { id: data.documentId, tenantId: data.tenantId },
+    });
+    const version = data.versionId
+      ? await this.prisma.appDocumentVersion.findFirst({
+          where: { id: data.versionId, documentId: data.documentId, tenantId: data.tenantId, jobId: job.id },
+        })
+      : null;
     if (!owned || (data.versionId && !version)) throw new Error('DOCUMENT_JOB_NOT_FOUND');
     const cancelled = async () => {
-      const doc = await this.prisma.appDocument.findFirst({ where: { id: data.documentId, tenantId: data.tenantId }, select: { cancelRequested: true } });
+      const doc = await this.prisma.appDocument.findFirst({
+        where: { id: data.documentId, tenantId: data.tenantId },
+        select: { cancelRequested: true },
+      });
       if (!doc || doc.cancelRequested) return true;
       if (data.versionId) {
-        const versionState = await this.prisma.appDocumentVersion.findFirst({ where: { id: data.versionId, tenantId: data.tenantId }, select: { cancelRequested: true } });
+        const versionState = await this.prisma.appDocumentVersion.findFirst({
+          where: { id: data.versionId, tenantId: data.tenantId },
+          select: { cancelRequested: true },
+        });
         return !versionState || versionState.cancelRequested;
       }
       return false;
     };
     const markCancelled = async () => {
-      const state = await this.prisma.appDocument.findFirst({ where: { id: data.documentId, tenantId: data.tenantId }, select: { deleteRequested: true } });
-      await this.prisma.documentProgressEvent.updateMany({ where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, status: 'running' }, data: { status: 'cancelled', finishedAt: new Date() } });
+      const state = await this.prisma.appDocument.findFirst({
+        where: { id: data.documentId, tenantId: data.tenantId },
+        select: { deleteRequested: true },
+      });
+      await this.prisma.documentProgressEvent.updateMany({
+        where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, status: 'running' },
+        data: { status: 'cancelled', finishedAt: new Date() },
+      });
       if (data.versionId) {
-        const versionState = await this.prisma.appDocumentVersion.findFirst({ where: { id: data.versionId, tenantId: data.tenantId }, select: { indexGeneration: true } });
-        await this.prisma.appDocumentVersion.updateMany({ where: { id: data.versionId, tenantId: data.tenantId, jobId: job.id }, data: { status: 'cancelled', publishRequested: false } });
-        if (versionState) await this.typegraph.deleteDocumentScope(data.documentId, data.versionId, data.tenantId, data.userId, versionState.indexGeneration).catch(() => undefined);
-        await this.prisma.appDocument.updateMany({ where: { id: data.documentId, tenantId: data.tenantId, activeVersionId: null, jobId: job.id }, data: { status: 'cancelled', stage: 'cancelled', progress: null, completedAt: new Date(), storageKey: null } });
-      }
-      else {
-        await this.prisma.appDocument.updateMany({ where: { id: data.documentId, tenantId: data.tenantId }, data: { status: 'cancelled', stage: 'cancelled', progress: null, completedAt: new Date(), storageKey: null } });
-        await this.prisma.appDocumentCell.deleteMany({ where: { documentId: data.documentId, tenantId: data.tenantId } });
+        const versionState = await this.prisma.appDocumentVersion.findFirst({
+          where: { id: data.versionId, tenantId: data.tenantId },
+          select: { indexGeneration: true },
+        });
+        await this.prisma.appDocumentVersion.updateMany({
+          where: { id: data.versionId, tenantId: data.tenantId, jobId: job.id },
+          data: { status: 'cancelled', publishRequested: false },
+        });
+        if (versionState)
+          await this.typegraph
+            .deleteDocumentScope(
+              data.documentId,
+              data.versionId,
+              data.tenantId,
+              data.userId,
+              versionState.indexGeneration,
+            )
+            .catch(() => undefined);
+        await this.prisma.appDocument.updateMany({
+          where: { id: data.documentId, tenantId: data.tenantId, activeVersionId: null, jobId: job.id },
+          data: {
+            status: 'cancelled',
+            stage: 'cancelled',
+            progress: null,
+            completedAt: new Date(),
+            storageKey: null,
+          },
+        });
+      } else {
+        await this.prisma.appDocument.updateMany({
+          where: { id: data.documentId, tenantId: data.tenantId },
+          data: {
+            status: 'cancelled',
+            stage: 'cancelled',
+            progress: null,
+            completedAt: new Date(),
+            storageKey: null,
+          },
+        });
+        await this.prisma.appDocumentCell.deleteMany({
+          where: { documentId: data.documentId, tenantId: data.tenantId },
+        });
       }
       if (!data.versionId) await this.storage.cleanup(data.storageKey);
       if (state?.deleteRequested) {
-        await this.typegraph.deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId).catch(() => undefined);
-        const versionFiles = await this.prisma.appDocumentVersion.findMany({ where: { documentId: data.documentId, tenantId: data.tenantId }, select: { storageKey: true } });
-        await Promise.all(versionFiles.map(file => this.storage.cleanup(file.storageKey).catch(() => undefined)));
+        await this.typegraph
+          .deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId)
+          .catch(() => undefined);
+        const versionFiles = await this.prisma.appDocumentVersion.findMany({
+          where: { documentId: data.documentId, tenantId: data.tenantId },
+          select: { storageKey: true },
+        });
+        await Promise.all(
+          versionFiles.map((file) => this.storage.cleanup(file.storageKey).catch(() => undefined)),
+        );
         await this.prisma.appDocument.deleteMany({ where: { id: data.documentId, tenantId: data.tenantId } });
       }
     };
-    if (await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+    if (await cancelled()) {
+      await markCancelled();
+      return { status: 'cancelled' };
+    }
 
     await this.stage(job, 'verification', attempt);
     const path = this.storage.pathFor(data.storageKey);
     const buffer = await readFile(path);
-    if (buffer.length !== data.fileSize || createHash('sha256').update(buffer).digest('hex') !== data.checksum) throw new Error('UPLOAD_INTEGRITY_CHECK_FAILED');
+    if (
+      buffer.length !== data.fileSize ||
+      createHash('sha256').update(buffer).digest('hex') !== data.checksum
+    )
+      throw new Error('UPLOAD_INTEGRITY_CHECK_FAILED');
     await this.finishStage(job, 'verification', attempt);
-    if (await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+    if (await cancelled()) {
+      await markCancelled();
+      return { status: 'cancelled' };
+    }
 
     await this.stage(job, 'parsing', attempt);
     let activeParseStage: string | undefined = 'parsing';
@@ -125,10 +225,24 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
           activeParseStage = event.stage;
         }
         await this.prisma.documentProgressEvent.updateMany({
-          where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, stage: event.stage, status: 'running' },
+          where: {
+            documentId: data.documentId,
+            tenantId: data.tenantId,
+            jobId: job.id!,
+            attempt,
+            stage: event.stage,
+            status: 'running',
+          },
           data: { completedUnits: event.completedUnits, totalUnits: event.totalUnits, unit: event.unit },
         });
-        await job.updateProgress({ stage: event.stage, attempt, completedUnits: event.completedUnits, totalUnits: event.totalUnits, unit: event.unit, etaMs: null });
+        await job.updateProgress({
+          stage: event.stage,
+          attempt,
+          completedUnits: event.completedUnits,
+          totalUnits: event.totalUnits,
+          unit: event.unit,
+          etaMs: null,
+        });
       } else {
         await this.finishStage(job, event.stage, attempt, event.completedUnits, event.totalUnits, event.unit);
         if (activeParseStage === event.stage) activeParseStage = undefined;
@@ -137,28 +251,86 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     const parseAbort = new AbortController();
     let parseCancelled = false;
     const parseCancellationPoll = setInterval(() => {
-      void cancelled().then(requested => {
-        if (requested) { parseCancelled = true; parseAbort.abort(new Error('DOCUMENT_JOB_CANCELLED')); }
-      }).catch(error => this.logger.warn(`Parse cancellation poll failed for job ${job.id}: ${String(error)}`));
+      void cancelled()
+        .then((requested) => {
+          if (requested) {
+            parseCancelled = true;
+            parseAbort.abort(new Error('DOCUMENT_JOB_CANCELLED'));
+          }
+        })
+        .catch((error) =>
+          this.logger.warn(`Parse cancellation poll failed for job ${job.id}: ${String(error)}`),
+        );
     }, 250);
     let parsed;
-    try { parsed = await runWithUsageContext({tenantId:data.tenantId,userId:data.userId,logicalRequestId:data.documentId,runtime:{provider:'ollama',model:process.env.OLLAMA_VISION_MODEL||config.model,ollamaThink:false},prisma:this.prisma},()=>parseDocument(data.filename, buffer, parseAbort.signal, parseProgress)); }
-    catch (error) {
-      if (parseCancelled || await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+    try {
+      parsed = await runWithUsageContext(
+        {
+          tenantId: data.tenantId,
+          userId: data.userId,
+          logicalRequestId: data.documentId,
+          runtime: {
+            provider: 'ollama',
+            model: process.env.OLLAMA_VISION_MODEL || config.model,
+            ollamaThink: false,
+          },
+          prisma: this.prisma,
+        },
+        () => parseDocument(data.filename, buffer, parseAbort.signal, parseProgress),
+      );
+    } catch (error) {
+      if (parseCancelled || (await cancelled())) {
+        await markCancelled();
+        return { status: 'cancelled' };
+      }
       throw error;
-    } finally { clearInterval(parseCancellationPoll); }
+    } finally {
+      clearInterval(parseCancellationPoll);
+    }
     if (activeParseStage) await this.finishStage(job, activeParseStage, attempt);
     const parsedRows = parsed.structuredCells?.length
-      ? new Set(parsed.structuredCells.map(cell => `${cell.sheetName}:${cell.rowNumber}`)).size
+      ? new Set(parsed.structuredCells.map((cell) => `${cell.sheetName}:${cell.rowNumber}`)).size
       : undefined;
-    await this.finishStage(job, 'parsing', attempt, parsedRows, parsedRows, parsedRows === undefined ? undefined : 'rows');
-    if (await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+    await this.finishStage(
+      job,
+      'parsing',
+      attempt,
+      parsedRows,
+      parsedRows,
+      parsedRows === undefined ? undefined : 'rows',
+    );
+    if (await cancelled()) {
+      await markCancelled();
+      return { status: 'cancelled' };
+    }
 
     await this.stage(job, 'smart_chunking', attempt);
-    const chunks = smartChunk(parsed.text, parsed.extension, { documentId: data.documentId, originalFilename: data.filename, ...(data.versionId ? { documentVersionId: data.versionId } : {}) }, parsed.structuredCells);
+    const chunks = smartChunk(
+      parsed.text,
+      parsed.extension,
+      {
+        documentId: data.documentId,
+        originalFilename: data.filename,
+        ...(data.versionId ? { documentVersionId: data.versionId } : {}),
+      },
+      parsed.structuredCells,
+    );
     await this.finishStage(job, 'smart_chunking', attempt, chunks.length, chunks.length, 'chunks');
-    if (data.versionId) await this.prisma.appDocumentVersion.updateMany({ where: { id: data.versionId, tenantId: data.tenantId, jobId: job.id }, data: { indexedChunkCount: chunks.length, chunkingStrategy: 'structure-aware', chunkerVersion: CHUNKER_VERSION, embeddingModel: `ollama/${config.embedModel}`, embeddingDimensions: config.embedDimensions } });
-    if (await cancelled()) { await markCancelled(); return { status: 'cancelled' }; }
+    if (data.versionId)
+      await this.prisma.appDocumentVersion.updateMany({
+        where: { id: data.versionId, tenantId: data.tenantId, jobId: job.id },
+        data: {
+          indexedChunkCount: chunks.length,
+          chunkingStrategy: 'structure-aware',
+          chunkerVersion: CHUNKER_VERSION,
+          embeddingModel: `ollama/${config.embedModel}`,
+          embeddingDimensions: config.embedDimensions,
+        },
+      });
+    if (await cancelled()) {
+      await markCancelled();
+      return { status: 'cancelled' };
+    }
 
     await this.stage(job, 'indexing', attempt);
     let progressStage: string | undefined;
@@ -166,9 +338,14 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     let progressTotal: number | undefined;
     let lastProgressWriteAt = 0;
     let progressWrite = Promise.resolve();
-    const phaseStage = (phase: string) => ({
-      fetch: 'preparing', hash_check: 'checking', embed: 'embedding', store: 'persisting', prune: 'pruning',
-    }[phase] || 'indexing');
+    const phaseStage = (phase: string) =>
+      ({
+        fetch: 'preparing',
+        hash_check: 'checking',
+        embed: 'embedding',
+        store: 'persisting',
+        prune: 'pruning',
+      })[phase] || 'indexing';
     const reportIndexProgress = (event: TypegraphIngestProgress) => {
       const nextStage = phaseStage(event.phase);
       const now = Date.now();
@@ -176,7 +353,13 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
       const done = Number.isFinite(event.done) && event.done >= 0 ? event.done : 0;
       const threshold = total && total > 0 ? Math.max(1, Math.ceil(total * 0.05)) : 1;
       const phaseChanged = progressStage !== nextStage;
-      if (!phaseChanged && done < (progressDone + threshold) && done !== total && now - lastProgressWriteAt < 2000) return;
+      if (
+        !phaseChanged &&
+        done < progressDone + threshold &&
+        done !== total &&
+        now - lastProgressWriteAt < 2000
+      )
+        return;
       progressStage = nextStage;
       progressDone = done;
       progressTotal = total;
@@ -184,52 +367,115 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
       const unit = event.phase === 'embed' || event.phase === 'store' ? 'chunks' : 'documents';
       // TypeGraph invokes this callback at real SDK phase boundaries. Coalesce
       // frequent callbacks to a 5% or 2s persistence cadence on CPU-only hosts.
-      progressWrite = progressWrite.then(async () => {
-        const timestamp = new Date();
-        if (phaseChanged) {
-          await this.prisma.$transaction([
-            this.prisma.documentProgressEvent.updateMany({
-              where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, status: 'running' },
-              data: { status: 'completed', finishedAt: timestamp },
-            }),
-            this.prisma.appDocument.updateMany({
-              where: { id: data.documentId, tenantId: data.tenantId, ...(data.versionId ? { activeVersionId: null, jobId: job.id } : {}) },
-              data: { status: 'processing', stage: nextStage, progress: null },
-            }),
-            this.prisma.documentProgressEvent.create({ data: {
-              documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt,
-              stage: nextStage, status: 'running', startedAt: timestamp,
-              completedUnits: done, totalUnits: total ?? null, unit,
-            } }),
-          ]);
-        } else {
-          await this.prisma.documentProgressEvent.updateMany({
-            where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, stage: nextStage, status: 'running' },
-            data: { completedUnits: done, totalUnits: total ?? null, unit },
+      progressWrite = progressWrite
+        .then(async () => {
+          const timestamp = new Date();
+          if (phaseChanged) {
+            await this.prisma.$transaction([
+              this.prisma.documentProgressEvent.updateMany({
+                where: {
+                  documentId: data.documentId,
+                  tenantId: data.tenantId,
+                  jobId: job.id!,
+                  attempt,
+                  status: 'running',
+                },
+                data: { status: 'completed', finishedAt: timestamp },
+              }),
+              this.prisma.appDocument.updateMany({
+                where: {
+                  id: data.documentId,
+                  tenantId: data.tenantId,
+                  ...(data.versionId ? { activeVersionId: null, jobId: job.id } : {}),
+                },
+                data: { status: 'processing', stage: nextStage, progress: null },
+              }),
+              this.prisma.documentProgressEvent.create({
+                data: {
+                  documentId: data.documentId,
+                  tenantId: data.tenantId,
+                  jobId: job.id!,
+                  attempt,
+                  stage: nextStage,
+                  status: 'running',
+                  startedAt: timestamp,
+                  completedUnits: done,
+                  totalUnits: total ?? null,
+                  unit,
+                },
+              }),
+            ]);
+          } else {
+            await this.prisma.documentProgressEvent.updateMany({
+              where: {
+                documentId: data.documentId,
+                tenantId: data.tenantId,
+                jobId: job.id!,
+                attempt,
+                stage: nextStage,
+                status: 'running',
+              },
+              data: { completedUnits: done, totalUnits: total ?? null, unit },
+            });
+          }
+          await job.updateProgress({
+            stage: nextStage,
+            phase: event.phase,
+            attempt,
+            completedUnits: done,
+            totalUnits: total ?? null,
+            unit,
+            etaMs: null,
           });
-        }
-        await job.updateProgress({ stage: nextStage, phase: event.phase, attempt, completedUnits: done, totalUnits: total ?? null, unit, etaMs: null });
-      }).catch(error => { this.logger.warn(`Could not persist TypeGraph progress for job ${job.id}: ${String(error)}`); });
+        })
+        .catch((error) => {
+          this.logger.warn(`Could not persist TypeGraph progress for job ${job.id}: ${String(error)}`);
+        });
     };
     const ingestAbort = new AbortController();
     let cancelling = false;
     const cancellationPoll = setInterval(() => {
-      void cancelled().then(requested => {
-        if (requested) {
-          cancelling = true;
-          ingestAbort.abort(new Error('DOCUMENT_JOB_CANCELLED'));
-        }
-      }).catch(error => this.logger.warn(`Cancellation poll failed for job ${job.id}: ${String(error)}`));
+      void cancelled()
+        .then((requested) => {
+          if (requested) {
+            cancelling = true;
+            ingestAbort.abort(new Error('DOCUMENT_JOB_CANCELLED'));
+          }
+        })
+        .catch((error) => this.logger.warn(`Cancellation poll failed for job ${job.id}: ${String(error)}`));
     }, 100);
     let indexed;
     try {
-      indexed = await this.typegraph.ingestDocument({
-        id: data.documentId, name: data.filename, content: parsed.text,
-        metadata: { documentId: data.documentId, ...(data.versionId ? { documentVersionId: data.versionId, indexGeneration: version?.indexGeneration ?? 1 } : {}), tenantId: data.tenantId, fileType: parsed.extension, originalFilename: data.filename, checksum: data.checksum, chunkerVersion: CHUNKER_VERSION },
-      }, ingestAbort.signal, data.tenantId, data.userId, config.typegraphGraphExtraction, reportIndexProgress, chunks);
+      indexed = await this.typegraph.ingestDocument(
+        {
+          id: data.documentId,
+          name: data.filename,
+          content: parsed.text,
+          metadata: {
+            documentId: data.documentId,
+            ...(data.versionId
+              ? { documentVersionId: data.versionId, indexGeneration: version?.indexGeneration ?? 1 }
+              : {}),
+            tenantId: data.tenantId,
+            fileType: parsed.extension,
+            originalFilename: data.filename,
+            checksum: data.checksum,
+            chunkerVersion: CHUNKER_VERSION,
+          },
+        },
+        ingestAbort.signal,
+        data.tenantId,
+        data.userId,
+        config.typegraphGraphExtraction,
+        reportIndexProgress,
+        chunks,
+      );
     } catch (error) {
-      if (!cancelling && !await cancelled()) throw error;
-      if (!data.versionId) await this.typegraph.deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId).catch(() => undefined);
+      if (!cancelling && !(await cancelled())) throw error;
+      if (!data.versionId)
+        await this.typegraph
+          .deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId)
+          .catch(() => undefined);
       await markCancelled();
       return { status: 'cancelled' };
     } finally {
@@ -238,23 +484,48 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     await progressWrite;
     if (indexed.result.failedAt || indexed.result.status !== 'complete') {
       const failed = indexed.result.failedAt;
-      const failure = new Error(failed ? `TYPEGRAPH_INDEX_FAILED_${failed.phase}` : 'TYPEGRAPH_INDEX_INCOMPLETE');
+      const failure = new Error(
+        failed ? `TYPEGRAPH_INDEX_FAILED_${failed.phase}` : 'TYPEGRAPH_INDEX_INCOMPLETE',
+      );
       Object.assign(failure, { retryable: true });
       throw failure;
     }
     if (indexed.timing.embeddingMs > 0) {
       await this.prisma.documentProgressEvent.updateMany({
-        where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, stage: 'embedding' },
+        where: {
+          documentId: data.documentId,
+          tenantId: data.tenantId,
+          jobId: job.id!,
+          attempt,
+          stage: 'embedding',
+        },
         data: { embeddingDurationMs: indexed.timing.embeddingMs },
       });
     }
     if (progressStage) {
-      await this.finishStage(job, progressStage, attempt, progressDone, progressTotal, progressStage === 'embedding' || progressStage === 'persisting' ? 'chunks' : 'documents', progressStage === 'embedding' ? indexed.timing.embeddingMs : undefined);
+      await this.finishStage(
+        job,
+        progressStage,
+        attempt,
+        progressDone,
+        progressTotal,
+        progressStage === 'embedding' || progressStage === 'persisting' ? 'chunks' : 'documents',
+        progressStage === 'embedding' ? indexed.timing.embeddingMs : undefined,
+      );
     } else {
-      await this.finishStage(job, 'indexing', attempt, indexed.result.total, indexed.result.total, 'chunks', indexed.timing.embeddingMs);
+      await this.finishStage(
+        job,
+        'indexing',
+        attempt,
+        indexed.result.total,
+        indexed.result.total,
+        'chunks',
+        indexed.timing.embeddingMs,
+      );
     }
     if (await cancelled()) {
-      if (!data.versionId) await this.typegraph.deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId);
+      if (!data.versionId)
+        await this.typegraph.deleteDocumentScope(data.documentId, undefined, data.tenantId, data.userId);
       await markCancelled();
       return { status: 'cancelled' };
     }
@@ -262,51 +533,146 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     const committedAt = new Date();
     let previousActiveVersionId: string | null = null;
     let didPublishVersion = false;
-    const completedCount = await this.prisma.$transaction(async tx => {
-      let completedCount: number;
-      if (data.versionId) {
-        const parent = await tx.appDocument.findFirst({ where: { id: data.documentId, tenantId: data.tenantId }, select: { activeVersionId: true } });
-        previousActiveVersionId = parent?.activeVersionId ?? null;
-        const publishRequested = Boolean(version?.publishRequested);
-        const publishedVersion = await tx.appDocumentVersion.updateMany({ where: { id: data.versionId, documentId: data.documentId, tenantId: data.tenantId, jobId: job.id, cancelRequested: false }, data: { status: 'ready', activeIndexGeneration: version?.indexGeneration ?? 1, publishRequested: false } });
-        completedCount = publishedVersion.count;
-        const newest = await tx.appDocumentVersion.findFirst({ where: { documentId: data.documentId, tenantId: data.tenantId }, orderBy: { versionNumber: 'desc' }, select: { id: true } });
-        const publish = newest?.id === data.versionId || publishRequested;
-        if (completedCount && publish) {
-          didPublishVersion = true;
-          const active = await tx.appDocument.updateMany({ where: { id: data.documentId, tenantId: data.tenantId, cancelRequested: false }, data: { activeVersionId: data.versionId, filename: version!.filename, fileType: version!.filename.split('.').at(-1) || 'unknown', fileSize: version!.fileSize, status: 'ready', stage: 'completed', progress: 100, completedAt: committedAt, errorCode: null, failureCode: null, storageKey: null } });
-          if (!active.count) completedCount = 0;
-          if (parsed.structuredCells?.length && active.count) {
-            await tx.appDocumentCell.createMany({ data: parsed.structuredCells.map(cell => ({ ...cell, documentId: data.documentId, tenantId: data.tenantId, versionId: data.versionId })), skipDuplicates: true });
+    const completedCount = await this.prisma.$transaction(
+      async (tx) => {
+        let completedCount: number;
+        if (data.versionId) {
+          const parent = await tx.appDocument.findFirst({
+            where: { id: data.documentId, tenantId: data.tenantId },
+            select: { activeVersionId: true },
+          });
+          previousActiveVersionId = parent?.activeVersionId ?? null;
+          const publishRequested = Boolean(version?.publishRequested);
+          const publishedVersion = await tx.appDocumentVersion.updateMany({
+            where: {
+              id: data.versionId,
+              documentId: data.documentId,
+              tenantId: data.tenantId,
+              jobId: job.id,
+              cancelRequested: false,
+            },
+            data: {
+              status: 'ready',
+              activeIndexGeneration: version?.indexGeneration ?? 1,
+              publishRequested: false,
+            },
+          });
+          completedCount = publishedVersion.count;
+          const newest = await tx.appDocumentVersion.findFirst({
+            where: { documentId: data.documentId, tenantId: data.tenantId },
+            orderBy: { versionNumber: 'desc' },
+            select: { id: true },
+          });
+          const publish = newest?.id === data.versionId || publishRequested;
+          if (completedCount && publish) {
+            didPublishVersion = true;
+            const active = await tx.appDocument.updateMany({
+              where: { id: data.documentId, tenantId: data.tenantId, cancelRequested: false },
+              data: {
+                activeVersionId: data.versionId,
+                filename: version!.filename,
+                fileType: version!.filename.split('.').at(-1) || 'unknown',
+                fileSize: version!.fileSize,
+                status: 'ready',
+                stage: 'completed',
+                progress: 100,
+                completedAt: committedAt,
+                errorCode: null,
+                failureCode: null,
+                storageKey: null,
+              },
+            });
+            if (!active.count) completedCount = 0;
+            if (parsed.structuredCells?.length && active.count) {
+              await tx.appDocumentCell.createMany({
+                data: parsed.structuredCells.map((cell) => ({
+                  ...cell,
+                  documentId: data.documentId,
+                  tenantId: data.tenantId,
+                  versionId: data.versionId,
+                })),
+                skipDuplicates: true,
+              });
+            }
+          }
+        } else {
+          const completed = await tx.appDocument.updateMany({
+            where: { id: data.documentId, tenantId: data.tenantId, cancelRequested: false },
+            data: {
+              status: 'ready',
+              stage: 'completed',
+              progress: 100,
+              completedAt: committedAt,
+              errorCode: null,
+              failureCode: null,
+              storageKey: null,
+            },
+          });
+          completedCount = completed.count;
+          if (completed.count && parsed.structuredCells?.length) {
+            await tx.appDocumentCell.deleteMany({
+              where: { documentId: data.documentId, tenantId: data.tenantId },
+            });
+            await tx.appDocumentCell.createMany({
+              data: parsed.structuredCells.map((cell) => ({
+                ...cell,
+                documentId: data.documentId,
+                tenantId: data.tenantId,
+              })),
+              skipDuplicates: true,
+            });
           }
         }
-      } else {
-        const completed = await tx.appDocument.updateMany({ where: { id: data.documentId, tenantId: data.tenantId, cancelRequested: false }, data: { status: 'ready', stage: 'completed', progress: 100, completedAt: committedAt, errorCode: null, failureCode: null, storageKey: null } });
-        completedCount = completed.count;
-        if (completed.count && parsed.structuredCells?.length) {
-          await tx.appDocumentCell.deleteMany({ where: { documentId: data.documentId, tenantId: data.tenantId } });
-          await tx.appDocumentCell.createMany({ data: parsed.structuredCells.map(cell => ({ ...cell, documentId: data.documentId, tenantId: data.tenantId })), skipDuplicates: true });
+        if (completedCount) {
+          await tx.documentProgressEvent.updateMany({
+            where: {
+              documentId: data.documentId,
+              tenantId: data.tenantId,
+              jobId: job.id!,
+              attempt,
+              stage: 'publication',
+              status: 'running',
+            },
+            data: { status: 'completed', finishedAt: committedAt },
+          });
+          await tx.documentProgressEvent.create({
+            data: {
+              documentId: data.documentId,
+              tenantId: data.tenantId,
+              jobId: job.id!,
+              attempt,
+              stage: 'completed',
+              status: 'completed',
+              startedAt: committedAt,
+              finishedAt: committedAt,
+            },
+          });
         }
-      }
-      if (completedCount) {
-        await tx.documentProgressEvent.updateMany({
-          where: { documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt, stage: 'publication', status: 'running' },
-          data: { status: 'completed', finishedAt: committedAt },
-        });
-        await tx.documentProgressEvent.create({ data: {
-          documentId: data.documentId, tenantId: data.tenantId, jobId: job.id!, attempt,
-          stage: 'completed', status: 'completed', startedAt: committedAt, finishedAt: committedAt,
-        } });
-      }
-      return completedCount;
-    }, { isolationLevel: 'Serializable' });
-    if (completedCount && didPublishVersion && data.versionId && previousActiveVersionId && previousActiveVersionId !== data.versionId) {
-      const previous = await this.prisma.appDocumentVersion.findFirst({ where: { id: previousActiveVersionId, tenantId: data.tenantId }, select: { chunkingStrategy: true, storageKey: true } });
+        return completedCount;
+      },
+      { isolationLevel: 'Serializable' },
+    );
+    if (
+      completedCount &&
+      didPublishVersion &&
+      data.versionId &&
+      previousActiveVersionId &&
+      previousActiveVersionId !== data.versionId
+    ) {
+      const previous = await this.prisma.appDocumentVersion.findFirst({
+        where: { id: previousActiveVersionId, tenantId: data.tenantId },
+        select: { chunkingStrategy: true, storageKey: true },
+      });
       if (previous?.chunkingStrategy !== 'legacy' || previous.storageKey) {
-        const prune = previous?.chunkingStrategy === 'legacy'
-          ? this.typegraph.deleteLegacyDocumentScope(data.documentId, data.tenantId)
-          : this.typegraph.deleteDocumentScope(data.documentId, previousActiveVersionId, data.tenantId);
-        await prune.catch(error => this.logger.warn(`Could not prune superseded vectors for document ${data.documentId}: ${String(error)}`));
+        const prune =
+          previous?.chunkingStrategy === 'legacy'
+            ? this.typegraph.deleteLegacyDocumentScope(data.documentId, data.tenantId)
+            : this.typegraph.deleteDocumentScope(data.documentId, previousActiveVersionId, data.tenantId);
+        await prune.catch((error) =>
+          this.logger.warn(
+            `Could not prune superseded vectors for document ${data.documentId}: ${String(error)}`,
+          ),
+        );
       }
     }
     if (completedCount === 0) {
@@ -322,30 +688,76 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     await this.prisma.$transaction([
       this.prisma.documentProgressEvent.updateMany({
-        where: { documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, finishedAt: null },
+        where: {
+          documentId: job.data.documentId,
+          tenantId: job.data.tenantId,
+          jobId: job.id!,
+          finishedAt: null,
+        },
         data: { status: 'completed', finishedAt: now },
       }),
       this.prisma.appDocument.updateMany({
-        where: { id: job.data.documentId, tenantId: job.data.tenantId, ...(job.data.versionId ? { activeVersionId: null, jobId: job.id } : {}) },
+        where: {
+          id: job.data.documentId,
+          tenantId: job.data.tenantId,
+          ...(job.data.versionId ? { activeVersionId: null, jobId: job.id } : {}),
+        },
         data: { status: 'processing', stage, progress: null, retryCount: Math.max(0, attempt - 1) },
       }),
-      ...(job.data.versionId ? [this.prisma.appDocumentVersion.updateMany({ where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id }, data: { status: 'processing' } })] : []),
-      this.prisma.documentProgressEvent.create({ data: {
-        documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, attempt,
-        stage, status: 'running', startedAt: now,
-      } }),
+      ...(job.data.versionId
+        ? [
+            this.prisma.appDocumentVersion.updateMany({
+              where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id },
+              data: { status: 'processing' },
+            }),
+          ]
+        : []),
+      this.prisma.documentProgressEvent.create({
+        data: {
+          documentId: job.data.documentId,
+          tenantId: job.data.tenantId,
+          jobId: job.id!,
+          attempt,
+          stage,
+          status: 'running',
+          startedAt: now,
+        },
+      }),
     ]);
     // The queue copy is useful for operator inspection; Prisma remains the
     // API's durable source for progress and replayable transitions.
-    await job.updateProgress({ stage, attempt, percent: null, completedUnits: null, totalUnits: null, etaMs: null });
+    await job.updateProgress({
+      stage,
+      attempt,
+      percent: null,
+      completedUnits: null,
+      totalUnits: null,
+      etaMs: null,
+    });
   }
 
-  private async finishStage(job: Job<ProcessDocumentJob>, stage: string, attempt: number, completedUnits?: number, totalUnits?: number, unit?: string, embeddingDurationMs?: number) {
+  private async finishStage(
+    job: Job<ProcessDocumentJob>,
+    stage: string,
+    attempt: number,
+    completedUnits?: number,
+    totalUnits?: number,
+    unit?: string,
+    embeddingDurationMs?: number,
+  ) {
     const now = new Date();
     await this.prisma.documentProgressEvent.updateMany({
-      where: { documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, attempt, stage, status: 'running' },
+      where: {
+        documentId: job.data.documentId,
+        tenantId: job.data.tenantId,
+        jobId: job.id!,
+        attempt,
+        stage,
+        status: 'running',
+      },
       data: {
-        status: 'completed', finishedAt: now,
+        status: 'completed',
+        finishedAt: now,
         ...(completedUnits !== undefined ? { completedUnits } : {}),
         ...(totalUnits !== undefined ? { totalUnits } : {}),
         ...(unit ? { unit } : {}),
@@ -358,44 +770,171 @@ export class DocumentProcessorService implements OnModuleInit, OnModuleDestroy {
     const attempts = job.opts.attempts || 1;
     const terminal = error instanceof UnrecoverableError || job.attemptsMade >= attempts;
     const code = safeFailureCode(error);
-    const current = await this.prisma.appDocument.findFirst({ where: { id: job.data.documentId, tenantId: job.data.tenantId }, select: { cancelRequested: true, deleteRequested: true } }).catch(() => null);
+    const current = await this.prisma.appDocument
+      .findFirst({
+        where: { id: job.data.documentId, tenantId: job.data.tenantId },
+        select: { cancelRequested: true, deleteRequested: true },
+      })
+      .catch(() => null);
     if (current?.cancelRequested) {
-      await this.prisma.documentProgressEvent.updateMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, status: 'running' }, data: { status: 'cancelled', finishedAt: new Date() } }).catch(() => undefined);
+      await this.prisma.documentProgressEvent
+        .updateMany({
+          where: {
+            documentId: job.data.documentId,
+            tenantId: job.data.tenantId,
+            jobId: job.id!,
+            status: 'running',
+          },
+          data: { status: 'cancelled', finishedAt: new Date() },
+        })
+        .catch(() => undefined);
       if (job.data.versionId) {
-        const version = await this.prisma.appDocumentVersion.findFirst({ where: { id: job.data.versionId, tenantId: job.data.tenantId }, select: { indexGeneration: true } }).catch(() => null);
-        await this.prisma.appDocumentVersion.updateMany({ where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id }, data: { status: 'cancelled', publishRequested: false } }).catch(() => undefined);
-        if (version) await this.typegraph.deleteDocumentScope(job.data.documentId, job.data.versionId, job.data.tenantId, job.data.userId, version.indexGeneration).catch(() => undefined);
-        await this.prisma.appDocument.updateMany({ where: { id: job.data.documentId, tenantId: job.data.tenantId, activeVersionId: null, jobId: job.id }, data: { status: 'cancelled', stage: 'cancelled', progress: null, completedAt: new Date(), storageKey: null } }).catch(() => undefined);
+        const version = await this.prisma.appDocumentVersion
+          .findFirst({
+            where: { id: job.data.versionId, tenantId: job.data.tenantId },
+            select: { indexGeneration: true },
+          })
+          .catch(() => null);
+        await this.prisma.appDocumentVersion
+          .updateMany({
+            where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id },
+            data: { status: 'cancelled', publishRequested: false },
+          })
+          .catch(() => undefined);
+        if (version)
+          await this.typegraph
+            .deleteDocumentScope(
+              job.data.documentId,
+              job.data.versionId,
+              job.data.tenantId,
+              job.data.userId,
+              version.indexGeneration,
+            )
+            .catch(() => undefined);
+        await this.prisma.appDocument
+          .updateMany({
+            where: {
+              id: job.data.documentId,
+              tenantId: job.data.tenantId,
+              activeVersionId: null,
+              jobId: job.id,
+            },
+            data: {
+              status: 'cancelled',
+              stage: 'cancelled',
+              progress: null,
+              completedAt: new Date(),
+              storageKey: null,
+            },
+          })
+          .catch(() => undefined);
       } else {
-        await this.typegraph.deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId).catch(() => undefined);
-        await this.prisma.appDocumentCell.deleteMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId } }).catch(() => undefined);
-        await this.prisma.appDocument.updateMany({ where: { id: job.data.documentId, tenantId: job.data.tenantId }, data: { status: 'cancelled', stage: 'cancelled', progress: null, completedAt: new Date(), storageKey: null } }).catch(() => undefined);
+        await this.typegraph
+          .deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId)
+          .catch(() => undefined);
+        await this.prisma.appDocumentCell
+          .deleteMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId } })
+          .catch(() => undefined);
+        await this.prisma.appDocument
+          .updateMany({
+            where: { id: job.data.documentId, tenantId: job.data.tenantId },
+            data: {
+              status: 'cancelled',
+              stage: 'cancelled',
+              progress: null,
+              completedAt: new Date(),
+              storageKey: null,
+            },
+          })
+          .catch(() => undefined);
         await this.storage.cleanup(job.data.storageKey).catch(() => undefined);
       }
       if (current.deleteRequested) {
-        await this.typegraph.deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId).catch(() => undefined);
-        const versionFiles = await this.prisma.appDocumentVersion.findMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId }, select: { storageKey: true } }).catch(() => []);
-        await Promise.all(versionFiles.map(file => this.storage.cleanup(file.storageKey).catch(() => undefined)));
-        await this.prisma.appDocument.deleteMany({ where: { id: job.data.documentId, tenantId: job.data.tenantId } }).catch(() => undefined);
+        await this.typegraph
+          .deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId)
+          .catch(() => undefined);
+        const versionFiles = await this.prisma.appDocumentVersion
+          .findMany({
+            where: { documentId: job.data.documentId, tenantId: job.data.tenantId },
+            select: { storageKey: true },
+          })
+          .catch(() => []);
+        await Promise.all(
+          versionFiles.map((file) => this.storage.cleanup(file.storageKey).catch(() => undefined)),
+        );
+        await this.prisma.appDocument
+          .deleteMany({ where: { id: job.data.documentId, tenantId: job.data.tenantId } })
+          .catch(() => undefined);
       }
       return;
     }
-    await this.prisma.documentProgressEvent.updateMany({
-      where: { documentId: job.data.documentId, tenantId: job.data.tenantId, jobId: job.id!, attempt: job.attemptsMade, status: 'running' },
-      data: { status: terminal ? 'failed' : 'retrying', finishedAt: new Date(), failureCode: code },
-    }).catch(() => undefined);
-    await this.prisma.appDocument.updateMany({ where: { id: job.data.documentId, tenantId: job.data.tenantId, ...(job.data.versionId ? { activeVersionId: null } : {}) }, data: {
-      retryCount: job.attemptsMade,
-      ...(terminal ? { status: 'failed', stage: 'failed', progress: null, failureCode: code, errorCode: code, completedAt: new Date(), storageKey: null } : { status: 'queued', stage: 'queued', progress: null, failureCode: code }),
-    } }).catch(dbError => this.logger.error(`Could not persist job failure state: ${String(dbError)}`));
-    if (job.data.versionId) await this.prisma.appDocumentVersion.updateMany({ where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id }, data: { status: terminal ? 'failed' : 'queued' } }).catch(() => undefined);
+    await this.prisma.documentProgressEvent
+      .updateMany({
+        where: {
+          documentId: job.data.documentId,
+          tenantId: job.data.tenantId,
+          jobId: job.id!,
+          attempt: job.attemptsMade,
+          status: 'running',
+        },
+        data: { status: terminal ? 'failed' : 'retrying', finishedAt: new Date(), failureCode: code },
+      })
+      .catch(() => undefined);
+    await this.prisma.appDocument
+      .updateMany({
+        where: {
+          id: job.data.documentId,
+          tenantId: job.data.tenantId,
+          ...(job.data.versionId ? { activeVersionId: null } : {}),
+        },
+        data: {
+          retryCount: job.attemptsMade,
+          ...(terminal
+            ? {
+                status: 'failed',
+                stage: 'failed',
+                progress: null,
+                failureCode: code,
+                errorCode: code,
+                completedAt: new Date(),
+                storageKey: null,
+              }
+            : { status: 'queued', stage: 'queued', progress: null, failureCode: code }),
+        },
+      })
+      .catch((dbError) => this.logger.error(`Could not persist job failure state: ${String(dbError)}`));
+    if (job.data.versionId)
+      await this.prisma.appDocumentVersion
+        .updateMany({
+          where: { id: job.data.versionId, tenantId: job.data.tenantId, jobId: job.id },
+          data: { status: terminal ? 'failed' : 'queued' },
+        })
+        .catch(() => undefined);
     if (terminal) {
       if (job.data.versionId) {
-        const version = await this.prisma.appDocumentVersion.findFirst({ where: { id: job.data.versionId, tenantId: job.data.tenantId }, select: { indexGeneration: true } }).catch(() => null);
-        if (version) await this.typegraph.deleteDocumentScope(job.data.documentId, job.data.versionId, job.data.tenantId, job.data.userId, version.indexGeneration).catch(() => undefined);
+        const version = await this.prisma.appDocumentVersion
+          .findFirst({
+            where: { id: job.data.versionId, tenantId: job.data.tenantId },
+            select: { indexGeneration: true },
+          })
+          .catch(() => null);
+        if (version)
+          await this.typegraph
+            .deleteDocumentScope(
+              job.data.documentId,
+              job.data.versionId,
+              job.data.tenantId,
+              job.data.userId,
+              version.indexGeneration,
+            )
+            .catch(() => undefined);
       } else {
-        await this.typegraph.deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId).catch(() => undefined);
-        await this.prisma.appDocumentCell.deleteMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId } }).catch(() => undefined);
+        await this.typegraph
+          .deleteDocumentScope(job.data.documentId, undefined, job.data.tenantId, job.data.userId)
+          .catch(() => undefined);
+        await this.prisma.appDocumentCell
+          .deleteMany({ where: { documentId: job.data.documentId, tenantId: job.data.tenantId } })
+          .catch(() => undefined);
         await this.storage.cleanup(job.data.storageKey).catch(() => undefined);
       }
     }

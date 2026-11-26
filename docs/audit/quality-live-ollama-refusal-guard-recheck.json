@@ -28,9 +28,7 @@
       "referenceIdentityValid": true,
       "arabicPresent": false,
       "latencyMs": 90009,
-      "queries": [
-        "What is the name of the insurance company for project Orion?"
-      ],
+      "queries": ["What is the name of the insurance company for project Orion?"],
       "firstTextMs": 58547,
       "deltaCount": 19,
       "provisionalText": "الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.",

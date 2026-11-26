@@ -4,12 +4,8 @@
     "category": "factual",
     "language": "en",
     "question": "What approval is required for Orion?",
-    "expectedFacts": [
-      "safety review"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md"
-    ],
+    "expectedFacts": ["safety review"],
+    "expectedSourceDocuments": ["requirements.md"],
     "history": [],
     "humanReviewRequired": false
   },
@@ -18,12 +14,8 @@
     "category": "factual",
     "language": "ar",
     "question": "ما الموافقة المطلوبة لمشروع Orion؟",
-    "expectedFacts": [
-      "safety review"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md"
-    ],
+    "expectedFacts": ["safety review"],
+    "expectedSourceDocuments": ["requirements.md"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -32,12 +24,8 @@
     "category": "factual",
     "language": "tr",
     "question": "Orion için hangi onay gerekiyor?",
-    "expectedFacts": [
-      "safety review"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md"
-    ],
+    "expectedFacts": ["safety review"],
+    "expectedSourceDocuments": ["requirements.md"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -46,12 +34,8 @@
     "category": "cost",
     "language": "en",
     "question": "What is the Orion base budget?",
-    "expectedFacts": [
-      "120000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt"
-    ],
+    "expectedFacts": ["120000"],
+    "expectedSourceDocuments": ["costs.txt"],
     "history": [],
     "humanReviewRequired": false
   },
@@ -60,12 +44,8 @@
     "category": "cost",
     "language": "ar",
     "question": "كم الميزانية الأساسية لمشروع Orion؟",
-    "expectedFacts": [
-      "120000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt"
-    ],
+    "expectedFacts": ["120000"],
+    "expectedSourceDocuments": ["costs.txt"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -74,12 +54,8 @@
     "category": "cost",
     "language": "tr",
     "question": "Orion temel bütçesi ne kadar?",
-    "expectedFacts": [
-      "120000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt"
-    ],
+    "expectedFacts": ["120000"],
+    "expectedSourceDocuments": ["costs.txt"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -88,12 +64,8 @@
     "category": "risk",
     "language": "en",
     "question": "What is the main Orion delivery risk?",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
     "history": [],
     "humanReviewRequired": false
   },
@@ -102,12 +74,8 @@
     "category": "risk",
     "language": "ar",
     "question": "ما خطر التسليم الرئيسي لمشروع Orion؟",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -116,12 +84,8 @@
     "category": "risk",
     "language": "tr",
     "question": "Orion teslimatının temel riski nedir?",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -130,12 +94,8 @@
     "category": "timeline",
     "language": "en",
     "question": "When is the Orion launch?",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": false
   },
@@ -144,12 +104,8 @@
     "category": "timeline",
     "language": "ar",
     "question": "متى إطلاق مشروع Orion؟",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -158,12 +114,8 @@
     "category": "timeline",
     "language": "tr",
     "question": "Orion ne zaman başlayacak?",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -172,18 +124,8 @@
     "category": "synthesis",
     "language": "en",
     "question": "Compare Orion requirements, costs, risks and timeline across documents.",
-    "expectedFacts": [
-      "safety review",
-      "120000",
-      "supplier delay",
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md",
-      "costs.txt",
-      "risks.pdf",
-      "timeline.docx"
-    ],
+    "expectedFacts": ["safety review", "120000", "supplier delay", "2027-03-15"],
+    "expectedSourceDocuments": ["requirements.md", "costs.txt", "risks.pdf", "timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -192,18 +134,8 @@
     "category": "synthesis",
     "language": "ar",
     "question": "قارن متطلبات وتكاليف ومخاطر وجدول Orion عبر الملفات.",
-    "expectedFacts": [
-      "safety review",
-      "120000",
-      "supplier delay",
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md",
-      "costs.txt",
-      "risks.pdf",
-      "timeline.docx"
-    ],
+    "expectedFacts": ["safety review", "120000", "supplier delay", "2027-03-15"],
+    "expectedSourceDocuments": ["requirements.md", "costs.txt", "risks.pdf", "timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -212,18 +144,8 @@
     "category": "synthesis",
     "language": "tr",
     "question": "Belgeler arasında Orion gereksinim, maliyet, risk ve takvimini karşılaştır.",
-    "expectedFacts": [
-      "safety review",
-      "120000",
-      "supplier delay",
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "requirements.md",
-      "costs.txt",
-      "risks.pdf",
-      "timeline.docx"
-    ],
+    "expectedFacts": ["safety review", "120000", "supplier delay", "2027-03-15"],
+    "expectedSourceDocuments": ["requirements.md", "costs.txt", "risks.pdf", "timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -232,15 +154,9 @@
     "category": "followup",
     "language": "en",
     "question": "What about its risks?",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
-    "history": [
-      "Tell me about the Orion project."
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
+    "history": ["Tell me about the Orion project."],
     "humanReviewRequired": true
   },
   {
@@ -248,15 +164,9 @@
     "category": "followup",
     "language": "ar",
     "question": "وماذا عن مخاطره؟",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
-    "history": [
-      "Tell me about the Orion project."
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
+    "history": ["Tell me about the Orion project."],
     "humanReviewRequired": true
   },
   {
@@ -264,15 +174,9 @@
     "category": "followup",
     "language": "tr",
     "question": "Peki onun riskleri?",
-    "expectedFacts": [
-      "supplier delay"
-    ],
-    "expectedSourceDocuments": [
-      "risks.pdf"
-    ],
-    "history": [
-      "Tell me about the Orion project."
-    ],
+    "expectedFacts": ["supplier delay"],
+    "expectedSourceDocuments": ["risks.pdf"],
+    "history": ["Tell me about the Orion project."],
     "humanReviewRequired": true
   },
   {
@@ -280,105 +184,66 @@
     "category": "excel_lookup",
     "language": "en",
     "question": "What is the warning for Form No 4 in Orion?",
-    "expectedFacts": [
-      "KKD"
-    ],
-    "expectedSourceDocuments": [
-      "violations.xlsx"
-    ],
+    "expectedFacts": ["KKD"],
+    "expectedSourceDocuments": ["violations.xlsx"],
     "history": [],
     "humanReviewRequired": false,
-    "expectedAnyTools": [
-      "structuredDataLookup",
-      "structuredRowLookup"
-    ]
+    "expectedAnyTools": ["structuredDataLookup", "structuredRowLookup"]
   },
   {
     "id": "excel_lookup-ar",
     "category": "excel_lookup",
     "language": "ar",
     "question": "ما إنذار النموذج رقم 4 في Orion؟",
-    "expectedFacts": [
-      "KKD"
-    ],
-    "expectedSourceDocuments": [
-      "violations.xlsx"
-    ],
+    "expectedFacts": ["KKD"],
+    "expectedSourceDocuments": ["violations.xlsx"],
     "history": [],
     "humanReviewRequired": true,
-    "expectedAnyTools": [
-      "structuredDataLookup",
-      "structuredRowLookup"
-    ]
+    "expectedAnyTools": ["structuredDataLookup", "structuredRowLookup"]
   },
   {
     "id": "excel_lookup-tr",
     "category": "excel_lookup",
     "language": "tr",
     "question": "Orion Form No 4 uyarısı nedir?",
-    "expectedFacts": [
-      "KKD"
-    ],
-    "expectedSourceDocuments": [
-      "violations.xlsx"
-    ],
+    "expectedFacts": ["KKD"],
+    "expectedSourceDocuments": ["violations.xlsx"],
     "history": [],
     "humanReviewRequired": true,
-    "expectedAnyTools": [
-      "structuredDataLookup",
-      "structuredRowLookup"
-    ]
+    "expectedAnyTools": ["structuredDataLookup", "structuredRowLookup"]
   },
   {
     "id": "aggregation-en",
     "category": "aggregation",
     "language": "en",
     "question": "What is the sum of Orion item costs?",
-    "expectedFacts": [
-      "300"
-    ],
-    "expectedSourceDocuments": [
-      "items.csv"
-    ],
+    "expectedFacts": ["300"],
+    "expectedSourceDocuments": ["items.csv"],
     "history": [],
     "humanReviewRequired": false,
-    "expectedAnyTools": [
-      "structuredDataAnalytics"
-    ]
+    "expectedAnyTools": ["structuredDataAnalytics"]
   },
   {
     "id": "aggregation-ar",
     "category": "aggregation",
     "language": "ar",
     "question": "كم مجموع تكاليف عناصر Orion؟",
-    "expectedFacts": [
-      "300"
-    ],
-    "expectedSourceDocuments": [
-      "items.csv"
-    ],
+    "expectedFacts": ["300"],
+    "expectedSourceDocuments": ["items.csv"],
     "history": [],
     "humanReviewRequired": true,
-    "expectedAnyTools": [
-      "structuredDataAnalytics"
-    ]
+    "expectedAnyTools": ["structuredDataAnalytics"]
   },
   {
     "id": "aggregation-tr",
     "category": "aggregation",
     "language": "tr",
     "question": "Orion kalem maliyetlerinin toplamı nedir?",
-    "expectedFacts": [
-      "300"
-    ],
-    "expectedSourceDocuments": [
-      "items.csv"
-    ],
+    "expectedFacts": ["300"],
+    "expectedSourceDocuments": ["items.csv"],
     "history": [],
     "humanReviewRequired": true,
-    "expectedAnyTools": [
-      "structuredDataAnalytics"
-    ]
+    "expectedAnyTools": ["structuredDataAnalytics"]
   },
   {
     "id": "missing-en",
@@ -415,14 +280,8 @@
     "category": "conflict",
     "language": "en",
     "question": "Explain the conflicting Orion budgets and cite both documents.",
-    "expectedFacts": [
-      "120000",
-      "150000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt",
-      "requirements.md"
-    ],
+    "expectedFacts": ["120000", "150000"],
+    "expectedSourceDocuments": ["costs.txt", "requirements.md"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -431,14 +290,8 @@
     "category": "conflict",
     "language": "ar",
     "question": "اشرح تعارض ميزانيتي Orion واستشهد بالملفين.",
-    "expectedFacts": [
-      "120000",
-      "150000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt",
-      "requirements.md"
-    ],
+    "expectedFacts": ["120000", "150000"],
+    "expectedSourceDocuments": ["costs.txt", "requirements.md"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -447,14 +300,8 @@
     "category": "conflict",
     "language": "tr",
     "question": "Çelişen Orion bütçelerini her iki belgeye atıfla açıkla.",
-    "expectedFacts": [
-      "120000",
-      "150000"
-    ],
-    "expectedSourceDocuments": [
-      "costs.txt",
-      "requirements.md"
-    ],
+    "expectedFacts": ["120000", "150000"],
+    "expectedSourceDocuments": ["costs.txt", "requirements.md"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -463,12 +310,8 @@
     "category": "citation",
     "language": "en",
     "question": "Give the Orion launch date with its exact source.",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": false
   },
@@ -477,12 +320,8 @@
     "category": "citation",
     "language": "ar",
     "question": "أعطني موعد إطلاق Orion مع مصدره الدقيق.",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   },
@@ -491,12 +330,8 @@
     "category": "citation",
     "language": "tr",
     "question": "Orion başlangıç tarihini tam kaynağıyla ver.",
-    "expectedFacts": [
-      "2027-03-15"
-    ],
-    "expectedSourceDocuments": [
-      "timeline.docx"
-    ],
+    "expectedFacts": ["2027-03-15"],
+    "expectedSourceDocuments": ["timeline.docx"],
     "history": [],
     "humanReviewRequired": true
   }

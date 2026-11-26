@@ -18,8 +18,15 @@ test('LangGraph settings migration renames shared model values and audit keys wi
         ('00000000-0000-4000-8000-000000000001', 'MASTRA_PROVIDER', 'google'),
         ('00000000-0000-4000-8000-000000000002', 'MASTRA_MODEL', 'gemini-test');
     `);
-    await db.exec(await readFile(new URL('../prisma/migrations/202611260001_langgraph_model_settings/migration.sql', import.meta.url), 'utf8'));
-    const settings = await db.query<{ key: string; value: string }>('SELECT key, value FROM runtime_settings ORDER BY key');
+    await db.exec(
+      await readFile(
+        new URL('../prisma/migrations/202611260001_langgraph_model_settings/migration.sql', import.meta.url),
+        'utf8',
+      ),
+    );
+    const settings = await db.query<{ key: string; value: string }>(
+      'SELECT key, value FROM runtime_settings ORDER BY key',
+    );
     assert.deepEqual(settings.rows, [
       { key: 'AGENT_MODEL', value: 'gemini-test' },
       { key: 'AGENT_PROVIDER', value: 'openai' },

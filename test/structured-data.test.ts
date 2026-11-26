@@ -9,11 +9,19 @@ test('exact-value recovery searches tenant-authorized rows across actual columns
     appDocumentCell: {
       findMany: async (args: any) => {
         queries.push(args);
-        if (args.include?.document) return [{
-          documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', versionId: '88000000-0000-4000-8000-000000000001', sheetName: 'CSV', rowNumber: 2,
-          address: '2:2', columnName: 'Reference Code', value: 'SP-CELL-931',
-          document: { id: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', filename: 'lookup.csv' },
-        }];
+        if (args.include?.document)
+          return [
+            {
+              documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969',
+              versionId: '88000000-0000-4000-8000-000000000001',
+              sheetName: 'CSV',
+              rowNumber: 2,
+              address: '2:2',
+              columnName: 'Reference Code',
+              value: 'SP-CELL-931',
+              document: { id: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', filename: 'lookup.csv' },
+            },
+          ];
         return [
           { address: '2:1', columnName: 'Plan', value: 'Enterprise', formula: null },
           { address: '2:2', columnName: 'Reference Code', value: 'SP-CELL-931', formula: null },
@@ -49,7 +57,15 @@ test('filtered CSV lookup includes its first stored row because CSV headers are 
     },
     $queryRaw: async (sql: any) => {
       query = sql;
-      return [{ documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', versionId: '88000000-0000-4000-8000-000000000001', filename: 'lookup.csv', sheetName: 'CSV', rowNumber: 2 }];
+      return [
+        {
+          documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969',
+          versionId: '88000000-0000-4000-8000-000000000001',
+          filename: 'lookup.csv',
+          sheetName: 'CSV',
+          rowNumber: 2,
+        },
+      ];
     },
   } as any;
   const result = await new StructuredDataService(prisma).lookupRows(
@@ -72,9 +88,30 @@ test('structured COUNT and SUM analytics scope data and provenance to active doc
     appDocumentCell: { findMany: async () => [{ columnName: 'Amount' }] },
     $queryRaw: async (query: any) => {
       queries.push(query);
-      if (/COUNT\(\*\).*AS count/s.test(query.sql)) return [{ documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', versionId: '88000000-0000-4000-8000-000000000001', filename: 'active.csv', sheetName: 'Sheet1', count: 1, firstRow: 2, lastRow: 2 }];
-      if (/AS "numericCount"/s.test(query.sql)) return [{ value: '2400', numericCount: 1, nonnumericCount: 0 }];
-      if (/AS "rowNumbers"/s.test(query.sql)) return [{ documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969', versionId: '88000000-0000-4000-8000-000000000001', filename: 'active.csv', sheetName: 'Sheet1', rowNumbers: [2] }];
+      if (/COUNT\(\*\).*AS count/s.test(query.sql))
+        return [
+          {
+            documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969',
+            versionId: '88000000-0000-4000-8000-000000000001',
+            filename: 'active.csv',
+            sheetName: 'Sheet1',
+            count: 1,
+            firstRow: 2,
+            lastRow: 2,
+          },
+        ];
+      if (/AS "numericCount"/s.test(query.sql))
+        return [{ value: '2400', numericCount: 1, nonnumericCount: 0 }];
+      if (/AS "rowNumbers"/s.test(query.sql))
+        return [
+          {
+            documentId: 'dd302dc5-f964-4ef7-844a-5a7c17ff1969',
+            versionId: '88000000-0000-4000-8000-000000000001',
+            filename: 'active.csv',
+            sheetName: 'Sheet1',
+            rowNumbers: [2],
+          },
+        ];
       return [];
     },
   };
@@ -83,6 +120,6 @@ test('structured COUNT and SUM analytics scope data and provenance to active doc
   const summed = await service.aggregate('SUM', 'Amount', 'tenant-a');
   assert.equal(counted.sources[0]?.documentVersionId, '88000000-0000-4000-8000-000000000001');
   assert.equal(summed.sources[0]?.documentVersionId, '88000000-0000-4000-8000-000000000001');
-  assert.ok(queries.every(query => /c\.version_id = d\.active_version_id/.test(query.sql)));
+  assert.ok(queries.every((query) => /c\.version_id = d\.active_version_id/.test(query.sql)));
   assert.match(queries[0].sql, /h\.version_id = c\.version_id/);
 });

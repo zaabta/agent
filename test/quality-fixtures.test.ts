@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import { qualityDocuments } from './fixtures/quality-documents.js';
 import { parseDocument } from '../src/documents/parser.js';
 
-test('six-format quality corpus parses the known project facts and structured cells', async t => {
-  if (!process.env.OLLAMA_VISION_MODEL?.trim()) return t.skip('Optional scanned-PDF OCR fixture requires OLLAMA_VISION_MODEL.');
+test('six-format quality corpus parses the known project facts and structured cells', async (t) => {
+  if (!process.env.OLLAMA_VISION_MODEL?.trim())
+    return t.skip('Optional scanned-PDF OCR fixture requires OLLAMA_VISION_MODEL.');
   const facts = ['safety review', '120000', 'supplier delay', '2027-03-15', 'Pump', 'KKD'];
   const docs = await qualityDocuments();
   for (const [i, document] of docs.entries()) {

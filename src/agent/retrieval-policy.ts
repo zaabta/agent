@@ -9,7 +9,11 @@ export interface FollowUpContext {
 }
 
 /** History is discourse context only; it must never become a source citation. */
-export function boundedConversationContext(history: ContextTurn[], maxMessages = 10, maxChars = 12000): ContextTurn[] {
+export function boundedConversationContext(
+  history: ContextTurn[],
+  maxMessages = 10,
+  maxChars = 12000,
+): ContextTurn[] {
   if (maxMessages <= 0 || maxChars <= 0) return [];
   const selected: ContextTurn[] = [];
   let remaining = maxChars;
@@ -24,7 +28,8 @@ export function boundedConversationContext(history: ContextTurn[], maxMessages =
 
 export function retrievalQueries(query: string, focused: string[] = []): string[] {
   const unique = new Map<string, string>();
-  for (const q of focused.map(q => q.trim()).filter(Boolean)) if (!unique.has(q.toLocaleLowerCase())) unique.set(q.toLocaleLowerCase(), q);
+  for (const q of focused.map((q) => q.trim()).filter(Boolean))
+    if (!unique.has(q.toLocaleLowerCase())) unique.set(q.toLocaleLowerCase(), q);
   const queries = [...unique.values()].slice(0, 4);
   return queries.length >= 2 ? queries : [query.trim()];
 }
@@ -33,7 +38,11 @@ export function retrievalQueries(query: string, focused: string[] = []): string[
  * Round-robin document selection prevents a long document consuming the evidence budget.
  * Only complete passages fit: exact source references and content remain unchanged.
  */
-export function mergeRetrievalEvidence(lists: DocumentSearchHit[][], maxHits = 8, maxChars = 18000): DocumentSearchHit[] {
+export function mergeRetrievalEvidence(
+  lists: DocumentSearchHit[][],
+  maxHits = 8,
+  maxChars = 18000,
+): DocumentSearchHit[] {
   const ranked = new Map<string, { hit: DocumentSearchHit; score: number }>();
   for (const hits of lists) {
     const seen = new Set<string>();
@@ -68,24 +77,46 @@ export function mergeRetrievalEvidence(lists: DocumentSearchHit[][], maxHits = 8
 
 /** Detect discourse continuity from recent history and bounded persistent context.
  * This signal only enables authorized retrieval; it never promotes context into evidence. */
-export function isEvidenceFollowUp(message: string, history: ContextTurn[], context: FollowUpContext = {}): boolean {
-  if (!message.trim() || !history.some(turn => turn.role === 'assistant')) return false;
+export function isEvidenceFollowUp(
+  message: string,
+  history: ContextTurn[],
+  context: FollowUpContext = {},
+): boolean {
+  if (!message.trim() || !history.some((turn) => turn.role === 'assistant')) return false;
   const text = normalizeForComparison(message);
-  const recent = history.slice(-8).map(turn => turn.content).join(' ');
-  const memory = [context.summary ?? '', ...(context.entities ?? []), ...(context.evidenceRefs ?? []).map(ref => ref.filename ?? '')].join(' ');
+  const recent = history
+    .slice(-8)
+    .map((turn) => turn.content)
+    .join(' ');
+  const memory = [
+    context.summary ?? '',
+    ...(context.entities ?? []),
+    ...(context.evidenceRefs ?? []).map((ref) => ref.filename ?? ''),
+  ].join(' ');
   const prior = normalizeForComparison(`${recent} ${memory}`);
 
   // Discourse connectives work across languages; context availability prevents
   // a short continuation-shaped first message from inheriting unrelated state.
-  if (/^(?:why|how so|and why|what do you mean)[?.!\s]*$/iu.test(text)
-    || /^(?:neden|nicin|nasil yani)[?.!\s]*$/iu.test(text.replace(/ı/g, 'i'))
-    || /^(?:\u0644\u0645\u0627\u0630\u0627|\u0643\u064a\u0641 \u0630\u0644\u0643)[\u061f?.!\s]*$/u.test(text)) return true;
-  const continuationCue = /\b(?:what about|and|also|compare|contrast|which one|why|how so|same|previous|above|more detail|in that case)\b/iu.test(text)
-    || /(?:bunlar|onlar|onceki|ikincisi|ikisini|peki|bunun|buna|ayni|orada|ayrica|karsilastir)/iu.test(text)
-    || /(?:\u0648\u0645\u0627\u0630\u0627|\u0645\u0627\u0630\u0627 \u0639\u0646|\u0648\u0628\u0627\u0644\u0646\u0633\u0628\u0629|\u0645\u0627 \u0631\u0623\u064a\u0643|\u0642\u0627\u0631\u0646|\u0628\u064a\u0646\u0647\u0645\u0627|\u0641\u064a\u0647\u0627|\u0641\u064a\u0647\u0645|\u0647\u0630\u0627|\u0647\u0630\u0647|\u0627\u0644\u0633\u0627\u0628\u0642|\u0623\u064a\u0636)/u.test(text);
-  const explicitReference = /\b(?:it|its|they|them|their|those|these|this|that|there|same|previous|above)\b/iu.test(text)
-    || /(?:bunlar|onlar|ikincisi|ikisini|onun|bunun|buna|ayni|orada)/iu.test(text)
-    || /(?:\u0647\u0630\u0627|\u0647\u0630\u0647|\u0630\u0644\u0643|\u062a\u0644\u0643|\u0647\u0645|\u0647\u0646|\u0647\u0627|\u0647\u0645\u0627|\u0647\u0646\u0627|\u0628\u064a\u0646\u0647\u0645\u0627|\u0648\u0645\u0627\u0630\u0627 \u0639\u0646|\u0645\u0627\u0630\u0627 \u0639\u0646|\u0648\u0628\u0627\u0644\u0646\u0633\u0628\u0629|\u0642\u0627\u0631\u0646 \u0628\u064a\u0646)/u.test(text);
+  if (
+    /^(?:why|how so|and why|what do you mean)[?.!\s]*$/iu.test(text) ||
+    /^(?:neden|nicin|nasil yani)[?.!\s]*$/iu.test(text.replace(/ı/g, 'i')) ||
+    /^(?:\u0644\u0645\u0627\u0630\u0627|\u0643\u064a\u0641 \u0630\u0644\u0643)[\u061f?.!\s]*$/u.test(text)
+  )
+    return true;
+  const continuationCue =
+    /\b(?:what about|and|also|compare|contrast|which one|why|how so|same|previous|above|more detail|in that case)\b/iu.test(
+      text,
+    ) ||
+    /(?:bunlar|onlar|onceki|ikincisi|ikisini|peki|bunun|buna|ayni|orada|ayrica|karsilastir)/iu.test(text) ||
+    /(?:\u0648\u0645\u0627\u0630\u0627|\u0645\u0627\u0630\u0627 \u0639\u0646|\u0648\u0628\u0627\u0644\u0646\u0633\u0628\u0629|\u0645\u0627 \u0631\u0623\u064a\u0643|\u0642\u0627\u0631\u0646|\u0628\u064a\u0646\u0647\u0645\u0627|\u0641\u064a\u0647\u0627|\u0641\u064a\u0647\u0645|\u0647\u0630\u0627|\u0647\u0630\u0647|\u0627\u0644\u0633\u0627\u0628\u0642|\u0623\u064a\u0636)/u.test(
+      text,
+    );
+  const explicitReference =
+    /\b(?:it|its|they|them|their|those|these|this|that|there|same|previous|above)\b/iu.test(text) ||
+    /(?:bunlar|onlar|ikincisi|ikisini|onun|bunun|buna|ayni|orada)/iu.test(text) ||
+    /(?:\u0647\u0630\u0627|\u0647\u0630\u0647|\u0630\u0644\u0643|\u062a\u0644\u0643|\u0647\u0645|\u0647\u0646|\u0647\u0627|\u0647\u0645\u0627|\u0647\u0646\u0627|\u0628\u064a\u0646\u0647\u0645\u0627|\u0648\u0645\u0627\u0630\u0627 \u0639\u0646|\u0645\u0627\u0630\u0627 \u0639\u0646|\u0648\u0628\u0627\u0644\u0646\u0633\u0628\u0629|\u0642\u0627\u0631\u0646 \u0628\u064a\u0646)/u.test(
+      text,
+    );
   if (explicitReference && continuationCue) return true;
 
   const currentTerms = contentTerms(text);
@@ -93,21 +124,52 @@ export function isEvidenceFollowUp(message: string, history: ContextTurn[], cont
   if (!currentTerms.size || !priorTerms.size) return false;
   let overlap = 0;
   for (const term of currentTerms) {
-    const match = priorTerms.has(term) || (term.length >= 5 && [...priorTerms].some(priorTerm => priorTerm.length >= 5 && (term.startsWith(priorTerm.slice(0, 5)) || priorTerm.startsWith(term.slice(0, 5)))));
+    const match =
+      priorTerms.has(term) ||
+      (term.length >= 5 &&
+        [...priorTerms].some(
+          (priorTerm) =>
+            priorTerm.length >= 5 &&
+            (term.startsWith(priorTerm.slice(0, 5)) || priorTerm.startsWith(term.slice(0, 5))),
+        ));
     if (match) overlap++;
   }
   const overlapRatio = overlap / currentTerms.size;
-  const namedReference = [...(context.entities ?? []), ...(context.evidenceRefs ?? []).map(ref => ref.filename ?? '')]
-    .some(item => item.length > 2 && text.includes(normalizeForComparison(item)));
-  const selectionContinuity = context.activeSelection !== undefined && context.activeSelection !== null && overlapRatio >= 0.2;
-  return namedReference || overlapRatio >= 0.34 || selectionContinuity || (continuationCue && overlapRatio >= 0.2);
+  const namedReference = [
+    ...(context.entities ?? []),
+    ...(context.evidenceRefs ?? []).map((ref) => ref.filename ?? ''),
+  ].some((item) => item.length > 2 && text.includes(normalizeForComparison(item)));
+  const selectionContinuity =
+    context.activeSelection !== undefined && context.activeSelection !== null && overlapRatio >= 0.2;
+  return (
+    namedReference || overlapRatio >= 0.34 || selectionContinuity || (continuationCue && overlapRatio >= 0.2)
+  );
 }
 
 function normalizeForComparison(value: string): string {
-  return value.normalize('NFKC').toLocaleLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/ı/g, 'i');
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .replace(/ı/g, 'i');
 }
 
 function contentTerms(value: string): Set<string> {
-  const stopWords = new Set(['the', 'and', 'what', 'about', 'its', 'with', 'from', 'this', 'that', 'which', 'more', 'detail', 'peki']);
-  return new Set((value.match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter(term => !stopWords.has(term)));
+  const stopWords = new Set([
+    'the',
+    'and',
+    'what',
+    'about',
+    'its',
+    'with',
+    'from',
+    'this',
+    'that',
+    'which',
+    'more',
+    'detail',
+    'peki',
+  ]);
+  return new Set((value.match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((term) => !stopWords.has(term)));
 }

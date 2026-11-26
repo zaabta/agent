@@ -41,8 +41,9 @@ const stableUnion = <T>(previous: T[], next: T[], limit: number): T[] => {
 };
 
 const boundedSummary = (previous: string | null, entries: string[]): string => {
-  const lines = [...new Set([...(previous?.split('\n') ?? []), ...entries].filter(Boolean))]
-    .slice(-CONVERSATION_CONTEXT_LIMITS.summaryEntries);
+  const lines = [...new Set([...(previous?.split('\n') ?? []), ...entries].filter(Boolean))].slice(
+    -CONVERSATION_CONTEXT_LIMITS.summaryEntries,
+  );
   let summary = lines.join('\n');
   if (summary.length > CONVERSATION_CONTEXT_LIMITS.summaryCharacters) {
     summary = summary.slice(-CONVERSATION_CONTEXT_LIMITS.summaryCharacters);
@@ -57,10 +58,12 @@ export class ConversationContextService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   load(conversationId: string, principal: AuthPrincipal) {
-    return this.prisma.conversationContext?.findFirst({
-      where: { conversationId, tenantId: principal.tenantId, ownerId: principal.userId },
-      select: { evidenceRefs: true, entities: true, decisions: true, activeSelection: true, summary: true },
-    }) ?? Promise.resolve(null);
+    return (
+      this.prisma.conversationContext?.findFirst({
+        where: { conversationId, tenantId: principal.tenantId, ownerId: principal.userId },
+        select: { evidenceRefs: true, entities: true, decisions: true, activeSelection: true, summary: true },
+      }) ?? Promise.resolve(null)
+    );
   }
 
   async saveTurn(
@@ -72,41 +75,83 @@ export class ConversationContextService {
     selection: StructuredSelection | undefined,
     preserveContext: boolean,
   ): Promise<void> {
-    const model = (transaction as Prisma.TransactionClient & { conversationContext?: Prisma.TransactionClient['conversationContext'] }).conversationContext;
+    const model = (
+      transaction as Prisma.TransactionClient & {
+        conversationContext?: Prisma.TransactionClient['conversationContext'];
+      }
+    ).conversationContext;
     if (!model?.upsert || !model.findFirst) return;
-    const previous = await model.findFirst({
+    const previous = (await model.findFirst({
       where: { conversationId },
-      select: { tenantId: true, ownerId: true, evidenceRefs: true, entities: true, decisions: true, activeSelection: true, summary: true },
-    }) as ConversationContextRow | null;
+      select: {
+        tenantId: true,
+        ownerId: true,
+        evidenceRefs: true,
+        entities: true,
+        decisions: true,
+        activeSelection: true,
+        summary: true,
+      },
+    })) as ConversationContextRow | null;
     if (previous && (previous.tenantId !== principal.tenantId || previous.ownerId !== principal.userId)) {
       throw new Error('CONVERSATION_CONTEXT_SCOPE_MISMATCH');
     }
 
     const validSources = sources
-      .filter(source => source.documentId && source.filename && source.sourceRef && Number.isInteger(source.chunkIndex))
+      .filter(
+        (source) =>
+          source.documentId && source.filename && source.sourceRef && Number.isInteger(source.chunkIndex),
+      )
       .slice(0, CONVERSATION_CONTEXT_LIMITS.evidenceReferences)
-      .map(({ documentId, filename, sourceRef, documentVersionId }) => ({ documentId, filename, sourceRef, ...(documentVersionId ? { documentVersionId } : {}) }));
+      .map(({ documentId, filename, sourceRef, documentVersionId }) => ({
+        documentId,
+        filename,
+        sourceRef,
+        ...(documentVersionId ? { documentVersionId } : {}),
+      }));
     const previousRefs = Array.isArray(previous?.evidenceRefs) ? previous.evidenceRefs : [];
     // Old refs survive only a detected related turn; every use is still reauthorized by retrieval.
-    const refs = preserveContext && validSources.length === 0
-      ? stableUnion(previousRefs, [], CONVERSATION_CONTEXT_LIMITS.evidenceReferences)
-      : preserveContext
-        ? stableUnion(previousRefs, validSources, CONVERSATION_CONTEXT_LIMITS.evidenceReferences)
-        : validSources;
+    const refs =
+      preserveContext && validSources.length === 0
+        ? stableUnion(previousRefs, [], CONVERSATION_CONTEXT_LIMITS.evidenceReferences)
+        : preserveContext
+          ? stableUnion(previousRefs, validSources, CONVERSATION_CONTEXT_LIMITS.evidenceReferences)
+          : validSources;
 
-    const decisions = stableUnion(asStringList(previous?.decisions), extractDecisionSentences(answer), CONVERSATION_CONTEXT_LIMITS.decisions);
-    const oldDocumentNames = new Set(previousRefs.flatMap(ref => typeof ref === 'object' && ref !== null && 'filename' in ref && typeof ref.filename === 'string' ? [ref.filename] : []));
-    const previousEntities = asStringList(previous?.entities).filter(entity => preserveContext || !oldDocumentNames.has(entity));
-    const entities = stableUnion(previousEntities, [
-      ...validSources.map(ref => ref.filename),
-      ...(selection ? Object.values(selection).filter((item): item is string => typeof item === 'string') : []),
-    ], CONVERSATION_CONTEXT_LIMITS.entities);
+    const decisions = stableUnion(
+      asStringList(previous?.decisions),
+      extractDecisionSentences(answer),
+      CONVERSATION_CONTEXT_LIMITS.decisions,
+    );
+    const oldDocumentNames = new Set(
+      previousRefs.flatMap((ref) =>
+        typeof ref === 'object' && ref !== null && 'filename' in ref && typeof ref.filename === 'string'
+          ? [ref.filename]
+          : [],
+      ),
+    );
+    const previousEntities = asStringList(previous?.entities).filter(
+      (entity) => preserveContext || !oldDocumentNames.has(entity),
+    );
+    const entities = stableUnion(
+      previousEntities,
+      [
+        ...validSources.map((ref) => ref.filename),
+        ...(selection
+          ? Object.values(selection).filter((item): item is string => typeof item === 'string')
+          : []),
+      ],
+      CONVERSATION_CONTEXT_LIMITS.entities,
+    );
     const previousSummary = preserveContext
-      ? previous?.summary ?? null
-      : (previous?.summary ?? '').split('\n').filter(line => line.startsWith('Decision:')).join('\n') || null;
+      ? (previous?.summary ?? null)
+      : (previous?.summary ?? '')
+          .split('\n')
+          .filter((line) => line.startsWith('Decision:'))
+          .join('\n') || null;
     const summaryEntries = [
-      ...validSources.map(ref => `Context: ${ref.filename}`),
-      ...extractDecisionSentences(answer).map(item => `Decision: ${item}`),
+      ...validSources.map((ref) => `Context: ${ref.filename}`),
+      ...extractDecisionSentences(answer).map((item) => `Decision: ${item}`),
     ];
     const summary = boundedSummary(previousSummary, summaryEntries);
     const activeSelection = selection ?? (preserveContext ? previous?.activeSelection : undefined);
@@ -121,14 +166,16 @@ export class ConversationContextService {
         entities: entities as Prisma.InputJsonValue,
         decisions: decisions as Prisma.InputJsonValue,
         summary,
-        activeSelection: activeSelection === undefined ? Prisma.DbNull : activeSelection as Prisma.InputJsonValue,
+        activeSelection:
+          activeSelection === undefined ? Prisma.DbNull : (activeSelection as Prisma.InputJsonValue),
       },
       update: {
         evidenceRefs: refs as Prisma.InputJsonValue,
         entities: entities as Prisma.InputJsonValue,
         decisions: decisions as Prisma.InputJsonValue,
         summary,
-        activeSelection: activeSelection === undefined ? Prisma.DbNull : activeSelection as Prisma.InputJsonValue,
+        activeSelection:
+          activeSelection === undefined ? Prisma.DbNull : (activeSelection as Prisma.InputJsonValue),
       },
     });
   }

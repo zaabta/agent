@@ -12,21 +12,32 @@ if (!process.env.GOOGLE_API_KEY && process.env.GEMINI_API_KEY) {
 }
 const configuredModel = process.env.AGENT_MODEL?.trim();
 const configuredModelName = process.env.GEMINI_MODEL_ID?.trim();
-const inferredProvider = configuredModel?.startsWith('openrouter/') ? 'openrouter'
-  : configuredModel?.startsWith('openai/') ? 'openai'
-  : configuredModel?.startsWith('google/') || configuredModel === 'gemini'
-    || configuredModel?.startsWith('gemini-') || configuredModelName?.startsWith('gemini-') ? 'google'
-    : 'ollama';
+const inferredProvider = configuredModel?.startsWith('openrouter/')
+  ? 'openrouter'
+  : configuredModel?.startsWith('openai/')
+    ? 'openai'
+    : configuredModel?.startsWith('google/') ||
+        configuredModel === 'gemini' ||
+        configuredModel?.startsWith('gemini-') ||
+        configuredModelName?.startsWith('gemini-')
+      ? 'google'
+      : 'ollama';
 const modelProvider = (process.env.AGENT_PROVIDER?.trim() || inferredProvider).toLowerCase();
-const model = modelProvider === 'google'
-  ? configuredModel?.startsWith('google/') ? configuredModel
-    : `google/${configuredModelName || (configuredModel && configuredModel !== 'gemini' ? configuredModel : 'gemini-3.6-flash')}`
-  : configuredModel || (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
+const model =
+  modelProvider === 'google'
+    ? configuredModel?.startsWith('google/')
+      ? configuredModel
+      : `google/${configuredModelName || (configuredModel && configuredModel !== 'gemini' ? configuredModel : 'gemini-3.6-flash')}`
+    : configuredModel || (modelProvider === 'ollama' ? 'qwen3:8b' : 'openrouter/qwen/qwen3.6-plus:free');
 const configuredTypegraphMinScore = Number(process.env.TYPEGRAPH_MIN_SCORE ?? 0.32);
 const explicitCompanyWorkspaceId = process.env.COMPANY_WORKSPACE_ID?.trim();
 const companyWorkspaceId = explicitCompanyWorkspaceId
-  ? (explicitCompanyWorkspaceId.startsWith('replace-with-') ? undefined : explicitCompanyWorkspaceId)
-  : (process.env.NODE_ENV !== 'production' ? process.env.DEV_TENANT_ID?.trim() : undefined);
+  ? explicitCompanyWorkspaceId.startsWith('replace-with-')
+    ? undefined
+    : explicitCompanyWorkspaceId
+  : process.env.NODE_ENV !== 'production'
+    ? process.env.DEV_TENANT_ID?.trim()
+    : undefined;
 
 export const config = {
   port: Number(process.env.PORT || 3220),

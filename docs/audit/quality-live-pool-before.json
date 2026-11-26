@@ -9,12 +9,8 @@
       "category": "factual",
       "language": "en",
       "question": "What approval is required for Orion?",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -26,11 +22,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "f523c092-9c32-448c-9048-25c634ebc0d2",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["datasetDiscovery", "documentSearch", "documentSearch"],
       "citedDocuments": []
     },
     {
@@ -38,12 +30,8 @@
       "category": "factual",
       "language": "ar",
       "question": "ما الموافقة المطلوبة لمشروع Orion؟",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "الموافقة المطلوبة لمشروع Orion هي تقييم السلامة.\n\nSources: [[requirements.md (section Orion requirements)]]",
@@ -55,24 +43,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "d670157b-4f35-4926-9704-320ba38800ce",
-      "toolsCalled": [
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "requirements.md"
-      ]
+      "toolsCalled": ["documentSearch"],
+      "citedDocuments": ["requirements.md"]
     },
     {
       "id": "factual-tr",
       "category": "factual",
       "language": "tr",
       "question": "Orion için hangi onay gerekiyor?",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "Orion için güvenlik incelemesi onay gerekiyor.\n\nSources: [[requirements.md (section Orion requirements)]]",
@@ -84,25 +64,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "50254231-cac7-48dd-ae81-0ac9054de1df",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "requirements.md"
-      ]
+      "toolsCalled": ["documentSearch", "documentSearch"],
+      "citedDocuments": ["requirements.md"]
     },
     {
       "id": "cost-en",
       "category": "cost",
       "language": "en",
       "question": "What is the Orion base budget?",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -114,9 +85,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "59f04e51-05ce-4f68-ad5d-e1071203b114",
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citedDocuments": []
     },
     {
@@ -124,12 +93,8 @@
       "category": "cost",
       "language": "ar",
       "question": "كم الميزانية الأساسية لمشروع Orion؟",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "الميزانية الأساسية لمشروع Orion هي 120000 دولار أمريكي.\n\nSources: [[costs.txt (line 1)]]",
@@ -141,25 +106,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "0b83d801-5855-416b-97b4-e5ebf4601bca",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "costs.txt"
-      ]
+      "toolsCalled": ["datasetDiscovery", "documentSearch"],
+      "citedDocuments": ["costs.txt"]
     },
     {
       "id": "cost-tr",
       "category": "cost",
       "language": "tr",
       "question": "Orion temel bütçesi ne kadar?",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -171,11 +127,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "3cbbd0ed-ca73-45dd-9877-97792c680e74",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["datasetDiscovery", "documentSearch", "documentSearch"],
       "citedDocuments": []
     },
     {
@@ -183,12 +135,8 @@
       "category": "risk",
       "language": "en",
       "question": "What is the main Orion delivery risk?",
-      "expectedFacts": [
-        "supplier delay"
-      ],
-      "expectedSourceDocuments": [
-        "risks.pdf"
-      ],
+      "expectedFacts": ["supplier delay"],
+      "expectedSourceDocuments": ["risks.pdf"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": null,
@@ -205,12 +153,8 @@
       "category": "risk",
       "language": "ar",
       "question": "ما خطر التسليم الرئيسي لمشروع Orion؟",
-      "expectedFacts": [
-        "supplier delay"
-      ],
-      "expectedSourceDocuments": [
-        "risks.pdf"
-      ],
+      "expectedFacts": ["supplier delay"],
+      "expectedSourceDocuments": ["risks.pdf"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -222,12 +166,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "c63762d0-f0d0-404c-924d-4bb88b2c1122",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch", "documentSearch", "documentSearch"],
       "citedDocuments": []
     }
   ]

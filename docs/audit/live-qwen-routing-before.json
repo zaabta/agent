@@ -1422,10 +1422,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch"],
       "citationValidation": "valid",
       "conversationId": "285ede3c-cc38-484b-8815-0d88b75ed6bc",
       "requestId": "119280ce-cd6b-4442-a885-c1387bcd31b7",
@@ -1490,9 +1487,7 @@
       ],
       "answer": "items.csv:\n- CSV: Cost, Item, Project\n\nviolations.xlsx:\n- Warnings: Form No, Project, Warning\n\nThe proposed dataset, sheet, or column could not be validated against this schema. Please clarify using one of the names shown above.",
       "sources": [],
-      "toolsCalled": [
-        "datasetDiscovery"
-      ],
+      "toolsCalled": ["datasetDiscovery"],
       "citationValidation": "valid",
       "conversationId": "285ede3c-cc38-484b-8815-0d88b75ed6bc",
       "requestId": "ea6037dd-ae23-4305-8ff8-a9727a1da187",
@@ -1595,9 +1590,7 @@
       ],
       "answer": "ماذا عن المخاطر؟",
       "sources": [],
-      "toolsCalled": [
-        "datasetDiscovery"
-      ],
+      "toolsCalled": ["datasetDiscovery"],
       "citationValidation": "valid",
       "conversationId": "285ede3c-cc38-484b-8815-0d88b75ed6bc",
       "requestId": "82ea280b-9250-4e93-87a7-db5852176d8f",
@@ -1684,10 +1677,7 @@
           "chunkIndex": 2
         }
       ],
-      "toolsCalled": [
-        "datasetDiscovery",
-        "structuredDataLookup"
-      ],
+      "toolsCalled": ["datasetDiscovery", "structuredDataLookup"],
       "citationValidation": "valid",
       "conversationId": "285ede3c-cc38-484b-8815-0d88b75ed6bc",
       "requestId": "8e9bcbed-9189-4a34-8897-d8cb1bc44255",
@@ -1771,9 +1761,7 @@
       ],
       "answer": "items.csv:\n- CSV: Cost, Item, Project\n\nviolations.xlsx:\n- Warnings: Form No, Project, Warning\n\nThe proposed dataset, sheet, or column could not be validated against this schema. Please clarify using one of the names shown above.",
       "sources": [],
-      "toolsCalled": [
-        "datasetDiscovery"
-      ],
+      "toolsCalled": ["datasetDiscovery"],
       "citationValidation": "valid",
       "conversationId": "285ede3c-cc38-484b-8815-0d88b75ed6bc",
       "requestId": "a9014459-7bfd-4707-a471-acb70941f62c",
@@ -1866,10 +1854,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch"],
       "citationValidation": "valid",
       "conversationId": "c5e936c7-ebb2-4f2c-8cbe-5f1eabe4a311",
       "timing": {

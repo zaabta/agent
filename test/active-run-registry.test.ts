@@ -8,7 +8,20 @@ test('run IDs are opaque UUIDs and registry metadata contains no prompt or token
   const registry = new ActiveAgentRunRegistry();
   const run = registry.create(owner);
   assert.match(run.runId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-  assert.deepEqual(Object.keys(run).sort(), ['cancelRequested', 'controller', 'ownerId', 'runId', 'settle', 'settled', 'startedAtMs', 'state', 'tenantId'].sort());
+  assert.deepEqual(
+    Object.keys(run).sort(),
+    [
+      'cancelRequested',
+      'controller',
+      'ownerId',
+      'runId',
+      'settle',
+      'settled',
+      'startedAtMs',
+      'state',
+      'tenantId',
+    ].sort(),
+  );
 });
 
 test('run cancellation is owner and workspace scoped and settles idempotently', async () => {

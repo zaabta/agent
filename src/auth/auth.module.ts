@@ -4,5 +4,9 @@ import { ApiAuthGuard } from './api-auth.guard.js';
 import { AuthController } from './auth.controller.js';
 
 @Global()
-@Module({ controllers: [AuthController], providers: [AuthService, ApiAuthGuard], exports: [AuthService, ApiAuthGuard] })
+@Module({
+  controllers: [AuthController],
+  providers: [AuthService, ApiAuthGuard],
+  exports: [AuthService, ApiAuthGuard],
+})
 export class AuthModule {}

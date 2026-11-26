@@ -1,86 +1,781 @@
 import { BadRequestException, Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { config } from '../config.js';
-import { CLOUD_PROVIDERS, credentialStatus, effectiveCredential, encryptCredential, type CloudProvider } from './provider-credentials.js';
+import {
+  CLOUD_PROVIDERS,
+  credentialStatus,
+  effectiveCredential,
+  encryptCredential,
+  type CloudProvider,
+} from './provider-credentials.js';
 import { openAIModelSupportsTemperature } from './model-capabilities.js';
 
-const defaults: Record<string, string> = { AGENT_PROVIDER: config.modelProvider, AGENT_MODEL: config.model, OLLAMA_THINK: String(config.ollamaThink), AGENT_HISTORY_MESSAGES: String(config.conversationHistoryMessages), AGENT_HISTORY_MESSAGE_CHARS: String(config.conversationHistoryChars), AGENT_REQUEST_TIMEOUT_MS: String(config.agentTimeoutMs), PLANNER_MAX_OUTPUT_TOKENS: '', ANSWER_MAX_OUTPUT_TOKENS: '', ANSWER_MAX_CONTEXT_CHARS: String(config.answerMaxContextChars), ANSWER_STREAM_MAX_DURATION_MS: String(config.answerStreamMaxDurationMs), TYPEGRAPH_MIN_SCORE: String(config.typegraphMinScore) };
-export function supportsOpenAITools(id: string) { return /^(gpt-(?:4o|4\.1|5(?:\.\d+)?|6(?:\.\d+)?)(?:-|$)|o[34](?:-|$))/i.test(id); }
+const defaults: Record<string, string> = {
+  AGENT_PROVIDER: config.modelProvider,
+  AGENT_MODEL: config.model,
+  OLLAMA_THINK: String(config.ollamaThink),
+  AGENT_HISTORY_MESSAGES: String(config.conversationHistoryMessages),
+  AGENT_HISTORY_MESSAGE_CHARS: String(config.conversationHistoryChars),
+  AGENT_REQUEST_TIMEOUT_MS: String(config.agentTimeoutMs),
+  PLANNER_MAX_OUTPUT_TOKENS: '',
+  ANSWER_MAX_OUTPUT_TOKENS: '',
+  ANSWER_MAX_CONTEXT_CHARS: String(config.answerMaxContextChars),
+  ANSWER_STREAM_MAX_DURATION_MS: String(config.answerStreamMaxDurationMs),
+  TYPEGRAPH_MIN_SCORE: String(config.typegraphMinScore),
+};
+export function supportsOpenAITools(id: string) {
+  return /^(gpt-(?:4o|4\.1|5(?:\.\d+)?|6(?:\.\d+)?)(?:-|$)|o[34](?:-|$))/i.test(id);
+}
 @Injectable()
 export class LlmAdminService implements OnModuleInit {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) { }
-  onModuleInit() { return this.initialize(); }
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  onModuleInit() {
+    return this.initialize();
+  }
   async initialize() {
     // Earlier application seeds used 1024/2048 as if they were defaults. Clear
     // only untouched seeds; an administrator's explicit value remains intact.
-    await this.prisma.runtimeSetting.updateMany({ where: { key: 'PLANNER_MAX_OUTPUT_TOKENS', value: '1024', updatedBy: null }, data: { value: '' } });
-    await this.prisma.runtimeSetting.updateMany({ where: { key: 'ANSWER_MAX_OUTPUT_TOKENS', value: '2048', updatedBy: null }, data: { value: '' } });
-    for (const [key, value] of Object.entries(defaults)) await this.prisma.runtimeSetting.upsert({ where: { key }, create: { key, value }, update: {} });
+    await this.prisma.runtimeSetting.updateMany({
+      where: {
+        key: 'PLANNER_MAX_OUTPUT_TOKENS',
+        value: '1024',
+        updatedBy: null,
+      },
+      data: { value: '' },
+    });
+    await this.prisma.runtimeSetting.updateMany({
+      where: {
+        key: 'ANSWER_MAX_OUTPUT_TOKENS',
+        value: '2048',
+        updatedBy: null,
+      },
+      data: { value: '' },
+    });
+    for (const [key, value] of Object.entries(defaults))
+      await this.prisma.runtimeSetting.upsert({
+        where: { key },
+        create: { key, value },
+        update: {},
+      });
     if (defaults.AGENT_PROVIDER === 'ollama') {
-      try { const tags = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(5000) }); const installed = tags.ok && (((await tags.json() as any).models ?? []).some((m: any) => m.name === defaults.AGENT_MODEL)); if (installed) { const show = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/show`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: defaults.AGENT_MODEL }), signal: AbortSignal.timeout(5000) }); const capabilities = show.ok ? (await show.json() as any).capabilities ?? [] : []; await this.prisma.registeredModel.upsert({ where: { provider_modelId: { provider: 'ollama', modelId: defaults.AGENT_MODEL } }, create: { provider: 'ollama', modelId: defaults.AGENT_MODEL, source: 'environment', local: true, available: true, validationStatus: 'available', compatible: capabilities.includes('tools') }, update: { local: true, available: true, validationStatus: 'available', compatible: capabilities.includes('tools') } }); } } catch { }
+      try {
+        const tags = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        const installed =
+          tags.ok &&
+          (((await tags.json()) as any).models ?? []).some((m: any) => m.name === defaults.AGENT_MODEL);
+        if (installed) {
+          const show = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/show`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model: defaults.AGENT_MODEL }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const capabilities = show.ok ? (((await show.json()) as any).capabilities ?? []) : [];
+          await this.prisma.registeredModel.upsert({
+            where: {
+              provider_modelId: {
+                provider: 'ollama',
+                modelId: defaults.AGENT_MODEL,
+              },
+            },
+            create: {
+              provider: 'ollama',
+              modelId: defaults.AGENT_MODEL,
+              source: 'environment',
+              local: true,
+              available: true,
+              validationStatus: 'available',
+              compatible: capabilities.includes('tools'),
+            },
+            update: {
+              local: true,
+              available: true,
+              validationStatus: 'available',
+              compatible: capabilities.includes('tools'),
+            },
+          });
+        }
+      } catch {}
     } else await this.register(defaults.AGENT_PROVIDER, defaults.AGENT_MODEL, 'environment');
-    if (process.env.GEMINI_API_KEY) await this.register('google', process.env.GEMINI_MODEL_ID || 'google/gemini-3.6-flash', 'environment');
+    if (process.env.GEMINI_API_KEY)
+      await this.register('google', process.env.GEMINI_MODEL_ID || 'google/gemini-3.6-flash', 'environment');
   }
-  private async register(provider: string, modelId: string, source = 'manual') { return this.prisma.registeredModel.upsert({ where: { provider_modelId: { provider, modelId } }, create: { provider, modelId, source }, update: {} }); }
-  async settings() { const rows = await this.prisma.runtimeSetting.findMany(); const values = Object.fromEntries(rows.map(x => [x.key, x.value])); const secrets = Object.fromEntries(await Promise.all(CLOUD_PROVIDERS.map(async provider => [`${provider === 'google' ? 'gemini' : provider}Configured`, (await credentialStatus(this.prisma, provider)).configured]))); return { settings: Object.fromEntries(Object.keys(defaults).map(k => [k, values[k] ?? defaults[k]])), secrets }; }
-  async activeModel() { const { settings } = await this.settings(); return { provider: settings.AGENT_PROVIDER, modelId: settings.AGENT_MODEL, ollamaThink: settings.OLLAMA_THINK === 'true' }; }
-  async roleConfigurations() { const rows = await this.prisma.runtimeSetting.findMany({ where: { key: { in: ['AGENT_PROVIDER', 'AGENT_MODEL', 'PLANNER_PROVIDER', 'PLANNER_MODEL', 'ANSWER_PROVIDER', 'ANSWER_MODEL', 'PLANNER_MAX_OUTPUT_TOKENS', 'ANSWER_MAX_OUTPUT_TOKENS'] } } }); const values = Object.fromEntries(rows.map(r => [r.key, r.value])); return Object.fromEntries((['PLANNER', 'ANSWER'] as const).map(role => { const provider = values[`${role}_PROVIDER`] ?? values.AGENT_PROVIDER ?? config.modelProvider; const modelId = values[`${role}_MODEL`] ?? values.AGENT_MODEL ?? config.model; const configured = values[`${role}_MAX_OUTPUT_TOKENS`]?.trim(); const maxOutputTokens = configured ? Number(configured) : null; return [role.toLowerCase(), { provider, modelId, source: values[`${role}_PROVIDER`] && values[`${role}_MODEL`] ? 'role' : 'shared', maxOutputTokens }]; })); }
-  async updateRoleConfiguration(role: string, input: { provider?: unknown; modelId?: unknown }, userId: string) { const normalized = role.toUpperCase(); if (!['PLANNER', 'ANSWER'].includes(normalized)) throw new BadRequestException('INVALID_LLM_ROLE'); if (typeof input.provider !== 'string' || typeof input.modelId !== 'string' || !input.modelId || input.modelId.length > 250 || /\s/.test(input.modelId)) throw new BadRequestException('PROVIDER_AND_MODEL_ID_REQUIRED'); const provider = input.provider; if (!['google', 'ollama', 'openrouter', 'openai'].includes(provider)) throw new BadRequestException('INVALID_PROVIDER'); if (['google', 'openrouter', 'openai'].includes(provider) && !(await effectiveCredential(this.prisma, provider as CloudProvider)).key) throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED'); const model = await this.prisma.registeredModel.findUnique({ where: { provider_modelId: { provider, modelId: input.modelId } } }); if (!model?.enabled || !model.available || !model.compatible) throw new BadRequestException('MODEL_NOT_REGISTERED_OR_INCOMPATIBLE'); const writes: any[] = []; for (const [key, value] of [[`${normalized}_PROVIDER`, provider], [`${normalized}_MODEL`, input.modelId]]) { const old = await this.prisma.runtimeSetting.findUnique({ where: { key } }); writes.push(this.prisma.runtimeSettingAudit.create({ data: { key, oldValue: old?.value ?? null, newValue: value, updatedBy: userId } }), this.prisma.runtimeSetting.upsert({ where: { key }, create: { key, value, updatedBy: userId }, update: { value, updatedBy: userId } })); } await this.prisma.$transaction(writes); return this.roleConfigurations(); }
+  private async register(provider: string, modelId: string, source = 'manual') {
+    return this.prisma.registeredModel.upsert({
+      where: { provider_modelId: { provider, modelId } },
+      create: { provider, modelId, source },
+      update: {},
+    });
+  }
+  async settings() {
+    const rows = await this.prisma.runtimeSetting.findMany();
+    const values = Object.fromEntries(rows.map((x) => [x.key, x.value]));
+    const secrets = Object.fromEntries(
+      await Promise.all(
+        CLOUD_PROVIDERS.map(async (provider) => [
+          `${provider === 'google' ? 'gemini' : provider}Configured`,
+          (await credentialStatus(this.prisma, provider)).configured,
+        ]),
+      ),
+    );
+    return {
+      settings: Object.fromEntries(Object.keys(defaults).map((k) => [k, values[k] ?? defaults[k]])),
+      secrets,
+    };
+  }
+  async activeModel() {
+    const { settings } = await this.settings();
+    return {
+      provider: settings.AGENT_PROVIDER,
+      modelId: settings.AGENT_MODEL,
+      ollamaThink: settings.OLLAMA_THINK === 'true',
+    };
+  }
+  async roleConfigurations() {
+    const rows = await this.prisma.runtimeSetting.findMany({
+      where: {
+        key: {
+          in: [
+            'AGENT_PROVIDER',
+            'AGENT_MODEL',
+            'ROUTER_PROVIDER',
+            'ROUTER_MODEL',
+            'PLANNER_PROVIDER',
+            'PLANNER_MODEL',
+            'ANSWER_PROVIDER',
+            'ANSWER_MODEL',
+            'PLANNER_MAX_OUTPUT_TOKENS',
+            'ANSWER_MAX_OUTPUT_TOKENS',
+          ],
+        },
+      },
+    });
+    const values = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    return Object.fromEntries(
+      (['ROUTER', 'PLANNER', 'ANSWER'] as const).map((role) => {
+        const provider = values[`${role}_PROVIDER`] ?? values.AGENT_PROVIDER ?? config.modelProvider;
+        const modelId = values[`${role}_MODEL`] ?? values.AGENT_MODEL ?? config.model;
+        const configured = values[`${role}_MAX_OUTPUT_TOKENS`]?.trim();
+        const maxOutputTokens = configured ? Number(configured) : null;
+        return [
+          role.toLowerCase(),
+          {
+            provider,
+            modelId,
+            source: values[`${role}_PROVIDER`] && values[`${role}_MODEL`] ? 'role' : 'shared',
+            maxOutputTokens,
+          },
+        ];
+      }),
+    );
+  }
+  async updateRoleConfiguration(
+    role: string,
+    input: { provider?: unknown; modelId?: unknown },
+    userId: string,
+  ) {
+    const normalized = role.toUpperCase();
+    if (!['ROUTER', 'PLANNER', 'ANSWER'].includes(normalized))
+      throw new BadRequestException('INVALID_LLM_ROLE');
+    if (
+      typeof input.provider !== 'string' ||
+      typeof input.modelId !== 'string' ||
+      !input.modelId ||
+      input.modelId.length > 250 ||
+      /\s/.test(input.modelId)
+    )
+      throw new BadRequestException('PROVIDER_AND_MODEL_ID_REQUIRED');
+    const provider = input.provider;
+    if (!['google', 'ollama', 'openrouter', 'openai'].includes(provider))
+      throw new BadRequestException('INVALID_PROVIDER');
+    if (
+      ['google', 'openrouter', 'openai'].includes(provider) &&
+      !(await effectiveCredential(this.prisma, provider as CloudProvider)).key
+    )
+      throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED');
+    const model = await this.prisma.registeredModel.findUnique({
+      where: { provider_modelId: { provider, modelId: input.modelId } },
+    });
+    if (!model?.enabled || !model.available || !model.compatible)
+      throw new BadRequestException('MODEL_NOT_REGISTERED_OR_INCOMPATIBLE');
+    const writes: any[] = [];
+    for (const [key, value] of [
+      [`${normalized}_PROVIDER`, provider],
+      [`${normalized}_MODEL`, input.modelId],
+    ]) {
+      const old = await this.prisma.runtimeSetting.findUnique({
+        where: { key },
+      });
+      writes.push(
+        this.prisma.runtimeSettingAudit.create({
+          data: {
+            key,
+            oldValue: old?.value ?? null,
+            newValue: value,
+            updatedBy: userId,
+          },
+        }),
+        this.prisma.runtimeSetting.upsert({
+          where: { key },
+          create: { key, value, updatedBy: userId },
+          update: { value, updatedBy: userId },
+        }),
+      );
+    }
+    await this.prisma.$transaction(writes);
+    return this.roleConfigurations();
+  }
   async updateSettings(input: Record<string, unknown>, userId: string) {
     const current = await this.settings();
     const targetProvider = String(input.AGENT_PROVIDER ?? current.settings.AGENT_PROVIDER);
     const targetModel = String(input.AGENT_MODEL ?? current.settings.AGENT_MODEL);
-    if ((['google', 'openrouter', 'openai'].includes(targetProvider)) && !(await effectiveCredential(this.prisma, targetProvider as CloudProvider)).key) throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED');
-    if (input.AGENT_PROVIDER !== undefined || input.AGENT_MODEL !== undefined) { const model = await this.prisma.registeredModel.findUnique({ where: { provider_modelId: { provider: targetProvider, modelId: targetModel } } }); if (!model?.enabled || !model.available || !model.compatible) throw new BadRequestException('MODEL_NOT_REGISTERED_OR_INCOMPATIBLE'); }
+    if (
+      ['google', 'openrouter', 'openai'].includes(targetProvider) &&
+      !(await effectiveCredential(this.prisma, targetProvider as CloudProvider)).key
+    )
+      throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED');
+    if (input.AGENT_PROVIDER !== undefined || input.AGENT_MODEL !== undefined) {
+      const model = await this.prisma.registeredModel.findUnique({
+        where: {
+          provider_modelId: { provider: targetProvider, modelId: targetModel },
+        },
+      });
+      if (!model?.enabled || !model.available || !model.compatible)
+        throw new BadRequestException('MODEL_NOT_REGISTERED_OR_INCOMPATIBLE');
+    }
     const writes: any[] = [];
     for (const [key, value] of Object.entries(input)) {
-      if (!(key in defaults) || typeof value !== 'string' || value.length > 300) throw new BadRequestException('INVALID_RUNTIME_SETTING');
-      if (key === 'AGENT_PROVIDER' && !['google', 'ollama', 'openrouter', 'openai'].includes(value)) throw new BadRequestException('INVALID_PROVIDER');
-      if (key === 'OLLAMA_THINK' && !['true', 'false'].includes(value)) throw new BadRequestException('INVALID_BOOLEAN_SETTING');
-      if (['AGENT_HISTORY_MESSAGES', 'AGENT_HISTORY_MESSAGE_CHARS', 'AGENT_REQUEST_TIMEOUT_MS', 'PLANNER_MAX_OUTPUT_TOKENS', 'ANSWER_MAX_OUTPUT_TOKENS', 'ANSWER_MAX_CONTEXT_CHARS', 'ANSWER_STREAM_MAX_DURATION_MS', 'TYPEGRAPH_MIN_SCORE'].includes(key)) {
+      if (!(key in defaults) || typeof value !== 'string' || value.length > 300)
+        throw new BadRequestException('INVALID_RUNTIME_SETTING');
+      if (key === 'AGENT_PROVIDER' && !['google', 'ollama', 'openrouter', 'openai'].includes(value))
+        throw new BadRequestException('INVALID_PROVIDER');
+      if (key === 'OLLAMA_THINK' && !['true', 'false'].includes(value))
+        throw new BadRequestException('INVALID_BOOLEAN_SETTING');
+      if (
+        [
+          'AGENT_HISTORY_MESSAGES',
+          'AGENT_HISTORY_MESSAGE_CHARS',
+          'AGENT_REQUEST_TIMEOUT_MS',
+          'PLANNER_MAX_OUTPUT_TOKENS',
+          'ANSWER_MAX_OUTPUT_TOKENS',
+          'ANSWER_MAX_CONTEXT_CHARS',
+          'ANSWER_STREAM_MAX_DURATION_MS',
+          'TYPEGRAPH_MIN_SCORE',
+        ].includes(key)
+      ) {
         const optionalTokenBudget = key === 'PLANNER_MAX_OUTPUT_TOKENS' || key === 'ANSWER_MAX_OUTPUT_TOKENS';
         if (!(optionalTokenBudget && value.trim() === '')) {
           const n = Number(value);
-          if (!Number.isFinite(n) || (key === 'TYPEGRAPH_MIN_SCORE' && (n < 0 || n > 1)) || (key === 'AGENT_REQUEST_TIMEOUT_MS' && (n < 1000 || n > 600000)) || (key === 'ANSWER_STREAM_MAX_DURATION_MS' && (!Number.isInteger(n) || n < 30000 || n > 600000)) || (optionalTokenBudget && (!Number.isSafeInteger(n) || n < 1)) || (key === 'ANSWER_MAX_CONTEXT_CHARS' && (!Number.isInteger(n) || n < 2000 || n > 50000)) || (key !== 'TYPEGRAPH_MIN_SCORE' && key !== 'AGENT_REQUEST_TIMEOUT_MS' && !optionalTokenBudget && key !== 'ANSWER_MAX_CONTEXT_CHARS' && key !== 'ANSWER_STREAM_MAX_DURATION_MS' && n < 1)) throw new BadRequestException('INVALID_NUMERIC_SETTING');
+          if (
+            !Number.isFinite(n) ||
+            (key === 'TYPEGRAPH_MIN_SCORE' && (n < 0 || n > 1)) ||
+            (key === 'AGENT_REQUEST_TIMEOUT_MS' && (n < 1000 || n > 600000)) ||
+            (key === 'ANSWER_STREAM_MAX_DURATION_MS' && (!Number.isInteger(n) || n < 30000 || n > 600000)) ||
+            (optionalTokenBudget && (!Number.isSafeInteger(n) || n < 1)) ||
+            (key === 'ANSWER_MAX_CONTEXT_CHARS' && (!Number.isInteger(n) || n < 2000 || n > 50000)) ||
+            (key !== 'TYPEGRAPH_MIN_SCORE' &&
+              key !== 'AGENT_REQUEST_TIMEOUT_MS' &&
+              !optionalTokenBudget &&
+              key !== 'ANSWER_MAX_CONTEXT_CHARS' &&
+              key !== 'ANSWER_STREAM_MAX_DURATION_MS' &&
+              n < 1)
+          )
+            throw new BadRequestException('INVALID_NUMERIC_SETTING');
         }
       }
-      const old = await this.prisma.runtimeSetting.findUnique({ where: { key } });
-      writes.push(this.prisma.runtimeSettingAudit.create({ data: { key, oldValue: old?.value ?? null, newValue: value, updatedBy: userId } }));
-      writes.push(this.prisma.runtimeSetting.upsert({ where: { key }, create: { key, value, updatedBy: userId }, update: { value, updatedBy: userId } }));
+      const old = await this.prisma.runtimeSetting.findUnique({
+        where: { key },
+      });
+      writes.push(
+        this.prisma.runtimeSettingAudit.create({
+          data: {
+            key,
+            oldValue: old?.value ?? null,
+            newValue: value,
+            updatedBy: userId,
+          },
+        }),
+      );
+      writes.push(
+        this.prisma.runtimeSetting.upsert({
+          where: { key },
+          create: { key, value, updatedBy: userId },
+          update: { value, updatedBy: userId },
+        }),
+      );
     }
-    await this.prisma.$transaction(writes); return this.settings();
+    await this.prisma.$transaction(writes);
+    return this.settings();
   }
   async discover() {
-    const models: Array<{ provider: string; modelId: string; displayName?: string; source: string; compatible?: boolean; local?: boolean; available?: boolean; validationStatus?: string; capabilities?: any; contextLength?: number }> = [];
+    const models: Array<{
+      provider: string;
+      modelId: string;
+      displayName?: string;
+      source: string;
+      compatible?: boolean;
+      local?: boolean;
+      available?: boolean;
+      validationStatus?: string;
+      capabilities?: any;
+      contextLength?: number;
+    }> = [];
     let ollamaReachable = false;
-    try { const r = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(8000) }); if (r.ok) { ollamaReachable = true; for (const m of (await r.json() as any).models ?? []) { let info: any = {}; try { const show = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/show`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: m.name }), signal: AbortSignal.timeout(8000) }); if (show.ok) info = await show.json(); } catch { } const caps = info.capabilities ?? []; models.push({ provider: 'ollama', modelId: m.name, displayName: m.name, source: 'ollama', compatible: caps.includes('tools'), local: true, validationStatus: 'available', capabilities: { tools: caps.includes('tools'), vision: caps.includes('vision'), structuredOutput: caps.includes('structured_output'), streaming: true, temperature: true } }); } } } catch { }
-    await this.prisma.registeredModel.updateMany({ where: { provider: 'ollama', local: true }, data: { available: false, validationStatus: ollamaReachable ? 'removed' : 'unreachable' } });
-    try { const r = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(8000) }); if (r.ok) for (const m of (await r.json() as any).data ?? []) if (m.id && (m.id.endsWith(':free') || (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0)) && String(m.architecture?.output_modalities ?? 'text').includes('text')) { const p = m.supported_parameters ?? []; const structuredOutput = p.includes('response_format') || p.includes('structured_outputs'); models.push({ provider: 'openrouter', modelId: m.id, displayName: m.name, source: 'openrouter', compatible: p.includes('tools') && structuredOutput, validationStatus: 'available', contextLength: Number.isInteger(m.context_length) ? m.context_length : undefined, capabilities: { tools: p.includes('tools'), streaming: true, structuredOutput, vision: String(m.architecture?.input_modalities ?? 'text').includes('image'), temperature: p.includes('temperature') } }); } } catch { }
-    if ((await effectiveCredential(this.prisma, 'google')).key) models.push({ provider: 'google', modelId: process.env.GEMINI_MODEL_ID || 'google/gemini-3.6-flash', source: process.env.GEMINI_API_KEY ? 'environment' : 'manual' });
+    try {
+      const r = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) {
+        ollamaReachable = true;
+        for (const m of ((await r.json()) as any).models ?? []) {
+          let info: any = {};
+          try {
+            const show = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/show`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ model: m.name }),
+              signal: AbortSignal.timeout(8000),
+            });
+            if (show.ok) info = await show.json();
+          } catch {}
+          const caps = info.capabilities ?? [];
+          models.push({
+            provider: 'ollama',
+            modelId: m.name,
+            displayName: m.name,
+            source: 'ollama',
+            compatible: caps.includes('tools'),
+            local: true,
+            validationStatus: 'available',
+            capabilities: {
+              tools: caps.includes('tools'),
+              vision: caps.includes('vision'),
+              structuredOutput: caps.includes('structured_output'),
+              streaming: true,
+              temperature: true,
+            },
+          });
+        }
+      }
+    } catch {}
+    await this.prisma.registeredModel.updateMany({
+      where: { provider: 'ollama', local: true },
+      data: {
+        available: false,
+        validationStatus: ollamaReachable ? 'removed' : 'unreachable',
+      },
+    });
+    try {
+      const r = await fetch('https://openrouter.ai/api/v1/models', {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok)
+        for (const m of ((await r.json()) as any).data ?? [])
+          if (
+            m.id &&
+            (m.id.endsWith(':free') ||
+              (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0)) &&
+            String(m.architecture?.output_modalities ?? 'text').includes('text')
+          ) {
+            const p = m.supported_parameters ?? [];
+            const structuredOutput = p.includes('response_format') || p.includes('structured_outputs');
+            models.push({
+              provider: 'openrouter',
+              modelId: m.id,
+              displayName: m.name,
+              source: 'openrouter',
+              compatible: p.includes('tools') && structuredOutput,
+              validationStatus: 'available',
+              contextLength: Number.isInteger(m.context_length) ? m.context_length : undefined,
+              capabilities: {
+                tools: p.includes('tools'),
+                streaming: true,
+                structuredOutput,
+                vision: String(m.architecture?.input_modalities ?? 'text').includes('image'),
+                temperature: p.includes('temperature'),
+              },
+            });
+          }
+    } catch {}
+    if ((await effectiveCredential(this.prisma, 'google')).key)
+      models.push({
+        provider: 'google',
+        modelId: process.env.GEMINI_MODEL_ID || 'google/gemini-3.6-flash',
+        source: process.env.GEMINI_API_KEY ? 'environment' : 'manual',
+      });
     const openai = (await effectiveCredential(this.prisma, 'openai')).key;
-    if (openai) try { const r = await fetch('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${openai}` }, signal: AbortSignal.timeout(8000) }); if (r.ok) for (const m of (await r.json() as any).data ?? []) { if (typeof m.id !== 'string' || !(/^(gpt-|o[134](?:-|$))/i.test(m.id))) continue; const compatible = supportsOpenAITools(m.id); models.push({ provider: 'openai', modelId: m.id, displayName: m.id, source: 'openai', available: true, compatible, validationStatus: compatible ? 'available' : 'unsupported-capabilities', capabilities: { tools: compatible, streaming: compatible, structuredOutput: compatible, temperature: openAIModelSupportsTemperature(m.id) } }); } } catch { }
-    for (const m of models) await this.prisma.registeredModel.upsert({ where: { provider_modelId: { provider: m.provider, modelId: m.modelId } }, create: m, update: { available: true, validationStatus: m.validationStatus, displayName: m.displayName, compatible: m.compatible ?? true, local: m.local ?? false, capabilities: m.capabilities ?? {}, contextLength: m.contextLength } });
-    return this.prisma.registeredModel.findMany({ orderBy: [{ provider: 'asc' }, { modelId: 'asc' }] });
+    if (openai)
+      try {
+        const r = await fetch('https://api.openai.com/v1/models', {
+          headers: { authorization: `Bearer ${openai}` },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (r.ok)
+          for (const m of ((await r.json()) as any).data ?? []) {
+            if (typeof m.id !== 'string' || !/^(gpt-|o[134](?:-|$))/i.test(m.id)) continue;
+            const compatible = supportsOpenAITools(m.id);
+            models.push({
+              provider: 'openai',
+              modelId: m.id,
+              displayName: m.id,
+              source: 'openai',
+              available: true,
+              compatible,
+              validationStatus: compatible ? 'available' : 'unsupported-capabilities',
+              capabilities: {
+                tools: compatible,
+                streaming: compatible,
+                structuredOutput: compatible,
+                temperature: openAIModelSupportsTemperature(m.id),
+              },
+            });
+          }
+      } catch {}
+    for (const m of models)
+      await this.prisma.registeredModel.upsert({
+        where: {
+          provider_modelId: { provider: m.provider, modelId: m.modelId },
+        },
+        create: m,
+        update: {
+          available: true,
+          validationStatus: m.validationStatus,
+          displayName: m.displayName,
+          compatible: m.compatible ?? true,
+          local: m.local ?? false,
+          capabilities: m.capabilities ?? {},
+          contextLength: m.contextLength,
+        },
+      });
+    return this.prisma.registeredModel.findMany({
+      orderBy: [{ provider: 'asc' }, { modelId: 'asc' }],
+    });
   }
-  async models() { return this.prisma.registeredModel.findMany({ orderBy: [{ provider: 'asc' }, { modelId: 'asc' }] }); }
-  async addModel(provider: string, modelId: string) { if (!modelId || modelId.length > 250 || /\s/.test(modelId)) throw new BadRequestException('INVALID_MODEL_ID'); if (provider === 'google') { if (!/^(google\/)?[A-Za-z0-9._-]+$/.test(modelId)) throw new BadRequestException('INVALID_GEMINI_MODEL_ID'); return this.prisma.registeredModel.upsert({ where: { provider_modelId: { provider, modelId } }, create: { provider, modelId, available: Boolean((await effectiveCredential(this.prisma, 'google')).key), validationStatus: 'unvalidated' }, update: {} }); } if (provider === 'openai') { if (!/^(gpt-[A-Za-z0-9._-]+|o[134](?:-[A-Za-z0-9._-]+)?)$/.test(modelId)) throw new BadRequestException('INVALID_OPENAI_MODEL_ID'); return this.prisma.registeredModel.upsert({ where: { provider_modelId: { provider, modelId } }, create: { provider, modelId, available: false, compatible: false, validationStatus: 'unvalidated' }, update: {} }); } throw new BadRequestException('UNSUPPORTED_MANUAL_MODEL_PROVIDER'); }
-  async providers() { const state = await this.settings(); return [{ id: 'google', configured: state.secrets.geminiConfigured }, { id: 'openrouter', configured: state.secrets.openrouterConfigured }, { id: 'openai', configured: state.secrets.openaiConfigured }, { id: 'ollama', configured: true, baseUrl: config.ollamaUrl }]; }
-  async saveCredential(provider: string, apiKey: string, userId: string) { if (!CLOUD_PROVIDERS.includes(provider as CloudProvider)) throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER'); if (typeof apiKey !== 'string' || apiKey.trim() !== apiKey || apiKey.length < 8 || apiKey.length > 500) throw new BadRequestException('INVALID_API_KEY'); let encrypted; try { encrypted = encryptCredential(apiKey); } catch (error) { throw new BadRequestException((error as Error).message); } const old = await (this.prisma as any).providerCredential.findUnique({ where: { provider } }); await this.prisma.$transaction([(this.prisma as any).providerCredential.upsert({ where: { provider }, create: { provider, ...encrypted, updatedBy: userId }, update: { ...encrypted, updatedBy: userId } }), this.prisma.runtimeSettingAudit.create({ data: { key: `CREDENTIAL_${provider.toUpperCase()}`, oldValue: old ? 'configured' : 'not-configured', newValue: 'configured', updatedBy: userId } })]); return { provider, configured: true, source: 'database' }; }
-  async revokeCredential(provider: string, userId: string) { if (!CLOUD_PROVIDERS.includes(provider as CloudProvider)) throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER'); const old = await (this.prisma as any).providerCredential.findUnique({ where: { provider } }); await this.prisma.$transaction([(this.prisma as any).providerCredential.deleteMany({ where: { provider } }), this.prisma.runtimeSettingAudit.create({ data: { key: `CREDENTIAL_${provider.toUpperCase()}`, oldValue: old ? 'configured' : 'not-configured', newValue: 'revoked', updatedBy: userId } })]); return { provider, ...await credentialStatus(this.prisma, provider as CloudProvider) }; }
-  async testCredential(provider: string) { if (!CLOUD_PROVIDERS.includes(provider as CloudProvider)) throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER'); const credential = await effectiveCredential(this.prisma, provider as CloudProvider); if (!credential.key) throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED'); let url: string, headers: Record<string, string>; if (provider === 'google') { url = 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1'; headers = { 'x-goog-api-key': credential.key }; } else if (provider === 'openai') { url = 'https://api.openai.com/v1/models'; headers = { authorization: `Bearer ${credential.key}` }; } else { url = 'https://openrouter.ai/api/v1/auth/key'; headers = { authorization: `Bearer ${credential.key}` }; } try { const r = await fetch(url, { headers, signal: AbortSignal.timeout(10000) }); return { provider, configured: true, reachable: true, authenticated: r.ok, statusCode: r.status }; } catch { return { provider, configured: true, reachable: false, authenticated: false }; } }
-  async setActive(provider: string, modelId: string, userId: string) { return this.updateSettings({ AGENT_PROVIDER: provider, AGENT_MODEL: modelId }, userId); }
-  async patchModel(id: string, input: { enabled?: boolean }) { if (typeof input.enabled !== 'boolean') throw new BadRequestException('INVALID_MODEL_UPDATE'); return this.prisma.registeredModel.update({ where: { id }, data: { enabled: input.enabled } }); }
-  async testModel(id: string) { const model = await this.prisma.registeredModel.findUnique({ where: { id } }); if (!model) throw new BadRequestException('MODEL_NOT_FOUND'); let available = false, compatible = model.compatible, detail = ''; try { if (model.provider === 'ollama') { const r = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(8000) }); available = r.ok && ((await r.json() as any).models ?? []).some((m: any) => m.name === model.modelId); detail = available ? 'installed' : 'not-installed'; } else if (model.provider === 'openrouter') { const r = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(8000) }); const data = r.ok ? await r.json() as any : null; available = !!data?.data?.some((m: any) => m.id === model.modelId && (m.id.endsWith(':free') || (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0))); detail = available ? 'listed-free' : 'not-listed-free'; } else if (model.provider === 'openai') { const key = (await effectiveCredential(this.prisma, 'openai')).key; if (key) { const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model.modelId)}`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(8000) }); available = r.ok; compatible = available && supportsOpenAITools(model.modelId); detail = available ? (compatible ? 'available' : 'unsupported-capabilities') : 'not-available'; } else detail = 'credential-missing'; } else { const key = (await effectiveCredential(this.prisma, 'google')).key; available = Boolean(key); detail = available ? 'credential-configured' : 'credential-missing'; } } catch { detail = 'provider-unreachable'; } const updated = await this.prisma.registeredModel.update({ where: { id }, data: { available, compatible, validationStatus: available ? 'available' : detail } }); return { id: updated.id, provider: updated.provider, modelId: updated.modelId, available, compatible, validationStatus: detail }; }
-  async logs(userId: string, options: { from?: Date; to?: Date; provider?: string; modelId?: string; conversationId?: string; role?: string; limit: number; offset: number }) { const where: any = { userId, ...(options.provider ? { provider: options.provider } : {}), ...(options.modelId ? { modelId: options.modelId } : {}), ...(options.conversationId ? { conversationId: options.conversationId } : {}), ...(options.role ? { role: options.role } : {}), ...(options.from || options.to ? { createdAt: { ...(options.from ? { gte: options.from } : {}), ...(options.to ? { lt: options.to } : {}) } } : {}) }; const [data, total] = await Promise.all([this.prisma.llmUsage.findMany({ where, select: { id: true, role: true, provider: true, configuredModelId: true, modelId: true, inputTokens: true, outputTokens: true, totalTokens: true, cachedTokens: true, reasoningTokens: true, usageSource: true, accuracy: true, userId: true, conversationId: true, logicalRequestId: true, invocationId: true, status: true, latencyMs: true, errorCategory: true, finishReason: true, maxOutputTokens: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: options.limit, skip: options.offset }), this.prisma.llmUsage.count({ where })]); return { data, total, limit: options.limit, offset: options.offset }; }
-  async analytics(userId: string, from: Date, to: Date, groupBy: string, provider?: string, modelId?: string, conversationId?: string, role?: string) {
-    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) throw new BadRequestException('INVALID_DATE_RANGE');
+  async models() {
+    return this.prisma.registeredModel.findMany({
+      orderBy: [{ provider: 'asc' }, { modelId: 'asc' }],
+    });
+  }
+  async addModel(provider: string, modelId: string) {
+    if (!modelId || modelId.length > 250 || /\s/.test(modelId))
+      throw new BadRequestException('INVALID_MODEL_ID');
+    if (provider === 'google') {
+      if (!/^(google\/)?[A-Za-z0-9._-]+$/.test(modelId))
+        throw new BadRequestException('INVALID_GEMINI_MODEL_ID');
+      return this.prisma.registeredModel.upsert({
+        where: { provider_modelId: { provider, modelId } },
+        create: {
+          provider,
+          modelId,
+          available: Boolean((await effectiveCredential(this.prisma, 'google')).key),
+          validationStatus: 'unvalidated',
+        },
+        update: {},
+      });
+    }
+    if (provider === 'openai') {
+      if (!/^(gpt-[A-Za-z0-9._-]+|o[134](?:-[A-Za-z0-9._-]+)?)$/.test(modelId))
+        throw new BadRequestException('INVALID_OPENAI_MODEL_ID');
+      return this.prisma.registeredModel.upsert({
+        where: { provider_modelId: { provider, modelId } },
+        create: {
+          provider,
+          modelId,
+          available: false,
+          compatible: false,
+          validationStatus: 'unvalidated',
+        },
+        update: {},
+      });
+    }
+    throw new BadRequestException('UNSUPPORTED_MANUAL_MODEL_PROVIDER');
+  }
+  async providers() {
+    const state = await this.settings();
+    return [
+      { id: 'google', configured: state.secrets.geminiConfigured },
+      { id: 'openrouter', configured: state.secrets.openrouterConfigured },
+      { id: 'openai', configured: state.secrets.openaiConfigured },
+      { id: 'ollama', configured: true, baseUrl: config.ollamaUrl },
+    ];
+  }
+  async saveCredential(provider: string, apiKey: string, userId: string) {
+    if (!CLOUD_PROVIDERS.includes(provider as CloudProvider))
+      throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER');
+    if (typeof apiKey !== 'string' || apiKey.trim() !== apiKey || apiKey.length < 8 || apiKey.length > 500)
+      throw new BadRequestException('INVALID_API_KEY');
+    let encrypted;
+    try {
+      encrypted = encryptCredential(apiKey);
+    } catch (error) {
+      throw new BadRequestException((error as Error).message);
+    }
+    const old = await (this.prisma as any).providerCredential.findUnique({
+      where: { provider },
+    });
+    await this.prisma.$transaction([
+      (this.prisma as any).providerCredential.upsert({
+        where: { provider },
+        create: { provider, ...encrypted, updatedBy: userId },
+        update: { ...encrypted, updatedBy: userId },
+      }),
+      this.prisma.runtimeSettingAudit.create({
+        data: {
+          key: `CREDENTIAL_${provider.toUpperCase()}`,
+          oldValue: old ? 'configured' : 'not-configured',
+          newValue: 'configured',
+          updatedBy: userId,
+        },
+      }),
+    ]);
+    return { provider, configured: true, source: 'database' };
+  }
+  async revokeCredential(provider: string, userId: string) {
+    if (!CLOUD_PROVIDERS.includes(provider as CloudProvider))
+      throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER');
+    const old = await (this.prisma as any).providerCredential.findUnique({
+      where: { provider },
+    });
+    await this.prisma.$transaction([
+      (this.prisma as any).providerCredential.deleteMany({
+        where: { provider },
+      }),
+      this.prisma.runtimeSettingAudit.create({
+        data: {
+          key: `CREDENTIAL_${provider.toUpperCase()}`,
+          oldValue: old ? 'configured' : 'not-configured',
+          newValue: 'revoked',
+          updatedBy: userId,
+        },
+      }),
+    ]);
+    return {
+      provider,
+      ...(await credentialStatus(this.prisma, provider as CloudProvider)),
+    };
+  }
+  async testCredential(provider: string) {
+    if (!CLOUD_PROVIDERS.includes(provider as CloudProvider))
+      throw new BadRequestException('UNSUPPORTED_CLOUD_PROVIDER');
+    const credential = await effectiveCredential(this.prisma, provider as CloudProvider);
+    if (!credential.key) throw new BadRequestException('PROVIDER_CREDENTIAL_NOT_CONFIGURED');
+    let url: string, headers: Record<string, string>;
+    if (provider === 'google') {
+      url = 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1';
+      headers = { 'x-goog-api-key': credential.key };
+    } else if (provider === 'openai') {
+      url = 'https://api.openai.com/v1/models';
+      headers = { authorization: `Bearer ${credential.key}` };
+    } else {
+      url = 'https://openrouter.ai/api/v1/auth/key';
+      headers = { authorization: `Bearer ${credential.key}` };
+    }
+    try {
+      const r = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(10000),
+      });
+      return {
+        provider,
+        configured: true,
+        reachable: true,
+        authenticated: r.ok,
+        statusCode: r.status,
+      };
+    } catch {
+      return {
+        provider,
+        configured: true,
+        reachable: false,
+        authenticated: false,
+      };
+    }
+  }
+  async setActive(provider: string, modelId: string, userId: string) {
+    return this.updateSettings({ AGENT_PROVIDER: provider, AGENT_MODEL: modelId }, userId);
+  }
+  async patchModel(id: string, input: { enabled?: boolean }) {
+    if (typeof input.enabled !== 'boolean') throw new BadRequestException('INVALID_MODEL_UPDATE');
+    return this.prisma.registeredModel.update({
+      where: { id },
+      data: { enabled: input.enabled },
+    });
+  }
+  async testModel(id: string) {
+    const model = await this.prisma.registeredModel.findUnique({
+      where: { id },
+    });
+    if (!model) throw new BadRequestException('MODEL_NOT_FOUND');
+    let available = false,
+      compatible = model.compatible,
+      detail = '';
+    try {
+      if (model.provider === 'ollama') {
+        const r = await fetch(`${config.ollamaUrl.replace(/\/+$/, '')}/api/tags`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        available =
+          r.ok && (((await r.json()) as any).models ?? []).some((m: any) => m.name === model.modelId);
+        detail = available ? 'installed' : 'not-installed';
+      } else if (model.provider === 'openrouter') {
+        const r = await fetch('https://openrouter.ai/api/v1/models', {
+          signal: AbortSignal.timeout(8000),
+        });
+        const data = r.ok ? ((await r.json()) as any) : null;
+        available = !!data?.data?.some(
+          (m: any) =>
+            m.id === model.modelId &&
+            (m.id.endsWith(':free') ||
+              (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0)),
+        );
+        detail = available ? 'listed-free' : 'not-listed-free';
+      } else if (model.provider === 'openai') {
+        const key = (await effectiveCredential(this.prisma, 'openai')).key;
+        if (key) {
+          const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model.modelId)}`, {
+            headers: { authorization: `Bearer ${key}` },
+            signal: AbortSignal.timeout(8000),
+          });
+          available = r.ok;
+          compatible = available && supportsOpenAITools(model.modelId);
+          detail = available ? (compatible ? 'available' : 'unsupported-capabilities') : 'not-available';
+        } else detail = 'credential-missing';
+      } else {
+        const key = (await effectiveCredential(this.prisma, 'google')).key;
+        available = Boolean(key);
+        detail = available ? 'credential-configured' : 'credential-missing';
+      }
+    } catch {
+      detail = 'provider-unreachable';
+    }
+    const updated = await this.prisma.registeredModel.update({
+      where: { id },
+      data: {
+        available,
+        compatible,
+        validationStatus: available ? 'available' : detail,
+      },
+    });
+    return {
+      id: updated.id,
+      provider: updated.provider,
+      modelId: updated.modelId,
+      available,
+      compatible,
+      validationStatus: detail,
+    };
+  }
+  async logs(
+    userId: string,
+    options: {
+      from?: Date;
+      to?: Date;
+      provider?: string;
+      modelId?: string;
+      conversationId?: string;
+      role?: string;
+      limit: number;
+      offset: number;
+    },
+  ) {
+    const where: any = {
+      userId,
+      ...(options.provider ? { provider: options.provider } : {}),
+      ...(options.modelId ? { modelId: options.modelId } : {}),
+      ...(options.conversationId ? { conversationId: options.conversationId } : {}),
+      ...(options.role ? { role: options.role } : {}),
+      ...(options.from || options.to
+        ? {
+            createdAt: {
+              ...(options.from ? { gte: options.from } : {}),
+              ...(options.to ? { lt: options.to } : {}),
+            },
+          }
+        : {}),
+    };
+    const [data, total] = await Promise.all([
+      this.prisma.llmUsage.findMany({
+        where,
+        select: {
+          id: true,
+          role: true,
+          provider: true,
+          configuredModelId: true,
+          modelId: true,
+          inputTokens: true,
+          outputTokens: true,
+          totalTokens: true,
+          cachedTokens: true,
+          reasoningTokens: true,
+          usageSource: true,
+          accuracy: true,
+          userId: true,
+          conversationId: true,
+          logicalRequestId: true,
+          invocationId: true,
+          status: true,
+          latencyMs: true,
+          errorCategory: true,
+          finishReason: true,
+          maxOutputTokens: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: options.limit,
+        skip: options.offset,
+      }),
+      this.prisma.llmUsage.count({ where }),
+    ]);
+    return { data, total, limit: options.limit, offset: options.offset };
+  }
+  async analytics(
+    userId: string,
+    from: Date,
+    to: Date,
+    groupBy: string,
+    provider?: string,
+    modelId?: string,
+    conversationId?: string,
+    role?: string,
+  ) {
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to)
+      throw new BadRequestException('INVALID_DATE_RANGE');
     const istanbulLocalTimestamp = "(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Istanbul')";
     const datePart = groupBy === 'week' ? 'week' : groupBy === 'month' ? 'month' : 'day';
-    const dimensions = groupBy === 'provider' ? 'provider' : groupBy === 'model' ? 'provider, model_id' : `date_trunc('${datePart}', ${istanbulLocalTimestamp})`;
-    const bucket = groupBy === 'provider' ? "provider" : groupBy === 'model' ? "provider || '/' || model_id" : `to_char(date_trunc('${datePart}', ${istanbulLocalTimestamp}), 'YYYY-MM-DD')`;
+    const dimensions =
+      groupBy === 'provider'
+        ? 'provider'
+        : groupBy === 'model'
+          ? 'provider, model_id'
+          : `date_trunc('${datePart}', ${istanbulLocalTimestamp})`;
+    const bucket =
+      groupBy === 'provider'
+        ? 'provider'
+        : groupBy === 'model'
+          ? "provider || '/' || model_id"
+          : `to_char(date_trunc('${datePart}', ${istanbulLocalTimestamp}), 'YYYY-MM-DD')`;
     const providerColumn = groupBy === 'provider' || groupBy === 'model' ? 'provider' : 'NULL::text';
     const sql = `SELECT ${bucket} AS period, ${providerColumn} AS provider, ${groupBy === 'model' ? 'model_id' : 'NULL::text'} AS "modelId", COUNT(*)::int AS invocations, SUM(input_tokens)::bigint AS "inputTokens", SUM(output_tokens)::bigint AS "outputTokens", SUM(total_tokens)::bigint AS "totalTokens", ROUND(AVG(total_tokens))::int AS "averageTokensPerInvocation", SUM(cached_tokens)::bigint AS "cachedTokens", SUM(reasoning_tokens)::bigint AS "reasoningTokens", COUNT(*) FILTER (WHERE total_tokens IS NULL)::int AS "missingUsageCount", COUNT(*) FILTER (WHERE status='failed')::int AS "failedInvocations", COUNT(*) FILTER (WHERE configured_model_id IS DISTINCT FROM model_id)::int AS "fallbackInvocations", ROUND(AVG(latency_ms))::int AS "averageLatencyMs" FROM llm_usage WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 AND ($4::text IS NULL OR provider=$4) AND ($5::text IS NULL OR model_id=$5) AND ($6::text IS NULL OR conversation_id=$6::uuid) AND ($7::text IS NULL OR role=$7) GROUP BY ${dimensions} ORDER BY period`;
-    const data = await this.prisma.$queryRawUnsafe<any[]>(sql, userId, from, to, provider ?? null, modelId ?? null, conversationId ?? null, role ?? null);
-    return { timezone: 'Europe/Istanbul', from: from.toISOString(), to: to.toISOString(), groupBy, data: data.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]))) };
+    const data = await this.prisma.$queryRawUnsafe<any[]>(
+      sql,
+      userId,
+      from,
+      to,
+      provider ?? null,
+      modelId ?? null,
+      conversationId ?? null,
+      role ?? null,
+    );
+    return {
+      timezone: 'Europe/Istanbul',
+      from: from.toISOString(),
+      to: to.toISOString(),
+      groupBy,
+      data: data.map((row) =>
+        Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v])),
+      ),
+    };
   }
 }

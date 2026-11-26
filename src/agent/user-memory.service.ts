@@ -20,7 +20,8 @@ export class UserMemoryService {
     if (!model?.findMany) return [];
     const entries = await model.findMany({
       where: { tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: MEMORY_CONTEXT_LIMIT,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: MEMORY_CONTEXT_LIMIT,
       select: { category: true, content: true },
     });
     return entries.filter((item): item is UserMemoryContextEntry =>
@@ -31,7 +32,8 @@ export class UserMemoryService {
   list(principal: AuthPrincipal) {
     return this.prisma.userMemory.findMany({
       where: { tenantId: principal.tenantId, userId: principal.userId, deletedAt: null },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: ACTIVE_MEMORY_LIMIT,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: ACTIVE_MEMORY_LIMIT,
       select: { id: true, category: true, content: true, createdAt: true, updatedAt: true },
     });
   }

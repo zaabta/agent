@@ -5,7 +5,8 @@ import { CHUNKER_VERSION, estimateTokens, smartChunk } from '../src/documents/sm
 const identity = { documentId: 'doc-a', documentVersionId: 'ver-a' };
 
 test('markdown chunks keep heading hierarchy and fenced code intact when it fits', () => {
-  const text = '# Guide\n\nIntro paragraph.\n\n## Install\n\nRun this:\n```ts\nconst site = "SitePilot";\n```';
+  const text =
+    '# Guide\n\nIntro paragraph.\n\n## Install\n\nRun this:\n```ts\nconst site = "SitePilot";\n```';
   const chunks = smartChunk(text, 'md', identity);
   assert.equal(chunks.length, 2);
   assert.deepEqual(chunks[1]?.headingPath, ['Guide', 'Install']);
@@ -13,19 +14,43 @@ test('markdown chunks keep heading hierarchy and fenced code intact when it fits
 });
 
 test('DOCX headings retain nesting and table rows stay in their section', () => {
-  const chunks = smartChunk('Heading 1: Policy\n\nIntro.\n\nHeading 2: Fees\n\nTable row: Plan | Price\nTable row: Enterprise | 42 credits', 'docx', identity);
-  assert.ok(chunks.some(chunk => chunk.headingPath?.join('/') === 'Policy/Fees' && chunk.content.includes('Enterprise | 42 credits')));
-  assert.ok(chunks.some(chunk => chunk.headingPath?.join('/') === 'Policy/Fees' && chunk.paragraphStart !== undefined && chunk.paragraphEnd !== undefined));
+  const chunks = smartChunk(
+    'Heading 1: Policy\n\nIntro.\n\nHeading 2: Fees\n\nTable row: Plan | Price\nTable row: Enterprise | 42 credits',
+    'docx',
+    identity,
+  );
+  assert.ok(
+    chunks.some(
+      (chunk) =>
+        chunk.headingPath?.join('/') === 'Policy/Fees' && chunk.content.includes('Enterprise | 42 credits'),
+    ),
+  );
+  assert.ok(
+    chunks.some(
+      (chunk) =>
+        chunk.headingPath?.join('/') === 'Policy/Fees' &&
+        chunk.paragraphStart !== undefined &&
+        chunk.paragraphEnd !== undefined,
+    ),
+  );
 });
 
 test('PDF chunks retain the originating page', () => {
-  const chunks = smartChunk('Page 2:\nFirst page paragraph.\n\nPage 8:\nSecond page paragraph.', 'pdf', identity);
+  const chunks = smartChunk(
+    'Page 2:\nFirst page paragraph.\n\nPage 8:\nSecond page paragraph.',
+    'pdf',
+    identity,
+  );
   assert.equal(chunks.length, 2);
-  assert.deepEqual(chunks.map(chunk => chunk.pageNumber), [2, 8]);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.pageNumber),
+    [2, 8],
+  );
 });
 
 test('versioned PDF table rows remain together in page-scoped chunks', () => {
-  const text = 'Page 4:\nExtracted PDF table 1; headers: Footing | Size | Depth\nTable 1, row 1: Footing=F1 | Size=2800 x 2800 mm | Depth=550 mm\nTable 1, row 2: Footing=F2 | Size=2500 x 3200 mm | Depth=750 mm';
+  const text =
+    'Page 4:\nExtracted PDF table 1; headers: Footing | Size | Depth\nTable 1, row 1: Footing=F1 | Size=2800 x 2800 mm | Depth=550 mm\nTable 1, row 2: Footing=F2 | Size=2500 x 3200 mm | Depth=750 mm';
   const [chunk] = smartChunk(text, 'pdf', identity);
   assert.equal(CHUNKER_VERSION, 'smart-2');
   assert.equal(chunk?.pageNumber, 4);
@@ -33,7 +58,11 @@ test('versioned PDF table rows remain together in page-scoped chunks', () => {
 });
 
 test('CSV chunks retain headers, sheet, row span, cell references, and exact identifiers', () => {
-  const chunks = smartChunk('CSV headers: Account | Form number\nRow 2: A1=00125 | B1=F-0042\nRow 3: A2=00126 | B2=F-0043', 'csv', identity);
+  const chunks = smartChunk(
+    'CSV headers: Account | Form number\nRow 2: A1=00125 | B1=F-0042\nRow 3: A2=00126 | B2=F-0043',
+    'csv',
+    identity,
+  );
   assert.equal(chunks.length, 1);
   assert.match(chunks[0]!.content, /00125/);
   assert.match(chunks[0]!.content, /F-0043/);
@@ -41,15 +70,22 @@ test('CSV chunks retain headers, sheet, row span, cell references, and exact ide
   assert.equal(chunks[0]!.rowStart, 2);
   assert.equal(chunks[0]!.rowEnd, 3);
   assert.equal(chunks[0]!.cellRange, 'A1:B2');
-  assert.deepEqual(chunks.map(chunk => chunk.id), smartChunk('CSV headers: Account | Form number\nRow 2: A1=00125 | B1=F-0042\nRow 3: A2=00126 | B2=F-0043', 'csv', identity).map(chunk => chunk.id));
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.id),
+    smartChunk(
+      'CSV headers: Account | Form number\nRow 2: A1=00125 | B1=F-0042\nRow 3: A2=00126 | B2=F-0043',
+      'csv',
+      identity,
+    ).map((chunk) => chunk.id),
+  );
 });
 
 test('very long multilingual rows are bounded and carry row provenance', () => {
   const row = `Row 42: A42=${'معرّف Türkçe ıİşğ '.repeat(500)}`;
   const chunks = smartChunk(row, 'xlsx', identity);
   assert.ok(chunks.length > 1);
-  assert.ok(chunks.every(chunk => estimateTokens(chunk.content) <= 480));
-  assert.ok(chunks.every(chunk => chunk.rowStart === 42 && chunk.rowEnd === 42));
+  assert.ok(chunks.every((chunk) => estimateTokens(chunk.content) <= 480));
+  assert.ok(chunks.every((chunk) => chunk.rowStart === 42 && chunk.rowEnd === 42));
   assert.equal(chunks[0]!.id, smartChunk(row, 'xlsx', identity)[0]!.id);
 });
 
@@ -57,16 +93,36 @@ test('structured table cells are grouped into bounded row chunks with headers an
   const cells = Array.from({ length: 200 }, (_, index) => {
     const rowNumber = index + 2;
     return [
-      { sheetName: 'CSV', rowNumber, address: `${rowNumber}:1`, columnName: 'Account ID', value: String(10000 + index) },
-      { sheetName: 'CSV', rowNumber, address: `${rowNumber}:2`, columnName: 'Form Number', value: `F-${String(index).padStart(4, '0')}` },
+      {
+        sheetName: 'CSV',
+        rowNumber,
+        address: `${rowNumber}:1`,
+        columnName: 'Account ID',
+        value: String(10000 + index),
+      },
+      {
+        sheetName: 'CSV',
+        rowNumber,
+        address: `${rowNumber}:2`,
+        columnName: 'Form Number',
+        value: `F-${String(index).padStart(4, '0')}`,
+      },
     ];
   }).flat();
   const chunks = smartChunk('', 'csv', identity, cells);
   assert.ok(chunks.length > 1 && chunks.length < 200);
-  assert.ok(chunks.every(chunk => estimateTokens(chunk.content) <= 480));
-  assert.ok(chunks.every(chunk => chunk.sheetName === 'CSV' && chunk.rowStart !== undefined && chunk.rowEnd !== undefined && chunk.cellRange));
-  assert.ok(chunks.some(chunk => chunk.content.includes('Account ID')));
-  assert.ok(chunks.some(chunk => chunk.content.includes('F-0199')));
+  assert.ok(chunks.every((chunk) => estimateTokens(chunk.content) <= 480));
+  assert.ok(
+    chunks.every(
+      (chunk) =>
+        chunk.sheetName === 'CSV' &&
+        chunk.rowStart !== undefined &&
+        chunk.rowEnd !== undefined &&
+        chunk.cellRange,
+    ),
+  );
+  assert.ok(chunks.some((chunk) => chunk.content.includes('Account ID')));
+  assert.ok(chunks.some((chunk) => chunk.content.includes('F-0199')));
 });
 
 test('XLSX chunks keep workbook, sheet, header, and exact cell address metadata', () => {
@@ -93,12 +149,30 @@ test('XLSX rows stay aligned when key columns are promoted ahead of sheet order'
   const cells = [
     { sheetName: 'Projects', rowNumber: 1, address: 'A1', columnName: 'Project', value: 'Project' },
     { sheetName: 'Projects', rowNumber: 1, address: 'B1', columnName: 'Owner', value: 'Owner' },
-    { sheetName: 'Projects', rowNumber: 1, address: 'C1', columnName: 'Delivery reference', value: 'Delivery reference' },
-    { sheetName: 'Projects', rowNumber: 1, address: 'D1', columnName: 'Review deadline', value: 'Review deadline' },
+    {
+      sheetName: 'Projects',
+      rowNumber: 1,
+      address: 'C1',
+      columnName: 'Delivery reference',
+      value: 'Delivery reference',
+    },
+    {
+      sheetName: 'Projects',
+      rowNumber: 1,
+      address: 'D1',
+      columnName: 'Review deadline',
+      value: 'Review deadline',
+    },
     { sheetName: 'Projects', rowNumber: 2, address: 'A2', columnName: 'Project', value: 'Istanbul Line A' },
     { sheetName: 'Projects', rowNumber: 2, address: 'B2', columnName: 'Owner', value: 'Selin Demir' },
     { sheetName: 'Projects', rowNumber: 2, address: 'C2', columnName: 'Delivery reference', value: 'IST-42' },
-    { sheetName: 'Projects', rowNumber: 2, address: 'D2', columnName: 'Review deadline', value: '2026-12-05' },
+    {
+      sheetName: 'Projects',
+      rowNumber: 2,
+      address: 'D2',
+      columnName: 'Review deadline',
+      value: '2026-12-05',
+    },
   ];
   const [chunk] = smartChunk('', 'xlsx', { ...identity, originalFilename: 'projects.xlsx' }, cells);
   assert.ok(chunk);

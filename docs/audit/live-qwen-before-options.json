@@ -13,9 +13,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 773,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -228,9 +226,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 412,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -443,9 +439,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 730,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -658,9 +652,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 393,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -873,9 +865,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 384,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -1088,9 +1078,7 @@
       "status": "ready",
       "stage": "completed",
       "durationMs": 378,
-      "eventNames": [
-        "status"
-      ],
+      "eventNames": ["status"],
       "progress": {
         "stage": "completed",
         "status": "ready",
@@ -1320,9 +1308,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "9eed7e10-2b3e-4152-bce2-a8c67565bd80",
       "requestId": "713e0788-8c23-442b-8ffe-d392dd622937",

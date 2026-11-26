@@ -6,15 +6,15 @@ Tools start disabled. They issue HTTP GET requests only. Credentials are AES-256
 
 ## Create and update
 
-~~~http
+```http
 POST /api/agent/custom-tools
 PUT /api/agent/custom-tools/{id}
 Content-Type: application/json
-~~~
+```
 
 Basic request:
 
-~~~json
+```json
 {
   "name": "weather_lookup",
   "description": "Get current weather for a city.",
@@ -24,7 +24,7 @@ Basic request:
     { "name": "units", "type": "string", "required": false, "queryParameter": "units" }
   ]
 }
-~~~
+```
 
 `displayName` is optional and defaults to `name`. `parameters` supports up to 20 top-level `string`, `number`, `integer`, or `boolean` parameters. Each has a unique name, optional description, required flag, and optional query parameter name (defaults to the parameter name). The backend generates a strict input JSON Schema and query mapping. Model-generated arguments are validated against that schema before the request; they cannot change the configured host, path, method, or headers.
 
@@ -32,14 +32,14 @@ Advanced schema request fields remain supported for existing clients. Use `input
 
 Optional authentication:
 
-~~~json
+```json
 {
   "auth": {
     "headerName": "X-API-Key",
     "secret": "write-only credential"
   }
 }
-~~~
+```
 
 `auth.headerName` accepts `Authorization` or `X-API-Key`; `prefix` is optional. Omit `auth` to disable authentication. On update, omit `auth` to remove it; provide `auth` with a new secret to rotate; or provide the saved header/prefix without a secret to preserve the credential. A saved secret is never returned.
 
@@ -55,27 +55,27 @@ Existing profile/path tools remain executable for compatibility. `CUSTOM_TOOL_CO
 
 ## List, detail, enable, disable, delete
 
-~~~http
+```http
 GET    /api/agent/custom-tools
 GET    /api/agent/custom-tools/{id}
 PATCH  /api/agent/custom-tools/{id}/enabled
 DELETE /api/agent/custom-tools/{id}
-~~~
+```
 
 The list is newest-first and contains custom records only; an empty registry returns `[]`. Detail returns 404 for archived or unknown IDs. Enable body:
 
-~~~json
+```json
 { "enabled": true }
-~~~
+```
 
 Enablement rechecks the endpoint policy. Execution rechecks enabled state and configuration version. Delete is a soft archive that disables the tool, removes its credential, and preserves execution history.
 
 ## Test execution and logs
 
-~~~http
+```http
 POST /api/agent/custom-tools/{id}/test
 GET  /api/agent/custom-tools/{id}/executions?limit=50&offset=0
-~~~
+```
 
 Test body: `{ "sampleInput": { "city": "Istanbul" } }`. Tests can run while disabled and use the same request, SSRF, schema, timeout, and response-size policies as Agent execution. The response is sanitized and bounded. Execution history contains metadata only: tool/version IDs, request/conversation/user IDs, duration, success, safe error category, test flag, and timestamp. It never stores arguments, response bodies, URLs, or credentials. `limit` is clamped to 1–100.
 

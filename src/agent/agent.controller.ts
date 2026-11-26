@@ -1,10 +1,34 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpException, Inject, NotFoundException, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpException,
+  Inject,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiAuthGuard } from '../auth/api-auth.guard.js';
 import { CurrentPrincipal } from '../auth/current-principal.decorator.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { AgentService } from './agent.service.js';
-import { ApiBearerAuth, ApiBody, ApiNotFoundResponse, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiNotFoundResponse,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { InstallationOwnerOnly } from '../auth/installation-owner.decorator.js';
 import { safeAgentClientResponse, safeAgentErrorMessage, safeAgentFailure } from './provider-errors.js';
 import { AgentRunCancelledError, AgentRunCapacityError } from './active-run-registry.js';
@@ -24,7 +48,16 @@ export class AgentController {
 
   @Post('ask')
   @ApiOperation({ summary: 'Ask SitePilot and return a synchronous JSON answer' })
-  @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['message'],
+      properties: {
+        message: { type: 'string', maxLength: 6000 },
+        conversationId: { type: 'string', format: 'uuid' },
+      },
+    },
+  })
   @ApiResponse({ status: 200, description: 'Assistant answer and retrieved source citations.' })
   @ApiResponse({ status: 400, description: 'INVALID_MESSAGE or INVALID_CONVERSATION_ID.' })
   async ask(@Body() body: AgentBody, @CurrentPrincipal() principal: AuthPrincipal) {
@@ -40,9 +73,26 @@ export class AgentController {
 
   @Post('stream')
   @ApiOperation({ summary: 'Stream LangGraph agent events as SSE from a POST request' })
-  @ApiBody({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 6000 }, conversationId: { type: 'string', format: 'uuid' } } } })
-  @ApiResponse({ status: 200, description: 'SSE events: status (includes runId), stage, tool-start, tool-finish, sources, text-delta (assembled final answer), step-start, step-finish, cancelled, error, done.' })
-  async stream(@Body() body: AgentBody, @Res() response: Response, @CurrentPrincipal() principal: AuthPrincipal): Promise<void> {
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['message'],
+      properties: {
+        message: { type: 'string', maxLength: 6000 },
+        conversationId: { type: 'string', format: 'uuid' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'SSE events: status (includes runId), stage, tool-start, tool-finish, sources, text-delta (assembled final answer), step-start, step-finish, cancelled, error, done.',
+  })
+  async stream(
+    @Body() body: AgentBody,
+    @Res() response: Response,
+    @CurrentPrincipal() principal: AuthPrincipal,
+  ): Promise<void> {
     const { message, conversationId } = this.validateBody(body, false);
     const controller = new AbortController();
 
@@ -55,7 +105,8 @@ export class AgentController {
     });
     response.flushHeaders();
     const onDisconnect = () => {
-      if (!response.writableEnded && !controller.signal.aborted) controller.abort(new Error('CLIENT_DISCONNECTED'));
+      if (!response.writableEnded && !controller.signal.aborted)
+        controller.abort(new Error('CLIENT_DISCONNECTED'));
     };
     response.once('close', onDisconnect);
 
@@ -63,7 +114,7 @@ export class AgentController {
       if (response.destroyed || (controller.signal.aborted && !allowAborted)) return;
       const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
       if (!response.write(frame)) {
-        await new Promise<void>(resolve => {
+        await new Promise<void>((resolve) => {
           const done = () => {
             response.off('drain', done);
             response.off('close', done);
@@ -83,25 +134,62 @@ export class AgentController {
     } catch (error) {
       if (error instanceof AgentRunCancelledError) {
         if (!response.destroyed && !response.writableEnded) {
-          await write('cancelled', { runId: error.runId, status: 'cancelled', executionSettled: true, providerStopConfirmed: false, ackLatencyMs: error.ackLatencyMs }, true);
+          await write(
+            'cancelled',
+            {
+              runId: error.runId,
+              status: 'cancelled',
+              executionSettled: true,
+              providerStopConfirmed: false,
+              ackLatencyMs: error.ackLatencyMs,
+            },
+            true,
+          );
           response.end();
         }
         return;
       }
-      if (!response.destroyed && !response.writableEnded && !controller.signal.reason?.message?.includes('CLIENT_DISCONNECTED')) {
+      if (
+        !response.destroyed &&
+        !response.writableEnded &&
+        !controller.signal.reason?.message?.includes('CLIENT_DISCONNECTED')
+      ) {
         const failure = safeAgentFailure(error);
         const modelFailure = error instanceof Error && error.message === 'MODEL_STREAM_FAILED';
         const capacity = error instanceof AgentRunCapacityError ? error : undefined;
-        await write('error', {
-          code: capacity?.code ?? failure?.code ?? (modelFailure ? 'CONNECTION_FAILED' : 'AGENT_REQUEST_FAILED'),
-          message: failure ? safeAgentErrorMessage(failure.code) : capacity?.message ?? 'The agent request could not be completed.',
-          recoverable: failure?.retryable ?? Boolean(capacity),
-          ...(failure ? { retryable: failure.retryable } : {}),
-          ...(capacity ? { retryable: true, retryAfterMs: 1000 } : {}),
-          ...(failure?.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
-          ...(failure?.requestId ? { requestId: failure.requestId } : {}),
-          ...(failure?.telemetry ? { telemetry: failure.telemetry } : failure ? { telemetry: { providerErrors: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(failure.code) ? 0 : 1 } } : {}),
-        }, true);
+        await write(
+          'error',
+          {
+            code:
+              capacity?.code ??
+              failure?.code ??
+              (modelFailure ? 'CONNECTION_FAILED' : 'AGENT_REQUEST_FAILED'),
+            message: failure
+              ? safeAgentErrorMessage(failure.code)
+              : (capacity?.message ?? 'The agent request could not be completed.'),
+            recoverable: failure?.retryable ?? Boolean(capacity),
+            ...(failure ? { retryable: failure.retryable } : {}),
+            ...(capacity ? { retryable: true, retryAfterMs: 1000 } : {}),
+            ...(failure?.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
+            ...(failure?.requestId ? { requestId: failure.requestId } : {}),
+            ...(failure?.telemetry
+              ? { telemetry: failure.telemetry }
+              : failure
+                ? {
+                    telemetry: {
+                      providerErrors: [
+                        'INVALID_MODEL_OUTPUT',
+                        'OUTPUT_TRUNCATED',
+                        'TOOL_EXECUTION_FAILED',
+                      ].includes(failure.code)
+                        ? 0
+                        : 1,
+                    },
+                  }
+                : {}),
+          },
+          true,
+        );
         response.end();
       }
     } finally {
@@ -110,9 +198,15 @@ export class AgentController {
   }
 
   @Post('runs/:runId/cancel')
-  @ApiOperation({ summary: 'Request cancellation of an active agent execution owned by the authenticated user' })
+  @ApiOperation({
+    summary: 'Request cancellation of an active agent execution owned by the authenticated user',
+  })
   @ApiParam({ name: 'runId', description: 'UUID returned in the stream status event.' })
-  @ApiResponse({ status: 200, description: 'Cancellation request result; executionSettled describes local execution only and providerStopConfirmed remains false because remote model shutdown is not observable.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Cancellation request result; executionSettled describes local execution only and providerStopConfirmed remains false because remote model shutdown is not observable.',
+  })
   @ApiNotFoundResponse({ description: 'AGENT_RUN_NOT_FOUND or run is not owned by this user.' })
   cancelRun(@Param('runId') runId: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!isUuid(runId)) throw new NotFoundException('AGENT_RUN_NOT_FOUND');
@@ -128,26 +222,60 @@ export class AgentController {
 
   @Get('memories')
   @ApiOperation({ summary: 'List private, user-managed memories in the authenticated tenant' })
-  @ApiResponse({ status: 200, description: 'At most 100 active preference, fact, project, and decision memories.' })
+  @ApiResponse({
+    status: 200,
+    description: 'At most 100 active preference, fact, project, and decision memories.',
+  })
   listMemories(@CurrentPrincipal() principal: AuthPrincipal) {
     return this.agent.listMemories(principal);
   }
 
   @Post('memories')
   @ApiOperation({ summary: 'Create a short user-authored memory for context across conversations' })
-  @ApiBody({ schema: { type: 'object', required: ['category', 'content'], properties: { category: { type: 'string', enum: ['preference', 'fact', 'project', 'decision'] }, content: { type: 'string', minLength: 3, maxLength: 500 } } } })
-  @ApiResponse({ status: 201, description: 'Created memory. Credentials, source citations, and prompt-like text are rejected.' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['category', 'content'],
+      properties: {
+        category: { type: 'string', enum: ['preference', 'fact', 'project', 'decision'] },
+        content: { type: 'string', minLength: 3, maxLength: 500 },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Created memory. Credentials, source citations, and prompt-like text are rejected.',
+  })
   @ApiResponse({ status: 400, description: 'Invalid or disallowed memory.' })
-  createMemory(@Body() body: { category?: unknown; content?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
+  createMemory(
+    @Body() body: { category?: unknown; content?: unknown },
+    @CurrentPrincipal() principal: AuthPrincipal,
+  ) {
     return this.agent.createMemory(body ?? {}, principal);
   }
 
   @Patch('memories/:id')
   @ApiOperation({ summary: 'Correct an owned memory' })
   @ApiParam({ name: 'id', description: 'Memory UUID.' })
-  @ApiBody({ schema: { type: 'object', required: ['category', 'content'], properties: { category: { type: 'string', enum: ['preference', 'fact', 'project', 'decision'] }, content: { type: 'string', minLength: 3, maxLength: 500 } } } })
-  @ApiResponse({ status: 404, description: 'Memory does not exist or is not owned by this user in this tenant.' })
-  updateMemory(@Param('id') id: string, @Body() body: { category?: unknown; content?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['category', 'content'],
+      properties: {
+        category: { type: 'string', enum: ['preference', 'fact', 'project', 'decision'] },
+        content: { type: 'string', minLength: 3, maxLength: 500 },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Memory does not exist or is not owned by this user in this tenant.',
+  })
+  updateMemory(
+    @Param('id') id: string,
+    @Body() body: { category?: unknown; content?: unknown },
+    @CurrentPrincipal() principal: AuthPrincipal,
+  ) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_MEMORY_ID');
     return this.agent.updateMemory(id, body ?? {}, principal);
   }
@@ -156,47 +284,93 @@ export class AgentController {
   @ApiOperation({ summary: 'Delete an owned memory' })
   @ApiParam({ name: 'id', description: 'Memory UUID.' })
   @ApiResponse({ status: 200, description: 'Memory deletion result.' })
-  @ApiResponse({ status: 404, description: 'Memory does not exist or is not owned by this user in this tenant.' })
+  @ApiResponse({
+    status: 404,
+    description: 'Memory does not exist or is not owned by this user in this tenant.',
+  })
   deleteMemory(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_MEMORY_ID');
     return this.agent.deleteMemory(id, principal);
   }
 
   @Get('conversations')
-  @ApiOperation({ summary: 'Cursor-based infinite scroll of owned conversations with latest-message status', description: 'Returns conversations and meta {limit,count,hasMore,nextCursor,direction:"older"}. Pass meta.nextCursor unchanged for the next batch. Existing top-level hasMore/nextCursor remain available.' })
-  @ApiQuery({ name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } })
+  @ApiOperation({
+    summary: 'Cursor-based infinite scroll of owned conversations with latest-message status',
+    description:
+      'Returns conversations and meta {limit,count,hasMore,nextCursor,direction:"older"}. Pass meta.nextCursor unchanged for the next batch. Existing top-level hasMore/nextCursor remain available.',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+  })
   @ApiQuery({ name: 'cursor', required: false, schema: { type: 'string', format: 'uuid' } })
   @ApiResponse({ status: 200, description: 'Owned conversations and pagination cursor metadata.' })
   @ApiResponse({ status: 400, description: 'INVALID_PAGE_LIMIT or INVALID_CONVERSATION_CURSOR.' })
-  listConversations(@CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
-    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) throw new BadRequestException('INVALID_PAGE_LIMIT');
+  listConversations(
+    @CurrentPrincipal() principal: AuthPrincipal,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100))
+      throw new BadRequestException('INVALID_PAGE_LIMIT');
     if (cursor !== undefined && !isUuid(cursor)) throw new BadRequestException('INVALID_CONVERSATION_CURSOR');
     return this.agent.listConversations(principal, limit ? Number(limit) : 50, cursor);
   }
 
   @Get('conversations/:id')
-  @ApiOperation({ summary: 'Load recent messages or prepend older messages on upward scroll', description: 'Messages in each batch are chronological. The first request selects the newest batch. Pass meta.nextCursor to get older messages and prepend them. Returns conversation fields, messages and meta; model context limits are independent.' })
-  @ApiQuery({ name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 100 } })
+  @ApiOperation({
+    summary: 'Load recent messages or prepend older messages on upward scroll',
+    description:
+      'Messages in each batch are chronological. The first request selects the newest batch. Pass meta.nextCursor to get older messages and prepend them. Returns conversation fields, messages and meta; model context limits are independent.',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    schema: { type: 'integer', minimum: 1, maximum: 200, default: 100 },
+  })
   @ApiQuery({ name: 'cursor', required: false, schema: { type: 'string', format: 'uuid' } })
   @ApiParam({ name: 'id', description: 'Conversation UUID.' })
-  @ApiResponse({ status: 200, description: 'Conversation details, chronological messages, and pagination metadata.' })
+  @ApiResponse({
+    status: 200,
+    description: 'Conversation details, chronological messages, and pagination metadata.',
+  })
   @ApiResponse({ status: 400, description: 'Invalid conversation ID, page limit, or message cursor.' })
   @ApiNotFoundResponse({ description: 'Conversation does not exist or is not owned by this user.' })
-  getConversation(@Param('id') id: string, @CurrentPrincipal() principal: AuthPrincipal, @Query('limit') limit?: string, @Query('cursor') cursor?: string) {
+  getConversation(
+    @Param('id') id: string,
+    @CurrentPrincipal() principal: AuthPrincipal,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
-    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200)) throw new BadRequestException('INVALID_PAGE_LIMIT');
+    if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200))
+      throw new BadRequestException('INVALID_PAGE_LIMIT');
     if (cursor !== undefined && !isUuid(cursor)) throw new BadRequestException('INVALID_MESSAGE_CURSOR');
-    return this.agent.getConversation(id, principal, { ...(limit ? { limit: Number(limit) } : {}), ...(cursor ? { cursor } : {}) });
+    return this.agent.getConversation(id, principal, {
+      ...(limit ? { limit: Number(limit) } : {}),
+      ...(cursor ? { cursor } : {}),
+    });
   }
 
   @Patch('conversations/:id')
   @ApiOperation({ summary: 'Rename an owned conversation' })
   @ApiParam({ name: 'id', description: 'Conversation UUID.' })
-  @ApiBody({ schema: { type: 'object', required: ['title'], properties: { title: { type: 'string', minLength: 1, maxLength: 120 } } } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['title'],
+      properties: { title: { type: 'string', minLength: 1, maxLength: 120 } },
+    },
+  })
   @ApiResponse({ status: 200, description: 'Updated conversation metadata.' })
   @ApiResponse({ status: 400, description: 'Invalid conversation ID or title.' })
   @ApiNotFoundResponse({ description: 'Conversation does not exist or is not owned by this user.' })
-  renameConversation(@Param('id') id: string, @Body() body: { title?: unknown }, @CurrentPrincipal() principal: AuthPrincipal) {
+  renameConversation(
+    @Param('id') id: string,
+    @Body() body: { title?: unknown },
+    @CurrentPrincipal() principal: AuthPrincipal,
+  ) {
     if (!isUuid(id)) throw new BadRequestException('INVALID_CONVERSATION_ID');
     if (typeof body?.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) {
       throw new BadRequestException('INVALID_CONVERSATION_TITLE');
@@ -235,7 +409,8 @@ export class AgentController {
     if (body.conversationId !== undefined && !isUuid(body.conversationId)) {
       throw new BadRequestException('INVALID_CONVERSATION_ID');
     }
-    if (requireConversation && !body.conversationId) throw new BadRequestException('CONVERSATION_ID_REQUIRED');
+    if (requireConversation && !body.conversationId)
+      throw new BadRequestException('CONVERSATION_ID_REQUIRED');
     return { message: body.message.trim(), conversationId: body.conversationId };
   }
 }

@@ -39,16 +39,16 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/usage/logs?provider=ollama&limit=5
 
 Global model and credential administration requires `Authorization: Bearer $TOKEN` for the configured installation owner. Set `INSTALLATION_OWNER_USER_ID` to that user's database ID; requests fail closed if it is unset. The `apiKey` field is accepted only by the credential endpoint; responses, provider status, and audit rows contain status only. Configure `LLM_CREDENTIALS_ENCRYPTION_KEY` as a base64-encoded random 32-byte key before saving credentials. Keys are encrypted with AES-256-GCM. Existing `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENAI_API_KEY` remain supported as environment fallbacks. A stored key takes precedence; revoking it re-enables the environment fallback if present.
 
-| Method and path | Request | Response |
-| --- | --- | --- |
-| `GET /providers` | — | `[{id, configured}]`; no key values |
-| `PUT /providers/{google\|openrouter\|openai}/credential` | `{"apiKey":"…"}` | `{"provider":"openai","configured":true,"source":"database"}` |
-| `DELETE /providers/{google\|openrouter\|openai}/credential` | — | status; environment fallback may remain configured |
-| `POST /providers/{provider}/test` | — | `{"provider":"openai","configured":true,"reachable":true,"authenticated":true,"statusCode":200}` |
-| `POST /models/sync` | — | registered model list; includes OpenAI catalog when credentials are available |
-| `POST /models` | `{"provider":"openai","modelId":"gpt-4.1-mini"}` | registered model; call model test before activation |
+| Method and path                                             | Request                                          | Response                                                                                         |
+| ----------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `GET /providers`                                            | —                                                | `[{id, configured}]`; no key values                                                              |
+| `PUT /providers/{google\|openrouter\|openai}/credential`    | `{"apiKey":"…"}`                                 | `{"provider":"openai","configured":true,"source":"database"}`                                    |
+| `DELETE /providers/{google\|openrouter\|openai}/credential` | —                                                | status; environment fallback may remain configured                                               |
+| `POST /providers/{provider}/test`                           | —                                                | `{"provider":"openai","configured":true,"reachable":true,"authenticated":true,"statusCode":200}` |
+| `POST /models/sync`                                         | —                                                | registered model list; includes OpenAI catalog when credentials are available                    |
+| `POST /models`                                              | `{"provider":"openai","modelId":"gpt-4.1-mini"}` | registered model; call model test before activation                                              |
 
-Credential errors use `UNSUPPORTED_CLOUD_PROVIDER`, `INVALID_API_KEY`, `PROVIDER_CREDENTIAL_NOT_CONFIGURED`, or encryption-key configuration errors. Model selection rejects unavailable or incompatible entries. Provider tests use fixed official provider endpoints; callers cannot supply endpoints or URLs. OpenAI discovery uses the official `/v1/models` catalog and admits only model families supported by this agent's tool and streaming needs. LangGraph uses one `@langchain/openai` chat adapter for OpenAI, OpenRouter, Ollama, and Google's documented OpenAI-compatible Gemini endpoint. Planner and Answer selections are independent, provider retries and model substitution are disabled, and the integrity gate uses at most one bounded semantic verification call.
+Credential errors use `UNSUPPORTED_CLOUD_PROVIDER`, `INVALID_API_KEY`, `PROVIDER_CREDENTIAL_NOT_CONFIGURED`, or encryption-key configuration errors. Model selection rejects unavailable or incompatible entries. Provider tests use fixed official provider endpoints; callers cannot supply endpoints or URLs. OpenAI discovery uses the official `/v1/models` catalog and admits only model families supported by this agent's tool and streaming needs. LangGraph uses one `@langchain/openai` chat adapter for OpenAI, OpenRouter, Ollama, and Google's documented OpenAI-compatible Gemini endpoint. Router, Planner, and Answer selections are independent; provider retries, model substitution, and post-answer semantic verification are disabled.
 
 ```sh
 curl -X PUT "$BASE/providers/openai/credential" -H "Authorization: Bearer $TOKEN" \

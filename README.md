@@ -25,7 +25,7 @@ pnpm test
 pnpm dev
 ```
 
-Choose Planner and Answer providers/models and add cloud API keys in the LLM Settings page. The backend needs `LLM_CREDENTIALS_ENCRYPTION_KEY` to encrypt UI-managed keys. `AGENT_PROVIDER` and `AGENT_MODEL` seed the shared model defaults; `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENAI_API_KEY` remain supported as credential fallbacks. `pnpm prisma:deploy` applies additive migrations; it does not reset the database.
+Choose Router, Planner, and Answer providers/models and add cloud API keys in the LLM Settings page. The backend needs `LLM_CREDENTIALS_ENCRYPTION_KEY` to encrypt UI-managed keys. `AGENT_PROVIDER` and `AGENT_MODEL` seed shared model defaults; each role can be configured independently. `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENAI_API_KEY` remain supported as credential fallbacks. `pnpm prisma:deploy` applies additive migrations; it does not reset the database.
 
 Default API: `http://127.0.0.1:3220`. Development database: `postgres://sitepilot:sitepilot@localhost:5444/sitepilot`.
 
@@ -228,7 +228,7 @@ backendTools.register({
   id: 'employee_count',
   description: 'Count registered employees in a department.',
   input: z.strictObject({ department: z.string().min(1).max(80) }),
-  authorize: principal => principal.userId === config.installationOwnerUserId,
+  authorize: (principal) => principal.userId === config.installationOwnerUserId,
   execute: async ({ department }, principal, signal) => {
     const count = await directory.countEmployees(principal.tenantId, department, signal);
     return `Registered employees: ${count}`;
@@ -241,6 +241,7 @@ server-provided principal for user scoping. It must honor the abort signal.
 The registry is intended for read-only handlers. Tool summaries are displayed
 verbatim and are kept separate from document evidence. The existing planner can
 select a registered tool alone or pair it with TypeGraph retrieval.
+
 # LLM administration API (backend contract)
 
 All global routes below require a JWT in `Authorization: Bearer <token>` for the configured installation owner. Usage analytics is available to authenticated users and is scoped to the caller's user ID. Swagger documents these routes at `/api/docs` outside production.

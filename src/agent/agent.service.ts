@@ -85,7 +85,14 @@ export class AgentService implements OnModuleDestroy {
 
   async listConversations(principal: AuthPrincipal, limit = 50, cursor?: string) {
     const pageSize = Math.max(1, Math.min(100, Math.trunc(limit)));
-    if (cursor && !await this.prisma.conversation.findFirst({ where: { id: cursor, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null }, select: { id: true } })) throw new NotFoundException('CONVERSATION_CURSOR_NOT_FOUND');
+    if (
+      cursor &&
+      !(await this.prisma.conversation.findFirst({
+        where: { id: cursor, tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
+        select: { id: true },
+      }))
+    )
+      throw new NotFoundException('CONVERSATION_CURSOR_NOT_FOUND');
     const rows = await this.prisma.conversation.findMany({
       where: { tenantId: principal.tenantId, ownerId: principal.userId, deletedAt: null },
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
@@ -96,17 +103,47 @@ export class AgentService implements OnModuleDestroy {
     const hasMore = rows.length > pageSize;
     const conversations = rows.slice(0, pageSize);
     const nextCursor = hasMore ? conversations.at(-1)?.id : null;
-    const ids = conversations.map(item => item.id);
+    const ids = conversations.map((item) => item.id);
     await this.reconcileStaleTurns(ids);
-    const messages = ids.length ? await this.prisma.message.findMany({
-      where: { conversationId: { in: ids } }, orderBy: [{ createdAt: 'desc' }, { role: 'asc' }],
-      distinct: ['conversationId'], select: { id: true, conversationId: true, role: true, content: true, status: true, stage: true, createdAt: true },
-    }) : [];
-    const latest = new Map(messages.map(item => [item.conversationId, item]));
-    return { hasMore, nextCursor, meta: { limit: pageSize, count: conversations.length, hasMore, nextCursor, direction: 'older' as const }, conversations: conversations.map(conversation => ({ ...conversation, lastMessage: latest.get(conversation.id) ?? null })) };
+    const messages = ids.length
+      ? await this.prisma.message.findMany({
+          where: { conversationId: { in: ids } },
+          orderBy: [{ createdAt: 'desc' }, { role: 'asc' }],
+          distinct: ['conversationId'],
+          select: {
+            id: true,
+            conversationId: true,
+            role: true,
+            content: true,
+            status: true,
+            stage: true,
+            createdAt: true,
+          },
+        })
+      : [];
+    const latest = new Map(messages.map((item) => [item.conversationId, item]));
+    return {
+      hasMore,
+      nextCursor,
+      meta: {
+        limit: pageSize,
+        count: conversations.length,
+        hasMore,
+        nextCursor,
+        direction: 'older' as const,
+      },
+      conversations: conversations.map((conversation) => ({
+        ...conversation,
+        lastMessage: latest.get(conversation.id) ?? null,
+      })),
+    };
   }
 
-  async getConversation(conversationId: string, principal: AuthPrincipal, page: { limit?: number; cursor?: string } = {}) {
+  async getConversation(
+    conversationId: string,
+    principal: AuthPrincipal,
+    page: { limit?: number; cursor?: string } = {},
+  ) {
     const conversation = await this.prisma.conversation.findFirst({
       where: {
         id: conversationId,
@@ -126,12 +163,37 @@ export class AgentService implements OnModuleDestroy {
     const limit = Math.min(200, Math.max(1, Math.trunc(page.limit ?? 100)));
     // UI pagination is independent of the model context budget. Validate cursor
     // ownership before using Prisma's unique cursor.
-    if (page.cursor && !await this.prisma.message.findFirst({ where: { id: page.cursor, conversationId }, select: { id: true } })) throw new NotFoundException('MESSAGE_CURSOR_NOT_FOUND');
-    const rows = await this.prisma.message.findMany({ where: { conversationId }, orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }], take: limit + 1, ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}) });
+    if (
+      page.cursor &&
+      !(await this.prisma.message.findFirst({
+        where: { id: page.cursor, conversationId },
+        select: { id: true },
+      }))
+    )
+      throw new NotFoundException('MESSAGE_CURSOR_NOT_FOUND');
+    const rows = await this.prisma.message.findMany({
+      where: { conversationId },
+      orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}),
+    });
     const hasMore = rows.length > limit;
     const messages = rows.slice(0, limit);
     const nextCursor = hasMore ? messages.at(-1)?.id : null;
-    return { ...conversation, hasMore, nextCursor, meta: { limit, count: messages.length, hasMore, nextCursor, direction: 'older' as const }, messages: messages.map(({ structuredSelection: _selection, ...item }) => item).reverse().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0)) };
+    return {
+      ...conversation,
+      hasMore,
+      nextCursor,
+      meta: { limit, count: messages.length, hasMore, nextCursor, direction: 'older' as const },
+      messages: messages
+        .map(({ structuredSelection: _selection, ...item }) => item)
+        .reverse()
+        .sort(
+          (a, b) =>
+            a.createdAt.getTime() - b.createdAt.getTime() ||
+            (a.role === 'user' ? -1 : b.role === 'user' ? 1 : 0),
+        ),
+    };
   }
 
   async renameConversation(conversationId: string, title: string, principal: AuthPrincipal) {
@@ -174,10 +236,44 @@ export class AgentService implements OnModuleDestroy {
     return this.askLangGraph(message, conversationId, principal, runtime);
   }
 
-  protected createGraph(principal: AuthPrincipal, runtime: RuntimeModelInput, progress?: (event: string, data: Record<string, unknown>) => Promise<void> | void, requestContext?: { conversationId: string; logicalRequestId: string }) {
-    return createLangGraphOrchestrator({ typegraph: this.typegraph, structuredData: this.structuredData, principal, backendTools: this.backendTools, runtime: { planner: modelForRole(runtime, 'PLANNER'), answer: modelForRole(runtime, 'ANSWER') }, progress,
-      onPlannerDiagnostic: diagnostic => persistPlannerDiagnostic(this.prisma, diagnostic),
-      onUsage: record => persistUsage(this.prisma, { tenantId: principal.tenantId, userId: principal.userId, conversationId: requestContext?.conversationId, logicalRequestId: requestContext?.logicalRequestId ?? record.requestId, runtime: modelForRole(runtime, record.role) }, { usage: record.usage, status: record.status, latencyMs: record.latencyMs, source: 'langchain-openai', error: record.error, errorCategory: record.error ? safeAgentFailure(record.error)?.code : undefined, finishReason: record.finishReason }),
+  protected createGraph(
+    principal: AuthPrincipal,
+    runtime: RuntimeModelInput,
+    progress?: (event: string, data: Record<string, unknown>) => Promise<void> | void,
+    requestContext?: { conversationId: string; logicalRequestId: string },
+  ) {
+    return createLangGraphOrchestrator({
+      typegraph: this.typegraph,
+      structuredData: this.structuredData,
+      principal,
+      backendTools: this.backendTools,
+      runtime: {
+        router: modelForRole(runtime, 'ROUTER'),
+        planner: modelForRole(runtime, 'PLANNER'),
+        answer: modelForRole(runtime, 'ANSWER'),
+      },
+      progress,
+      onPlannerDiagnostic: (diagnostic) => persistPlannerDiagnostic(this.prisma, diagnostic),
+      onUsage: (record) =>
+        persistUsage(
+          this.prisma,
+          {
+            tenantId: principal.tenantId,
+            userId: principal.userId,
+            conversationId: requestContext?.conversationId,
+            logicalRequestId: requestContext?.logicalRequestId ?? record.requestId,
+            runtime: modelForRole(runtime, record.role),
+          },
+          {
+            usage: record.usage,
+            status: record.status,
+            latencyMs: record.latencyMs,
+            source: 'langchain-openai',
+            error: record.error,
+            errorCategory: record.error ? safeAgentFailure(record.error)?.code : undefined,
+            finishReason: record.finishReason,
+          },
+        ),
     });
   }
   async stream(
@@ -190,17 +286,38 @@ export class AgentService implements OnModuleDestroy {
     const startedAt = performance.now();
     const runtime = await resolveRuntimeModels(this.prisma);
     const run = this.activeRuns.create(principal);
-    const overallDeadlineMs = Math.min(600_000, (runtime.planner.requestTimeoutMs ?? config.agentTimeoutMs) + (runtime.answer.maxStreamDurationMs ?? config.answerStreamMaxDurationMs));
-    const runSignal = AbortSignal.any([abortSignal, run.controller.signal, AbortSignal.timeout(overallDeadlineMs)]);
-    const runWriter: EventWriter = (event, data) => write(event, event === 'status' ? { ...data, runId: run.runId } : data);
+    const overallDeadlineMs = Math.min(
+      600_000,
+      (runtime.router.requestTimeoutMs ?? config.agentTimeoutMs) +
+        (runtime.planner.requestTimeoutMs ?? config.agentTimeoutMs) +
+        (runtime.answer.maxStreamDurationMs ?? config.answerStreamMaxDurationMs),
+    );
+    const runSignal = AbortSignal.any([
+      abortSignal,
+      run.controller.signal,
+      AbortSignal.timeout(overallDeadlineMs),
+    ]);
+    const runWriter: EventWriter = (event, data) =>
+      write(event, event === 'status' ? { ...data, runId: run.runId } : data);
     try {
-      const result = await this.streamLangGraph(message, conversationId, runSignal, runWriter, principal, run.runId, runtime);
+      const result = await this.streamLangGraph(
+        message,
+        conversationId,
+        runSignal,
+        runWriter,
+        principal,
+        run.runId,
+        runtime,
+      );
       this.activeRuns.finish(run.runId, 'completed');
       return result;
     } catch (error) {
       if (run.cancelRequested) {
         this.activeRuns.finish(run.runId, 'cancelled');
-        throw new AgentRunCancelledError(run.runId, Math.max(0, Date.now() - (run.cancelRequestedAtMs ?? Date.now())));
+        throw new AgentRunCancelledError(
+          run.runId,
+          Math.max(0, Date.now() - (run.cancelRequestedAtMs ?? Date.now())),
+        );
       }
       if (runSignal.aborted && !safeAgentFailure(runSignal.reason)) {
         this.activeRuns.finish(run.runId, 'cancelled');
@@ -208,58 +325,185 @@ export class AgentService implements OnModuleDestroy {
       }
       this.activeRuns.finish(run.runId, 'failed');
       const failure = safeAgentFailure(error);
-      if (failure && !failure.requestId) throw new AgentRequestFailure(failure.code, {
-        requestId: run.runId,
-        retryable: failure.retryable,
-        retryAfterMs: failure.retryAfterMs,
-        telemetry: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(failure.code) ? undefined : { providerErrors: 1, totalMs: Math.round(performance.now() - startedAt) },
-      });
+      if (failure && !failure.requestId)
+        throw new AgentRequestFailure(failure.code, {
+          requestId: run.runId,
+          retryable: failure.retryable,
+          retryAfterMs: failure.retryAfterMs,
+          telemetry: ['INVALID_MODEL_OUTPUT', 'OUTPUT_TRUNCATED', 'TOOL_EXECUTION_FAILED'].includes(
+            failure.code,
+          )
+            ? undefined
+            : { providerErrors: 1, totalMs: Math.round(performance.now() - startedAt) },
+        });
       throw error;
     }
   }
 
-  private async askLangGraph(message: string, conversationId: string | undefined, principal: AuthPrincipal, runtime: RuntimeModelInput) {
+  private async askLangGraph(
+    message: string,
+    conversationId: string | undefined,
+    principal: AuthPrincipal,
+    runtime: RuntimeModelInput,
+  ) {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
-    const graph = this.createGraph(principal, runtime, undefined, { conversationId: turn.conversationId, logicalRequestId: turn.assistantMessageId });
+    const graph = this.createGraph(principal, runtime, undefined, {
+      conversationId: turn.conversationId,
+      logicalRequestId: turn.assistantMessageId,
+    });
     try {
-      const final = await graph.invoke({ message, history: turn.prompt.slice(0, -1), memories: turn.userMemories, previousSelection: turn.previousSelection, signal: AbortSignal.timeout(config.agentTimeoutMs) });
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, undefined, principal, final.persistenceSources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
-      return { answer: final.answer, sources: final.sources, evidenceReferences: final.evidenceReferences, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus, executionStatus: final.executionStatus, outcome: final.outcome, conversationId: turn.conversationId, requestId: final.requestId, timing: { llmCalls: final.llmCalls, totalMs: Math.round(performance.now() - startedAt), orchestration: 1 } };
+      const final = await graph.invoke({
+        message,
+        history: turn.prompt.slice(0, -1),
+        memories: turn.userMemories,
+        previousSelection: turn.previousSelection,
+        previousContext: {
+          summary: turn.conversationSummary ?? '',
+          entities: turn.contextEntities ?? [],
+          sources: (turn.evidenceRefs ?? []).map(({ filename, sourceRef }) => ({ filename, sourceRef })),
+        },
+        signal: AbortSignal.timeout(config.agentTimeoutMs),
+      });
+      await this.saveAssistant(
+        turn.conversationId,
+        turn.assistantMessageId,
+        final.answer,
+        undefined,
+        principal,
+        final.persistenceSources,
+        turn.preserveConversationContext,
+        final.outcome === 'failure' ? 'failed' : 'completed',
+      );
+      return {
+        answer: final.answer,
+        sources: final.sources,
+        evidenceReferences: final.evidenceReferences,
+        toolsCalled: final.toolsCalled,
+        citationValidation: final.citationValidation,
+        verificationStatus: final.verificationStatus,
+        executionStatus: final.executionStatus,
+        outcome: final.outcome,
+        conversationId: turn.conversationId,
+        requestId: final.requestId,
+        timing: {
+          llmCalls: final.llmCalls,
+          totalMs: Math.round(performance.now() - startedAt),
+          orchestration: 1,
+        },
+      };
     } catch (error) {
-      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, 'failed').catch(() => undefined);
+      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, 'failed').catch(
+        () => undefined,
+      );
       const failure = safeAgentFailure(error);
-      if (failure) throw new AgentRequestFailure(failure.code, { requestId: turn.assistantMessageId, retryable: failure.retryable, retryAfterMs: failure.retryAfterMs, telemetry: failure.telemetry });
+      if (failure)
+        throw new AgentRequestFailure(failure.code, {
+          requestId: turn.assistantMessageId,
+          retryable: failure.retryable,
+          retryAfterMs: failure.retryAfterMs,
+          telemetry: failure.telemetry,
+        });
       throw error;
     }
   }
 
-  private async streamLangGraph(message: string, conversationId: string | undefined, abortSignal: AbortSignal, write: EventWriter, principal: AuthPrincipal, runId: string, runtime: RuntimeModelInput): Promise<AgentStreamResult> {
+  private async streamLangGraph(
+    message: string,
+    conversationId: string | undefined,
+    abortSignal: AbortSignal,
+    write: EventWriter,
+    principal: AuthPrincipal,
+    runId: string,
+    runtime: RuntimeModelInput,
+  ): Promise<AgentStreamResult> {
     const startedAt = performance.now();
     const turn = await this.beginTurn(message, conversationId, principal);
     this.activeRuns.bindConversation(runId, turn.conversationId);
-    await write('status', { status: 'started', orchestration: 'langgraph', conversationId: turn.conversationId, turnId: turn.assistantMessageId });
+    await write('status', {
+      status: 'started',
+      orchestration: 'langgraph',
+      conversationId: turn.conversationId,
+      turnId: turn.assistantMessageId,
+    });
     let timeToFirstTextMs: number | null = null;
-    const graph = this.createGraph(principal, runtime, async (event, data) => {
-        if (event === 'stage' && typeof data.stage === 'string') await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, data.stage);
+    const graph = this.createGraph(
+      principal,
+      runtime,
+      async (event, data) => {
+        if (event === 'stage' && typeof data.stage === 'string')
+          await this.updateAssistantStage(turn.conversationId, turn.assistantMessageId, data.stage);
         await write(event, data);
-      }, { conversationId: turn.conversationId, logicalRequestId: turn.assistantMessageId });
+      },
+      { conversationId: turn.conversationId, logicalRequestId: turn.assistantMessageId },
+    );
     try {
-      const final = await graph.invoke({ message, history: turn.prompt.slice(0, -1), memories: turn.userMemories, previousSelection: turn.previousSelection, signal: abortSignal });
+      const final = await graph.invoke({
+        message,
+        history: turn.prompt.slice(0, -1),
+        memories: turn.userMemories,
+        previousSelection: turn.previousSelection,
+        previousContext: {
+          summary: turn.conversationSummary ?? '',
+          entities: turn.contextEntities ?? [],
+          sources: (turn.evidenceRefs ?? []).map(({ filename, sourceRef }) => ({ filename, sourceRef })),
+        },
+        signal: abortSignal,
+      });
       this.activeRuns.beginFinalization(runId, abortSignal);
-      await this.saveAssistant(turn.conversationId, turn.assistantMessageId, final.answer, undefined, principal, final.persistenceSources, turn.preserveConversationContext, final.outcome === 'failure' ? 'failed' : 'completed');
+      await this.saveAssistant(
+        turn.conversationId,
+        turn.assistantMessageId,
+        final.answer,
+        undefined,
+        principal,
+        final.persistenceSources,
+        turn.preserveConversationContext,
+        final.outcome === 'failure' ? 'failed' : 'completed',
+      );
       await write('sources', { sources: final.sources });
       timeToFirstTextMs = Math.round(performance.now() - startedAt);
       await write('text-delta', { text: final.answer, verification: final.verificationStatus });
-      const timing = { timeToFirstStatusMs: Math.round(performance.now() - startedAt), timeToFirstTextMs, totalMs: Math.round(performance.now() - startedAt), llmCalls: final.llmCalls, orchestration: 1 };
-      const result = { answer: final.answer, sources: final.sources, evidenceReferences: final.evidenceReferences, toolsCalled: final.toolsCalled, citationValidation: final.citationValidation, verificationStatus: final.verificationStatus, executionStatus: final.executionStatus, outcome: final.outcome, conversationId: turn.conversationId, timing };
-      await write('stage', { stage: final.outcome === 'failure' ? 'failed' : 'completed', status: final.outcome === 'failure' ? 'failed' : 'completed', message: final.outcome === 'failure' ? 'Answer generation failed' : 'Answer is ready' });
+      const timing = {
+        timeToFirstStatusMs: Math.round(performance.now() - startedAt),
+        timeToFirstTextMs,
+        totalMs: Math.round(performance.now() - startedAt),
+        llmCalls: final.llmCalls,
+        orchestration: 1,
+      };
+      const result = {
+        answer: final.answer,
+        sources: final.sources,
+        evidenceReferences: final.evidenceReferences,
+        toolsCalled: final.toolsCalled,
+        citationValidation: final.citationValidation,
+        verificationStatus: final.verificationStatus,
+        executionStatus: final.executionStatus,
+        outcome: final.outcome,
+        conversationId: turn.conversationId,
+        timing,
+      };
+      await write('stage', {
+        stage: final.outcome === 'failure' ? 'failed' : 'completed',
+        status: final.outcome === 'failure' ? 'failed' : 'completed',
+        message: final.outcome === 'failure' ? 'Answer generation failed' : 'Answer is ready',
+      });
       await write('done', { ...result, requestId: final.requestId, finishObserved: true, telemetry: timing });
       return result;
     } catch (error) {
-      await this.finishAssistantTurn(turn.conversationId, turn.assistantMessageId, abortSignal.aborted ? 'interrupted' : 'failed').catch(() => undefined);
+      await this.finishAssistantTurn(
+        turn.conversationId,
+        turn.assistantMessageId,
+        abortSignal.aborted ? 'interrupted' : 'failed',
+      ).catch(() => undefined);
       const failure = safeAgentFailure(error);
-      if (failure) throw new AgentRequestFailure(failure.code, { requestId: turn.assistantMessageId, retryable: failure.retryable, retryAfterMs: failure.retryAfterMs, telemetry: failure.telemetry });
+      if (failure)
+        throw new AgentRequestFailure(failure.code, {
+          requestId: turn.assistantMessageId,
+          retryable: failure.retryable,
+          retryAfterMs: failure.retryAfterMs,
+          telemetry: failure.telemetry,
+        });
       throw error;
     }
   }
@@ -279,10 +523,22 @@ export class AgentService implements OnModuleDestroy {
     return { ...result, ackLatencyMs: Math.max(result.ackLatencyMs, Date.now() - requestStartedAt) };
   }
 
-  private async beginTurn(message: string, conversationId: string | undefined, principal: AuthPrincipal): Promise<{
-    conversationId: string; assistantMessageId: string; prompt: AgentMessage[]; previousSelection?: StructuredSelection;
+  private async beginTurn(
+    message: string,
+    conversationId: string | undefined,
+    principal: AuthPrincipal,
+  ): Promise<{
+    conversationId: string;
+    assistantMessageId: string;
+    prompt: AgentMessage[];
+    previousSelection?: StructuredSelection;
     userMemories: Array<{ category: 'preference' | 'fact' | 'project' | 'decision'; content: string }>;
-    evidenceRefs: Array<{ documentId: string; filename: string; sourceRef: string; documentVersionId?: string }>;
+    evidenceRefs: Array<{
+      documentId: string;
+      filename: string;
+      sourceRef: string;
+      documentVersionId?: string;
+    }>;
     contextEntities: string[];
     conversationSummary: string;
     preserveConversationContext: boolean;
@@ -298,7 +554,7 @@ export class AgentService implements OnModuleDestroy {
           select: { id: true },
         })
       : await this.prisma.conversation.create({
-            data: { tenantId: principal.tenantId, ownerId: principal.userId },
+          data: { tenantId: principal.tenantId, ownerId: principal.userId },
           select: { id: true },
         });
     if (!conversation) throw new NotFoundException('CONVERSATION_NOT_FOUND');
@@ -309,7 +565,10 @@ export class AgentService implements OnModuleDestroy {
     ]);
 
     const history = await this.prisma.message.findMany({
-      where: { conversationId: conversation.id, OR: [{ role: 'user' }, { role: 'assistant', status: 'completed' }] },
+      where: {
+        conversationId: conversation.id,
+        OR: [{ role: 'user' }, { role: 'assistant', status: 'completed' }],
+      },
       // PostgreSQL now() is shared by the two inserts in a turn's transaction.
       // Reverse chronological order must put assistant before user on that tie,
       // so reversing the bounded page restores the actual dialogue order.
@@ -321,15 +580,28 @@ export class AgentService implements OnModuleDestroy {
       this.prisma.message.create({
         data: { conversationId: conversation.id, role: 'user', content: message },
       }),
-      this.prisma.message.create({ data: { conversationId: conversation.id, role: 'assistant', content: '', status: 'processing', stage: 'thinking' } }),
+      this.prisma.message.create({
+        data: {
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: '',
+          status: 'processing',
+          stage: 'thinking',
+        },
+      }),
       this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }),
     ]);
-    const prompt = history.filter(item => item.role !== 'assistant' || item.content.trim()).reverse().map(item => ({
-      role: item.role === 'assistant' ? 'assistant' as const : 'user' as const,
-      content: item.content.slice(0, config.conversationHistoryChars),
-    }));
+    const prompt = history
+      .filter((item) => item.role !== 'assistant' || item.content.trim())
+      .reverse()
+      .map((item) => ({
+        role: item.role === 'assistant' ? ('assistant' as const) : ('user' as const),
+        content: item.content.slice(0, config.conversationHistoryChars),
+      }));
     prompt.push({ role: 'user', content: message });
-    const storedSelection = context ? context.activeSelection : history.find(item => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
+    const storedSelection = context
+      ? context.activeSelection
+      : history.find((item) => item.role === 'assistant' && item.structuredSelection)?.structuredSelection;
     const previous = structuredSelectionSchema.safeParse(storedSelection);
     const contextEntities = conversationEntitiesSchema.safeParse(context?.entities);
     const evidenceRefs = conversationEvidenceReferencesSchema.safeParse(context?.evidenceRefs);
@@ -340,43 +612,93 @@ export class AgentService implements OnModuleDestroy {
       evidenceRefs: savedEvidenceRefs,
       activeSelection: previous.success ? previous.data : undefined,
     });
-    const activeSelection = preserveConversationContext && previous.success ? previous.data : undefined;
     return {
-      conversationId: conversation.id, assistantMessageId: assistantMessage.id, prompt,
-      previousSelection: activeSelection,
-      userMemories, evidenceRefs: savedEvidenceRefs,
+      conversationId: conversation.id,
+      assistantMessageId: assistantMessage.id,
+      prompt,
+      previousSelection: previous.success ? previous.data : undefined,
+      userMemories,
+      evidenceRefs: savedEvidenceRefs,
       contextEntities: contextEntities.success ? contextEntities.data : [],
-      conversationSummary: preserveConversationContext && typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
+      conversationSummary: typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
       preserveConversationContext,
     };
   }
 
-  private async saveAssistant(conversationId: string, assistantMessageId: string, content: string, selection?: StructuredSelection, principal?: AuthPrincipal, sources: VerifiedSource[] = [], preserveConversationContext = false, status: 'completed' | 'failed' = 'completed') {
-    const contextModel = (this.prisma as unknown as { conversationContext?: { upsert?: unknown } }).conversationContext;
+  private async saveAssistant(
+    conversationId: string,
+    assistantMessageId: string,
+    content: string,
+    selection?: StructuredSelection,
+    principal?: AuthPrincipal,
+    sources: VerifiedSource[] = [],
+    preserveConversationContext = false,
+    status: 'completed' | 'failed' = 'completed',
+  ) {
+    const contextModel = (this.prisma as unknown as { conversationContext?: { upsert?: unknown } })
+      .conversationContext;
     if (principal && contextModel?.upsert) {
-      await this.prisma.$transaction(async transaction => {
-        await transaction.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status, stage: status === 'failed' ? 'failed' : null, ...(selection ? { structuredSelection: selection } : {}) } });
-        await transaction.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
-        if (status === 'completed') await this.conversationContext.saveTurn(transaction, conversationId, principal, content, sources, selection, preserveConversationContext);
+      await this.prisma.$transaction(async (transaction) => {
+        await transaction.message.updateMany({
+          where: { id: assistantMessageId, conversationId, role: 'assistant' },
+          data: {
+            content,
+            status,
+            stage: status === 'failed' ? 'failed' : null,
+            ...(selection ? { structuredSelection: selection } : {}),
+          },
+        });
+        await transaction.conversation.update({
+          where: { id: conversationId },
+          data: { updatedAt: new Date() },
+        });
+        if (status === 'completed')
+          await this.conversationContext.saveTurn(
+            transaction,
+            conversationId,
+            principal,
+            content,
+            sources,
+            selection,
+            preserveConversationContext,
+          );
       });
       return;
     }
     await this.prisma.$transaction([
-      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant' }, data: { content, status, stage: status === 'failed' ? 'failed' : null, ...(selection ? { structuredSelection: selection } : {}) } }),
+      this.prisma.message.updateMany({
+        where: { id: assistantMessageId, conversationId, role: 'assistant' },
+        data: {
+          content,
+          status,
+          stage: status === 'failed' ? 'failed' : null,
+          ...(selection ? { structuredSelection: selection } : {}),
+        },
+      }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
   }
 
   private async updateAssistantStage(conversationId: string, assistantMessageId: string, stage: string) {
     await this.prisma.$transaction([
-      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' }, data: { stage } }),
+      this.prisma.message.updateMany({
+        where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' },
+        data: { stage },
+      }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
   }
 
-  private async finishAssistantTurn(conversationId: string, assistantMessageId: string, status: 'interrupted' | 'failed') {
+  private async finishAssistantTurn(
+    conversationId: string,
+    assistantMessageId: string,
+    status: 'interrupted' | 'failed',
+  ) {
     await this.prisma.$transaction([
-      this.prisma.message.updateMany({ where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' }, data: { status, stage: status } }),
+      this.prisma.message.updateMany({
+        where: { id: assistantMessageId, conversationId, role: 'assistant', status: 'processing' },
+        data: { status, stage: status },
+      }),
       this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }),
     ]);
   }
@@ -385,10 +707,13 @@ export class AgentService implements OnModuleDestroy {
     if (!conversationIds.length) return;
     const staleBefore = new Date(Date.now() - config.agentTimeoutMs - 10_000);
     await this.prisma.message.updateMany({
-      where: { conversationId: { in: conversationIds }, role: 'assistant', status: 'processing', createdAt: { lt: staleBefore } },
+      where: {
+        conversationId: { in: conversationIds },
+        role: 'assistant',
+        status: 'processing',
+        createdAt: { lt: staleBefore },
+      },
       data: { status: 'interrupted', stage: 'interrupted' },
     });
   }
-
-
 }

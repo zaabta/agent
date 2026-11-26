@@ -10,6 +10,11 @@ async function main() {
   try {
     await typegraphDeploy(typegraphConfig(pool, new EmbeddingsService()));
     console.log('TypeGraph schema deployed');
-  } finally { await pool.end(); }
+  } finally {
+    await pool.end();
+  }
 }
-main().catch(err => { console.error(err); process.exitCode = 1; });
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

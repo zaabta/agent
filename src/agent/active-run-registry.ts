@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-export type AgentRunState = 'starting' | 'running' | 'finalizing' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
+export type AgentRunState =
+  'starting' | 'running' | 'finalizing' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
 
 export interface AgentRunOwner {
   userId: string;
@@ -52,20 +53,32 @@ export class ActiveAgentRunRegistry {
 
   create(owner: AgentRunOwner): AgentRunHandle {
     this.prune();
-    const active = [...this.runs.values()].filter(run => this.isActive(run.state));
-    if (active.length >= this.maxActive || active.filter(run => run.ownerId === owner.userId).length >= this.maxPerUser) {
+    const active = [...this.runs.values()].filter((run) => this.isActive(run.state));
+    if (
+      active.length >= this.maxActive ||
+      active.filter((run) => run.ownerId === owner.userId).length >= this.maxPerUser
+    ) {
       throw new AgentRunCapacityError();
     }
     while (this.runs.size >= this.maxEntries) {
-      const oldest = [...this.runs.values()].filter(run => !this.isActive(run.state)).sort((a, b) => (a.finishedAtMs ?? 0) - (b.finishedAtMs ?? 0))[0];
+      const oldest = [...this.runs.values()]
+        .filter((run) => !this.isActive(run.state))
+        .sort((a, b) => (a.finishedAtMs ?? 0) - (b.finishedAtMs ?? 0))[0];
       if (!oldest) throw new AgentRunCapacityError();
       this.runs.delete(oldest.runId);
     }
     let resolveSettled!: () => void;
-    const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
     const run: AgentRunHandle = {
-      runId: randomUUID(), ownerId: owner.userId, tenantId: owner.tenantId, state: 'starting',
-      startedAtMs: Date.now(), controller: new AbortController(), cancelRequested: false,
+      runId: randomUUID(),
+      ownerId: owner.userId,
+      tenantId: owner.tenantId,
+      state: 'starting',
+      startedAtMs: Date.now(),
+      controller: new AbortController(),
+      cancelRequested: false,
       settled,
       settle: () => {
         if (run.finishedAtMs !== undefined) return;
@@ -85,7 +98,8 @@ export class ActiveAgentRunRegistry {
   }
 
   beginFinalization(runId: string, signal: AbortSignal) {
-    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_RUN_CANCELLED');
+    if (signal.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_RUN_CANCELLED');
     const run = this.runs.get(runId);
     if (run && run.state === 'running') run.state = 'finalizing';
   }
@@ -108,10 +122,24 @@ export class ActiveAgentRunRegistry {
   async cancel(run: AgentRunHandle): Promise<AgentRunCancellationResult> {
     const startedAt = Date.now();
     if (run.state === 'completed' || run.state === 'cancelled' || run.state === 'failed') {
-      return { runId: run.runId, status: run.state, cancellationRequested: false, executionSettled: true, providerStopConfirmed: false, ackLatencyMs: Date.now() - startedAt };
+      return {
+        runId: run.runId,
+        status: run.state,
+        cancellationRequested: false,
+        executionSettled: true,
+        providerStopConfirmed: false,
+        ackLatencyMs: Date.now() - startedAt,
+      };
     }
     if (run.state === 'finalizing') {
-      return { runId: run.runId, status: 'finishing', cancellationRequested: false, executionSettled: false, providerStopConfirmed: false, ackLatencyMs: Date.now() - startedAt };
+      return {
+        runId: run.runId,
+        status: 'finishing',
+        cancellationRequested: false,
+        executionSettled: false,
+        providerStopConfirmed: false,
+        ackLatencyMs: Date.now() - startedAt,
+      };
     }
     if (!run.cancelRequested) {
       run.cancelRequested = true;
@@ -122,12 +150,15 @@ export class ActiveAgentRunRegistry {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const settled = await Promise.race([
       run.settled.then(() => true),
-      new Promise<false>(resolve => { timeout = setTimeout(() => resolve(false), this.cancellationWaitMs); timeout.unref?.(); }),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), this.cancellationWaitMs);
+        timeout.unref?.();
+      }),
     ]);
     if (timeout) clearTimeout(timeout);
     return {
       runId: run.runId,
-      status: settled ? run.state as AgentRunCancellationResult['status'] : 'cancelling',
+      status: settled ? (run.state as AgentRunCancellationResult['status']) : 'cancelling',
       cancellationRequested: true,
       executionSettled: settled,
       providerStopConfirmed: false,
@@ -136,7 +167,7 @@ export class ActiveAgentRunRegistry {
   }
 
   async shutdown(waitMs = 1_500) {
-    const active = [...this.runs.values()].filter(run => this.isActive(run.state));
+    const active = [...this.runs.values()].filter((run) => this.isActive(run.state));
     for (const run of active) {
       if (!run.controller.signal.aborted) {
         run.state = 'cancelling';
@@ -145,8 +176,11 @@ export class ActiveAgentRunRegistry {
     }
     let timeout: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      Promise.all(active.map(run => run.settled)),
-      new Promise<void>(resolve => { timeout = setTimeout(resolve, waitMs); timeout.unref?.(); }),
+      Promise.all(active.map((run) => run.settled)),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, waitMs);
+        timeout.unref?.();
+      }),
     ]);
     if (timeout) clearTimeout(timeout);
   }
@@ -158,13 +192,21 @@ export class ActiveAgentRunRegistry {
   private prune() {
     const now = Date.now();
     for (const [id, run] of this.runs) {
-      if (!this.isActive(run.state) && run.finishedAtMs !== undefined && now - run.finishedAtMs > this.terminalTtlMs) this.runs.delete(id);
+      if (
+        !this.isActive(run.state) &&
+        run.finishedAtMs !== undefined &&
+        now - run.finishedAtMs > this.terminalTtlMs
+      )
+        this.runs.delete(id);
     }
   }
 }
 
 export class AgentRunCancelledError extends Error {
-  constructor(readonly runId: string, readonly ackLatencyMs: number) {
+  constructor(
+    readonly runId: string,
+    readonly ackLatencyMs: number,
+  ) {
     super('AGENT_RUN_CANCELLED');
     this.name = 'AgentRunCancelledError';
   }

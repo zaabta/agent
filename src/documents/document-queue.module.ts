@@ -7,7 +7,10 @@ import { DOCUMENT_QUEUE } from './document-queue.constants.js';
 
 @Module({
   providers: [
-    { provide: DOCUMENT_QUEUE, useFactory: () => new Queue(config.documentQueue, { connection: redisConnection(config.redisUrl) }) },
+    {
+      provide: DOCUMENT_QUEUE,
+      useFactory: () => new Queue(config.documentQueue, { connection: redisConnection(config.redisUrl) }),
+    },
     DocumentQueueService,
   ],
   exports: [DOCUMENT_QUEUE, DocumentQueueService],

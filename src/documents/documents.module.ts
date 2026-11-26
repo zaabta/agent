@@ -9,5 +9,16 @@ import { JobsService } from './jobs.service.js';
 import { StructuredDataService } from './structured-data.service.js';
 import { AdminWorkersController } from './admin-workers.controller.js';
 import { WorkerMonitoringService } from './worker-monitoring.service.js';
-@Module({imports:[TypegraphModule, DocumentQueueModule],controllers: [DocumentsController, JobsController, AdminWorkersController], providers: [DocumentsService, DocumentStorageService, JobsService, StructuredDataService, WorkerMonitoringService], exports:[DocumentsService, StructuredDataService]})
+@Module({
+  imports: [TypegraphModule, DocumentQueueModule],
+  controllers: [DocumentsController, JobsController, AdminWorkersController],
+  providers: [
+    DocumentsService,
+    DocumentStorageService,
+    JobsService,
+    StructuredDataService,
+    WorkerMonitoringService,
+  ],
+  exports: [DocumentsService, StructuredDataService],
+})
 export class DocumentsModule {}

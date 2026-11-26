@@ -5,9 +5,9 @@ export function repairFilenameEncoding(input: string) {
   // filename then arrives as latin1 code points (Arabic D9 86 becomes "Ù").
   // Decode only reversible latin1 byte sequences; preserve valid Unicode and
   // invalid byte sequences unchanged.
-  if ([...input].some(character => character.codePointAt(0)! > 0xff)) return input;
+  if ([...input].some((character) => character.codePointAt(0)! > 0xff)) return input;
   try {
-    const bytes = Uint8Array.from([...input], character => character.codePointAt(0)!);
+    const bytes = Uint8Array.from([...input], (character) => character.codePointAt(0)!);
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).normalize('NFC');
   } catch {
     return input;
@@ -16,6 +16,9 @@ export function repairFilenameEncoding(input: string) {
 
 export function safeDisplayName(input: string) {
   const decoded = repairFilenameEncoding(input);
-  const leaf = basename(decoded.replace(/\\/g, '/')).normalize('NFKC').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+  const leaf = basename(decoded.replace(/\\/g, '/'))
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .trim();
   return leaf.slice(0, 180) || 'upload';
 }

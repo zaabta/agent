@@ -10,15 +10,15 @@ The router sends ordinary conversation directly to tool execution (which does no
 
 ## Registered capabilities
 
-| Capability | Existing implementation | Authorization/provenance |
-| --- | --- | --- |
-| `document_search` | `TypegraphService.searchDocuments` | Tenant and authenticated user are closed over by the graph. TypeGraph retains active-version filtering and stable source references. |
-| `list_documents` | `TypegraphService.listDocuments` | Tenant and user scope are passed by the server. |
-| `dataset_discovery` | `StructuredDataService.discoverDatasets` | Tenant-scoped, authorized dataset metadata only. |
-| `structured_data_lookup` | `StructuredDataService.lookup` | Tenant-scoped exact-cell lookup with source rows. |
-| `structured_data_analytics` | `StructuredDataService.aggregate` | Bounded read-only operations over validated schema columns and tenant-scoped active versions. |
-| `structured_row_lookup` | `StructuredDataService.lookupRows` | Bounded filters over actual columns, tenant-scoped active versions. |
-| registered read tools | `BackendTools.catalog/execute` | Authorization and argument schemas are rechecked at execution; configured read-only HTTP tools retain version checks and output validation. |
+| Capability                  | Existing implementation                  | Authorization/provenance                                                                                                                    |
+| --------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `document_search`           | `TypegraphService.searchDocuments`       | Tenant and authenticated user are closed over by the graph. TypeGraph retains active-version filtering and stable source references.        |
+| `list_documents`            | `TypegraphService.listDocuments`         | Tenant and user scope are passed by the server.                                                                                             |
+| `dataset_discovery`         | `StructuredDataService.discoverDatasets` | Tenant-scoped, authorized dataset metadata only.                                                                                            |
+| `structured_data_lookup`    | `StructuredDataService.lookup`           | Tenant-scoped exact-cell lookup with source rows.                                                                                           |
+| `structured_data_analytics` | `StructuredDataService.aggregate`        | Bounded read-only operations over validated schema columns and tenant-scoped active versions.                                               |
+| `structured_row_lookup`     | `StructuredDataService.lookupRows`       | Bounded filters over actual columns, tenant-scoped active versions.                                                                         |
+| registered read tools       | `BackendTools.catalog/execute`           | Authorization and argument schemas are rechecked at execution; configured read-only HTTP tools retain version checks and output validation. |
 
 The Phase 1 `AtomicToolRegistration` contract reserves a future read-only registration shape. It is not connected to production systems.
 

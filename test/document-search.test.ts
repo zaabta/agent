@@ -14,8 +14,32 @@ test('direct document search returns TypeGraph ranked passages and filters to re
       return {
         query: 'project location',
         hits: [
-          { content: 'Ready source content', score: 0.12, sourceRef: 'ready.md (line 1)', citation: { documentId: 'ready', filename: 'ready.md', bucketId: 'documents', chunkIndex: 0, chunkCount: 1 }, metadata: { internal: true } },
-          { content: 'Not published yet', score: 0.8, sourceRef: 'processing.md', citation: { documentId: 'processing', filename: 'processing.md', bucketId: 'documents', chunkIndex: 0, chunkCount: 1 }, metadata: {} },
+          {
+            content: 'Ready source content',
+            score: 0.12,
+            sourceRef: 'ready.md (line 1)',
+            citation: {
+              documentId: 'ready',
+              filename: 'ready.md',
+              bucketId: 'documents',
+              chunkIndex: 0,
+              chunkCount: 1,
+            },
+            metadata: { internal: true },
+          },
+          {
+            content: 'Not published yet',
+            score: 0.8,
+            sourceRef: 'processing.md',
+            citation: {
+              documentId: 'processing',
+              filename: 'processing.md',
+              bucketId: 'documents',
+              chunkIndex: 0,
+              chunkCount: 1,
+            },
+            metadata: {},
+          },
         ],
         timing: { embeddingMs: 20, retrievalMs: 5, searchMs: 25 },
       };

@@ -9,12 +9,8 @@
       "category": "factual",
       "language": "en",
       "question": "What approval is required for Orion?",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -26,11 +22,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "f523c092-9c32-448c-9048-25c634ebc0d2",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["datasetDiscovery", "documentSearch", "documentSearch"],
       "citedDocuments": []
     },
     {
@@ -38,12 +30,8 @@
       "category": "factual",
       "language": "ar",
       "question": "ما الموافقة المطلوبة لمشروع Orion؟",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "الموافقة المطلوبة لمشروع Orion هي تقييم السلامة.\n\nSources: [[requirements.md (section Orion requirements)]]",
@@ -55,24 +43,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "d670157b-4f35-4926-9704-320ba38800ce",
-      "toolsCalled": [
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "requirements.md"
-      ]
+      "toolsCalled": ["documentSearch"],
+      "citedDocuments": ["requirements.md"]
     },
     {
       "id": "factual-tr",
       "category": "factual",
       "language": "tr",
       "question": "Orion için hangi onay gerekiyor?",
-      "expectedFacts": [
-        "safety review"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md"
-      ],
+      "expectedFacts": ["safety review"],
+      "expectedSourceDocuments": ["requirements.md"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "Orion için güvenlik incelemesi onay gerekiyor.\n\nSources: [[requirements.md (section Orion requirements)]]",
@@ -84,25 +64,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "50254231-cac7-48dd-ae81-0ac9054de1df",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "requirements.md"
-      ]
+      "toolsCalled": ["documentSearch", "documentSearch"],
+      "citedDocuments": ["requirements.md"]
     },
     {
       "id": "cost-en",
       "category": "cost",
       "language": "en",
       "question": "What is the Orion base budget?",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -114,9 +85,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "59f04e51-05ce-4f68-ad5d-e1071203b114",
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citedDocuments": []
     },
     {
@@ -124,12 +93,8 @@
       "category": "cost",
       "language": "ar",
       "question": "كم الميزانية الأساسية لمشروع Orion؟",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "الميزانية الأساسية لمشروع Orion هي 120000 دولار أمريكي.\n\nSources: [[costs.txt (line 1)]]",
@@ -141,25 +106,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "0b83d801-5855-416b-97b4-e5ebf4601bca",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "costs.txt"
-      ]
+      "toolsCalled": ["datasetDiscovery", "documentSearch"],
+      "citedDocuments": ["costs.txt"]
     },
     {
       "id": "cost-tr",
       "category": "cost",
       "language": "tr",
       "question": "Orion temel bütçesi ne kadar?",
-      "expectedFacts": [
-        "120000"
-      ],
-      "expectedSourceDocuments": [
-        "costs.txt"
-      ],
+      "expectedFacts": ["120000"],
+      "expectedSourceDocuments": ["costs.txt"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -171,11 +127,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "3cbbd0ed-ca73-45dd-9877-97792c680e74",
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["datasetDiscovery", "documentSearch", "documentSearch"],
       "citedDocuments": []
     },
     {
@@ -183,12 +135,8 @@
       "category": "risk",
       "language": "en",
       "question": "What is the main Orion delivery risk?",
-      "expectedFacts": [
-        "supplier delay"
-      ],
-      "expectedSourceDocuments": [
-        "risks.pdf"
-      ],
+      "expectedFacts": ["supplier delay"],
+      "expectedSourceDocuments": ["risks.pdf"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -207,9 +155,7 @@
         }
       ],
       "conversationId": "d113419c-c172-468d-956a-924b50a48302",
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citedDocuments": []
     },
     {
@@ -217,12 +163,8 @@
       "category": "risk",
       "language": "ar",
       "question": "ما خطر التسليم الرئيسي لمشروع Orion؟",
-      "expectedFacts": [
-        "supplier delay"
-      ],
-      "expectedSourceDocuments": [
-        "risks.pdf"
-      ],
+      "expectedFacts": ["supplier delay"],
+      "expectedSourceDocuments": ["risks.pdf"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -234,12 +176,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "c63762d0-f0d0-404c-924d-4bb88b2c1122",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch", "documentSearch", "documentSearch"],
       "citedDocuments": []
     },
     {
@@ -247,12 +184,8 @@
       "category": "risk",
       "language": "tr",
       "question": "Orion teslimatının temel riski nedir?",
-      "expectedFacts": [
-        "supplier delay"
-      ],
-      "expectedSourceDocuments": [
-        "risks.pdf"
-      ],
+      "expectedFacts": ["supplier delay"],
+      "expectedSourceDocuments": ["risks.pdf"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "Orion teslimatının temel riski tedarikçi gecikmesidir.\n\nSources: [[risks.pdf (page 1)]]",
@@ -264,26 +197,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "42e88fb5-cf4a-4bbd-8aa3-3131accfc947",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "risks.pdf"
-      ]
+      "toolsCalled": ["documentSearch", "documentSearch", "documentSearch"],
+      "citedDocuments": ["risks.pdf"]
     },
     {
       "id": "timeline-en",
       "category": "timeline",
       "language": "en",
       "question": "When is the Orion launch?",
-      "expectedFacts": [
-        "2027-03-15"
-      ],
-      "expectedSourceDocuments": [
-        "timeline.docx"
-      ],
+      "expectedFacts": ["2027-03-15"],
+      "expectedSourceDocuments": ["timeline.docx"],
       "history": [],
       "humanReviewRequired": false,
       "actualAnswer": "The Orion launch is scheduled for 2027-03-15.\n\nSources: [[timeline.docx (chunk 1)]]",
@@ -295,24 +218,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "83bb2c2a-232e-4f82-80f2-60cd63caf023",
-      "toolsCalled": [
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "timeline.docx"
-      ]
+      "toolsCalled": ["documentSearch"],
+      "citedDocuments": ["timeline.docx"]
     },
     {
       "id": "timeline-ar",
       "category": "timeline",
       "language": "ar",
       "question": "متى إطلاق مشروع Orion؟",
-      "expectedFacts": [
-        "2027-03-15"
-      ],
-      "expectedSourceDocuments": [
-        "timeline.docx"
-      ],
+      "expectedFacts": ["2027-03-15"],
+      "expectedSourceDocuments": ["timeline.docx"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "مشروع Orion سيُطلق في 2027-03-15.\n\nSources: [[timeline.docx (chunk 1)]]",
@@ -324,25 +239,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "adf93897-0465-4d76-88d6-45e75b0f8415",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "timeline.docx"
-      ]
+      "toolsCalled": ["documentSearch", "documentSearch"],
+      "citedDocuments": ["timeline.docx"]
     },
     {
       "id": "timeline-tr",
       "category": "timeline",
       "language": "tr",
       "question": "Orion ne zaman başlayacak?",
-      "expectedFacts": [
-        "2027-03-15"
-      ],
-      "expectedSourceDocuments": [
-        "timeline.docx"
-      ],
+      "expectedFacts": ["2027-03-15"],
+      "expectedSourceDocuments": ["timeline.docx"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "Orion 2027-03-15'te başlayacak.\n\nSources: [[timeline.docx (chunk 1)]]",
@@ -354,30 +260,16 @@
       "status": "passed",
       "reason": null,
       "conversationId": "00130c0c-c409-4b8e-b6a7-7139b2369d28",
-      "toolsCalled": [
-        "documentSearch"
-      ],
-      "citedDocuments": [
-        "timeline.docx"
-      ]
+      "toolsCalled": ["documentSearch"],
+      "citedDocuments": ["timeline.docx"]
     },
     {
       "id": "synthesis-en",
       "category": "synthesis",
       "language": "en",
       "question": "Compare Orion requirements, costs, risks and timeline across documents.",
-      "expectedFacts": [
-        "safety review",
-        "120000",
-        "supplier delay",
-        "2027-03-15"
-      ],
-      "expectedSourceDocuments": [
-        "requirements.md",
-        "costs.txt",
-        "risks.pdf",
-        "timeline.docx"
-      ],
+      "expectedFacts": ["safety review", "120000", "supplier delay", "2027-03-15"],
+      "expectedSourceDocuments": ["requirements.md", "costs.txt", "risks.pdf", "timeline.docx"],
       "history": [],
       "humanReviewRequired": true,
       "actualAnswer": "I could not produce an answer with verifiable document citations. Please try again.",
@@ -389,12 +281,7 @@
       "status": "failed",
       "reason": null,
       "conversationId": "d796b127-efca-4057-9a5e-21b45b223874",
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch", "documentSearch", "documentSearch"],
       "citedDocuments": []
     }
   ]

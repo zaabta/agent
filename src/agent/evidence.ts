@@ -45,7 +45,8 @@ export type ConversationContextEvidence = {
   role: ContextTurn['role'];
   content: string;
 };
-export type AgentEvidence = DocumentEvidence | RegisteredToolEvidence | StructuredEvidence | ConversationContextEvidence;
+export type AgentEvidence =
+  DocumentEvidence | RegisteredToolEvidence | StructuredEvidence | ConversationContextEvidence;
 export type AgentEvidencePackage = {
   requestId: string;
   scope: EvidenceScope;
@@ -63,7 +64,12 @@ export type ResolvedEvidenceSource = {
   sourceRef: string;
   chunkIndex: number;
 };
-export type EvidenceReferenceBinding = { evidenceId: string; sourceRefs: string[]; sources: ResolvedEvidenceSource[]; toolId?: string };
+export type EvidenceReferenceBinding = {
+  evidenceId: string;
+  sourceRefs: string[];
+  sources: ResolvedEvidenceSource[];
+  toolId?: string;
+};
 export type EvidenceReadiness = 'authorized' | 'no-evidence' | 'invalid';
 export type EvidencePreparationResult = { readiness: EvidenceReadiness; issues: string[] };
 
@@ -83,62 +89,136 @@ export function createEvidencePackage(input: {
   for (const entry of input.toolResults) {
     const result = entry.result;
     if (entry.name === 'listDocuments' || entry.name === 'datasetDiscovery') {
-      const records = Array.isArray(result?.documents) ? result.documents : Array.isArray(result?.datasets) ? result.datasets : [];
+      const records = Array.isArray(result?.documents)
+        ? result.documents
+        : Array.isArray(result?.datasets)
+          ? result.datasets
+          : [];
       const evidenceSummary = records.length
-        ? entry.name === 'listDocuments' ? 'Documents available in the authorized inventory.' : 'Authorized structured dataset schemas.'
-        : entry.name === 'listDocuments' ? 'There are no indexed documents.' : 'There are no authorized structured datasets.';
-      items.push({ id: `S${++structuredIndex}`, type: 'structured', scope: input.scope,
-        ...(entry.input !== undefined ? { input: entry.input } : {}), data: { ...result, evidenceSummary } });
+        ? entry.name === 'listDocuments'
+          ? 'Documents available in the authorized inventory.'
+          : 'Authorized structured dataset schemas.'
+        : entry.name === 'listDocuments'
+          ? 'There are no indexed documents.'
+          : 'There are no authorized structured datasets.';
+      items.push({
+        id: `S${++structuredIndex}`,
+        type: 'structured',
+        scope: input.scope,
+        ...(entry.input !== undefined ? { input: entry.input } : {}),
+        data: { ...result, evidenceSummary },
+      });
     }
     if (typeof result?.customToolId === 'string' && Object.hasOwn(result, 'data')) {
       items.push({
-        id: `T${++toolIndex}`, type: 'registered-tool', scope: input.scope,
-        requestId: input.requestId, toolId: result.customToolId,
+        id: `T${++toolIndex}`,
+        type: 'registered-tool',
+        scope: input.scope,
+        requestId: input.requestId,
+        toolId: result.customToolId,
         ...(Number.isInteger(result.configurationVersion) ? { version: result.configurationVersion } : {}),
         data: result.data,
       });
       continue;
     }
-    if (entry.name.startsWith('structured') || result?.operation || Array.isArray(result?.sources) || Array.isArray(result?.records) || Array.isArray(result?.groups)) {
+    if (
+      entry.name.startsWith('structured') ||
+      result?.operation ||
+      Array.isArray(result?.sources) ||
+      Array.isArray(result?.records) ||
+      Array.isArray(result?.groups)
+    ) {
       if (Array.isArray(result?.records) && result.records.length) {
-        for (const record of result.records) items.push({ id: `S${++structuredIndex}`, type: 'structured', scope: input.scope,
+        for (const record of result.records)
+          items.push({
+            id: `S${++structuredIndex}`,
+            type: 'structured',
+            scope: input.scope,
+            ...(entry.input !== undefined ? { input: entry.input } : {}),
+            ...(typeof result.operation === 'string' ? { operation: result.operation } : {}),
+            data: { ...result, records: undefined, record, sources: record?.source ? [record.source] : [] },
+          });
+      } else if (Array.isArray(result?.groups) && result.groups.length) {
+        for (const group of result.groups)
+          items.push({
+            id: `S${++structuredIndex}`,
+            type: 'structured',
+            scope: input.scope,
+            ...(entry.input !== undefined ? { input: entry.input } : {}),
+            operation: String(result.operation),
+            data: {
+              operation: result.operation,
+              columnName: result.columnName,
+              group,
+              sources: group?.sources ?? [],
+            },
+          });
+      } else
+        items.push({
+          id: `S${++structuredIndex}`,
+          type: 'structured',
+          scope: input.scope,
           ...(entry.input !== undefined ? { input: entry.input } : {}),
           ...(typeof result.operation === 'string' ? { operation: result.operation } : {}),
-          data: { ...result, records: undefined, record, sources: record?.source ? [record.source] : [] } });
-      } else if (Array.isArray(result?.groups) && result.groups.length) {
-        for (const group of result.groups) items.push({ id: `S${++structuredIndex}`, type: 'structured', scope: input.scope,
-          ...(entry.input !== undefined ? { input: entry.input } : {}), operation: String(result.operation),
-          data: { operation: result.operation, columnName: result.columnName, group, sources: group?.sources ?? [] } });
-      } else items.push({ id: `S${++structuredIndex}`, type: 'structured', scope: input.scope,
-        ...(entry.input !== undefined ? { input: entry.input } : {}),
-        ...(typeof result.operation === 'string' ? { operation: result.operation } : {}), data: result });
+          data: result,
+        });
     }
-    if (!['documentSearch', 'listDocuments', 'datasetDiscovery'].includes(entry.name) && !entry.name.startsWith('structured')) {
-      items.push({ id: `T${++toolIndex}`, type: 'registered-tool', scope: input.scope, requestId: input.requestId,
+    if (
+      !['documentSearch', 'listDocuments', 'datasetDiscovery'].includes(entry.name) &&
+      !entry.name.startsWith('structured')
+    ) {
+      items.push({
+        id: `T${++toolIndex}`,
+        type: 'registered-tool',
+        scope: input.scope,
+        requestId: input.requestId,
         toolId: typeof result?.customToolId === 'string' ? result.customToolId : entry.name,
         ...(Number.isInteger(result?.configurationVersion) ? { version: result.configurationVersion } : {}),
-        data: Object.hasOwn(result ?? {}, 'data') ? result.data : result });
+        data: Object.hasOwn(result ?? {}, 'data') ? result.data : result,
+      });
     }
     for (const hit of result?.hits ?? []) {
       const citation = hit?.citation;
-      if (typeof hit?.sourceRef !== 'string' || !hit.sourceRef || typeof hit.content !== 'string'
-        || typeof citation?.documentId !== 'string' || typeof citation.filename !== 'string' || !Number.isInteger(citation.chunkIndex)) continue;
+      if (
+        typeof hit?.sourceRef !== 'string' ||
+        !hit.sourceRef ||
+        typeof hit.content !== 'string' ||
+        typeof citation?.documentId !== 'string' ||
+        typeof citation.filename !== 'string' ||
+        !Number.isInteger(citation.chunkIndex)
+      )
+        continue;
       const key = `${citation.documentId}:${citation.documentVersionId ?? 'legacy'}:${citation.chunkId ?? citation.chunkIndex}:${hit.sourceRef}`;
       if (seenDocuments.has(key)) continue;
       seenDocuments.add(key);
-      items.push({ id: `E${++documentIndex}`, type: 'document', scope: input.scope,
-        sourceRef: hit.sourceRef, citation, content: hit.content });
+      items.push({
+        id: `E${++documentIndex}`,
+        type: 'document',
+        scope: input.scope,
+        sourceRef: hit.sourceRef,
+        citation,
+        content: hit.content,
+      });
     }
   }
-  for (const [index, turn] of input.history.entries()) items.push({
-    id: `C${index + 1}`, type: 'conversation-context', verified: false, role: turn.role, content: turn.content,
-  });
+  for (const [index, turn] of input.history.entries())
+    items.push({
+      id: `C${index + 1}`,
+      type: 'conversation-context',
+      verified: false,
+      role: turn.role,
+      content: turn.content,
+    });
   return { requestId: input.requestId, scope: input.scope, items };
 }
 
 function sourceFromDocument(item: DocumentEvidence): ResolvedEvidenceSource {
   const citation = item.citation;
-  return { documentId: citation.documentId, filename: citation.filename, sourceRef: item.sourceRef, chunkIndex: citation.chunkIndex,
+  return {
+    documentId: citation.documentId,
+    filename: citation.filename,
+    sourceRef: item.sourceRef,
+    chunkIndex: citation.chunkIndex,
     ...(citation.documentVersionId ? { documentVersionId: citation.documentVersionId } : {}),
     ...(citation.chunkId ? { chunkId: citation.chunkId } : {}),
     ...(Number.isInteger(citation.pageNumber) ? { pageNumber: citation.pageNumber } : {}),
@@ -152,13 +232,26 @@ function structuredSources(item: StructuredEvidence): ResolvedEvidenceSource[] {
   const data = item.data as any;
   const candidates = [
     ...(Array.isArray(data?.sources) ? data.sources : []),
-    ...(Array.isArray(data?.records) ? data.records.map((record: any) => record?.source).filter(Boolean) : []),
+    ...(Array.isArray(data?.records)
+      ? data.records.map((record: any) => record?.source).filter(Boolean)
+      : []),
     ...(data?.record?.source ? [data.record.source] : []),
     ...(Array.isArray(data?.group?.sources) ? data.group.sources : []),
   ];
-  return candidates.filter((source: any) => source && typeof source.documentId === 'string' && typeof source.filename === 'string'
-    && typeof source.sourceRef === 'string' && Number.isInteger(source.chunkIndex)).map((source: any) => ({
-      documentId: source.documentId, filename: source.filename, sourceRef: source.sourceRef, chunkIndex: source.chunkIndex,
+  return candidates
+    .filter(
+      (source: any) =>
+        source &&
+        typeof source.documentId === 'string' &&
+        typeof source.filename === 'string' &&
+        typeof source.sourceRef === 'string' &&
+        Number.isInteger(source.chunkIndex),
+    )
+    .map((source: any) => ({
+      documentId: source.documentId,
+      filename: source.filename,
+      sourceRef: source.sourceRef,
+      chunkIndex: source.chunkIndex,
       ...(source.documentVersionId ? { documentVersionId: source.documentVersionId } : {}),
       ...(source.chunkId ? { chunkId: source.chunkId } : {}),
       ...(Number.isInteger(source.pageNumber) ? { pageNumber: source.pageNumber } : {}),
@@ -169,15 +262,31 @@ function structuredSources(item: StructuredEvidence): ResolvedEvidenceSource[] {
 }
 
 /** Resolve every evidence identity before the Answer Provider is invoked. */
-export function resolveEvidenceSources(evidence: AgentEvidencePackage): { bindings: EvidenceReferenceBinding[]; sources: ResolvedEvidenceSource[] } {
+export function resolveEvidenceSources(evidence: AgentEvidencePackage): {
+  bindings: EvidenceReferenceBinding[];
+  sources: ResolvedEvidenceSource[];
+} {
   const bindings: EvidenceReferenceBinding[] = [];
   const sources = new Map<string, ResolvedEvidenceSource>();
   for (const item of evidence.items) {
     if (item.type === 'conversation-context') continue;
-    const resolved = item.type === 'document' ? [sourceFromDocument(item)] : item.type === 'structured' ? structuredSources(item) : [];
-    for (const source of resolved) sources.set(`${source.documentId}:${source.documentVersionId ?? ''}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`, source);
-    bindings.push({ evidenceId: item.id, sourceRefs: resolved.map(source => source.sourceRef), sources: resolved,
-      ...(item.type === 'registered-tool' ? { toolId: item.toolId } : {}) });
+    const resolved =
+      item.type === 'document'
+        ? [sourceFromDocument(item)]
+        : item.type === 'structured'
+          ? structuredSources(item)
+          : [];
+    for (const source of resolved)
+      sources.set(
+        `${source.documentId}:${source.documentVersionId ?? ''}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`,
+        source,
+      );
+    bindings.push({
+      evidenceId: item.id,
+      sourceRefs: resolved.map((source) => source.sourceRef),
+      sources: resolved,
+      ...(item.type === 'registered-tool' ? { toolId: item.toolId } : {}),
+    });
   }
   return { bindings, sources: [...sources.values()] };
 }
@@ -192,33 +301,58 @@ export function validateEvidencePackage(input: {
 }): EvidencePreparationResult {
   const issues = new Set<string>();
   const ids = new Set<string>();
-  const bindingIds = new Set(input.bindings.map(binding => binding.evidenceId));
-  if (input.evidence.scope.tenantId !== input.tenantId || input.evidence.scope.userId !== input.userId) issues.add('authorization_scope_mismatch');
+  const bindingIds = new Set(input.bindings.map((binding) => binding.evidenceId));
+  if (input.evidence.scope.tenantId !== input.tenantId || input.evidence.scope.userId !== input.userId)
+    issues.add('authorization_scope_mismatch');
   for (const item of input.evidence.items) {
     if (item.type === 'conversation-context') continue;
     if (ids.has(item.id)) issues.add('duplicate_evidence_identity');
     ids.add(item.id);
-    if (item.scope.tenantId !== input.tenantId || item.scope.userId !== input.userId) issues.add('authorization_scope_mismatch');
+    if (item.scope.tenantId !== input.tenantId || item.scope.userId !== input.userId)
+      issues.add('authorization_scope_mismatch');
     if (!bindingIds.has(item.id)) issues.add('unresolved_evidence_identity');
     if (item.type === 'document') {
-      if (!item.sourceRef || !item.citation.documentId || !item.citation.filename || !Number.isInteger(item.citation.chunkIndex)) issues.add('invalid_document_provenance');
-      if (!input.bindings.find(binding => binding.evidenceId === item.id)?.sources.some(source => source.sourceRef === item.sourceRef)) issues.add('unresolved_source_reference');
+      if (
+        !item.sourceRef ||
+        !item.citation.documentId ||
+        !item.citation.filename ||
+        !Number.isInteger(item.citation.chunkIndex)
+      )
+        issues.add('invalid_document_provenance');
+      if (
+        !input.bindings
+          .find((binding) => binding.evidenceId === item.id)
+          ?.sources.some((source) => source.sourceRef === item.sourceRef)
+      )
+        issues.add('unresolved_source_reference');
     }
-    if (item.type === 'registered-tool' && (!item.toolId || item.requestId !== input.evidence.requestId)) issues.add('invalid_tool_provenance');
+    if (item.type === 'registered-tool' && (!item.toolId || item.requestId !== input.evidence.requestId))
+      issues.add('invalid_tool_provenance');
     if (item.type === 'structured') {
       const data = item.data as any;
-      const resolvedSources = input.bindings.find(binding => binding.evidenceId === item.id)?.sources ?? [];
+      const resolvedSources = input.bindings.find((binding) => binding.evidenceId === item.id)?.sources ?? [];
       const rawSources = structuredSources(item);
       if (rawSources.length !== resolvedSources.length) issues.add('unresolved_source_reference');
       const operation = item.operation ?? data?.operation;
-      if (['SUM', 'AVG', 'MIN', 'MAX'].includes(operation) && data?.value !== null && data?.value !== undefined
-        && (!Number.isFinite(Number(data.value)) || rawSources.length === 0)) issues.add('unresolved_structured_value_provenance');
-      if (data?.record && (!data.record.source || !resolvedSources.some(source => source.sourceRef === data.record.source.sourceRef))) issues.add('unresolved_structured_record');
-      if (data?.group && (!Array.isArray(data.group.sources) || !data.group.sources.length)) issues.add('unresolved_structured_group');
+      if (
+        ['SUM', 'AVG', 'MIN', 'MAX'].includes(operation) &&
+        data?.value !== null &&
+        data?.value !== undefined &&
+        (!Number.isFinite(Number(data.value)) || rawSources.length === 0)
+      )
+        issues.add('unresolved_structured_value_provenance');
+      if (
+        data?.record &&
+        (!data.record.source ||
+          !resolvedSources.some((source) => source.sourceRef === data.record.source.sourceRef))
+      )
+        issues.add('unresolved_structured_record');
+      if (data?.group && (!Array.isArray(data.group.sources) || !data.group.sources.length))
+        issues.add('unresolved_structured_group');
     }
   }
   if (issues.size) return { readiness: 'invalid', issues: [...issues] };
-  const hasEvidence = input.evidence.items.some(item => item.type !== 'conversation-context');
+  const hasEvidence = input.evidence.items.some((item) => item.type !== 'conversation-context');
   if (input.requireEvidence && !hasEvidence) return { readiness: 'no-evidence', issues: [] };
   return { readiness: 'authorized', issues: [] };
 }

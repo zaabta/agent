@@ -1403,9 +1403,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b84dcf83-d9d6-4f1c-97c3-67b5b86bb78d",
       "requestId": "756e537d-3328-4d20-83c1-bb9baa3109ef",
@@ -1657,12 +1655,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch",
-        "documentSearch",
-        "documentSearch",
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch", "documentSearch", "documentSearch", "documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b84dcf83-d9d6-4f1c-97c3-67b5b86bb78d",
       "requestId": "d32137c8-8cf4-4c57-925b-128e48ef4bd4",
@@ -1791,9 +1784,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b84dcf83-d9d6-4f1c-97c3-67b5b86bb78d",
       "requestId": "135023e3-72c8-4712-8b87-ad014f74fcae",
@@ -1917,9 +1908,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b84dcf83-d9d6-4f1c-97c3-67b5b86bb78d",
       "requestId": "400e0e98-ea19-40a3-bf81-9e580992eb27",
@@ -2081,10 +2070,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "datasetDiscovery",
-        "documentSearch"
-      ],
+      "toolsCalled": ["datasetDiscovery", "documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b84dcf83-d9d6-4f1c-97c3-67b5b86bb78d",
       "requestId": "5939f639-025b-4590-8277-3213d6a9af59",
@@ -2173,9 +2159,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "8409a0b3-b8fc-45b0-b8e6-9254b7d3c5ee",
       "timing": {

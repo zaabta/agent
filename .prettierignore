@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.git/
+.gitnexus/
+.sitepilot-data/
+backups/
+package-lock.json
+pnpm-lock.yaml

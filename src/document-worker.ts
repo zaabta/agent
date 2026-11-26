@@ -8,8 +8,11 @@ if (!config.companyWorkspaceId) {
 }
 
 NestFactory.createApplicationContext(DocumentWorkerModule, { logger: ['error', 'warn', 'log'] })
-  .then(context => {
+  .then((context) => {
     context.enableShutdownHooks();
     console.log('SitePilot document worker is running');
   })
-  .catch(error => { console.error('Document worker failed to start', error); process.exitCode = 1; });
+  .catch((error) => {
+    console.error('Document worker failed to start', error);
+    process.exitCode = 1;
+  });

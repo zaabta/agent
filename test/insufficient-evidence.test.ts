@@ -12,7 +12,8 @@ test('short explicit excerpt-insufficiency replies do not become factual citatio
     'الشركة المُؤمنة لمشروع Orion غير مذكورة في المعلومات المتاحة.',
     'The insurer is not specified in the supplied excerpts.',
     'Sigorta şirketinin adı verilen belgelerde belirtilmemiştir.',
-  ]) assert.equal(isInsufficientEvidenceReply(text), true, text);
+  ])
+    assert.equal(isInsufficientEvidenceReply(text), true, text);
 });
 
 test('explicit negative facts and mixed factual answers still require ordinary citation validation', () => {
@@ -26,5 +27,6 @@ test('explicit negative facts and mixed factual answers still require ordinary c
     'The supplied excerpts do not mention the insurer. The budget is approved.',
     'The supplied excerpts do not mention insurer 42.',
     'The supplied excerpts do not mention the insurer [[unknown]].',
-  ]) assert.equal(isInsufficientEvidenceReply(text), false, text);
+  ])
+    assert.equal(isInsufficientEvidenceReply(text), false, text);
 });

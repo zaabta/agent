@@ -1,17 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createLangGraphModel, langGraphModelOptions } from '../src/agent/model-factory.js';
+import { requiresOpenAIResponsesApi, structuredOutputMethod } from '../src/llm-admin/model-capabilities.js';
 import type { RuntimeModelSnapshot } from '../src/llm-admin/runtime-model.js';
 
-const snapshot = (provider: string, model: string): RuntimeModelSnapshot => ({ provider, model, apiKey: provider === 'ollama' ? undefined : 'test-secret', ollamaThink: false, maxOutputTokens: 256 });
+const snapshot = (provider: string, model: string): RuntimeModelSnapshot => ({
+  provider,
+  model,
+  apiKey: provider === 'ollama' ? undefined : 'test-secret',
+  ollamaThink: false,
+  maxOutputTokens: 256,
+});
 
 test('single LangGraph factory selects the configured OpenAI, OpenRouter, Ollama, and Google endpoints', () => {
   const openai = langGraphModelOptions(snapshot('openai', 'openai/gpt-test'));
   assert.equal(openai.model, 'gpt-test');
   assert.equal(openai.configuration, undefined);
   assert.equal(openai.temperature, 0);
+  assert.equal(openai.useResponsesApi, undefined);
 
-  const openrouter = langGraphModelOptions({ ...snapshot('openrouter', 'openrouter/vendor/model'), capabilities: { temperature: true } });
+  const openrouter = langGraphModelOptions({
+    ...snapshot('openrouter', 'openrouter/vendor/model'),
+    capabilities: { temperature: true },
+  });
   assert.equal(openrouter.model, 'vendor/model');
   assert.equal(openrouter.configuration?.baseURL, 'https://openrouter.ai/api/v1');
   assert.equal(openrouter.temperature, 0);
@@ -30,6 +41,40 @@ test('single LangGraph factory selects the configured OpenAI, OpenRouter, Ollama
   assert.equal(google.maxRetries, 0);
   assert.equal(google.modelKwargs, undefined);
   assert.equal(google.temperature, 0);
+  assert.equal(google.useResponsesApi, undefined);
+});
+
+test('OpenAI GPT-6 reasoning models use Responses while registry metadata can override the protocol', () => {
+  assert.equal(langGraphModelOptions(snapshot('openai', 'openai/gpt-6-luna')).useResponsesApi, true);
+  assert.equal(requiresOpenAIResponsesApi(snapshot('openai', 'gpt-6-chat')), false);
+  assert.equal(
+    requiresOpenAIResponsesApi({
+      ...snapshot('openai', 'gpt-6-luna'),
+      capabilities: { apiProtocol: 'chatCompletions' },
+    }),
+    false,
+  );
+  assert.equal(
+    requiresOpenAIResponsesApi({
+      ...snapshot('openrouter', 'openrouter/vendor/gpt-6-luna'),
+      capabilities: { apiProtocol: 'responses' },
+    }),
+    false,
+  );
+  assert.equal(langGraphModelOptions(snapshot('google', 'google/gemini-test')).useResponsesApi, undefined);
+});
+
+test('structured output method uses per-model metadata and avoids unsupported OpenAI response_format by default', () => {
+  assert.equal(structuredOutputMethod(snapshot('openai', 'gpt-6-luna')), 'functionCalling');
+  assert.equal(
+    structuredOutputMethod({
+      ...snapshot('openai', 'gpt-6-luna'),
+      capabilities: { structuredOutputMethod: 'jsonSchema' },
+    }),
+    'jsonSchema',
+  );
+  assert.equal(structuredOutputMethod(snapshot('google', 'gemini-test')), undefined);
+  assert.equal(structuredOutputMethod(snapshot('ollama', 'qwen-test')), undefined);
 });
 
 test('OpenAI reasoning models omit temperature while supported models keep configured values', () => {
@@ -42,8 +87,25 @@ test('OpenAI reasoning models omit temperature while supported models keep confi
   assert.equal(configured.temperature, 0.35);
 
   // Explicit per-model registry capabilities override the generic compatibility policy.
-  assert.equal(langGraphModelOptions({ ...snapshot('openai', 'gpt-6-luna'), capabilities: { temperature: true }, temperature: 0.6 }).temperature, 0.6);
-  assert.equal(Object.hasOwn(langGraphModelOptions({ ...snapshot('openai', 'gpt-4o'), capabilities: { temperature: false }, temperature: 0.6 }), 'temperature'), false);
+  assert.equal(
+    langGraphModelOptions({
+      ...snapshot('openai', 'gpt-6-luna'),
+      capabilities: { temperature: true },
+      temperature: 0.6,
+    }).temperature,
+    0.6,
+  );
+  assert.equal(
+    Object.hasOwn(
+      langGraphModelOptions({
+        ...snapshot('openai', 'gpt-4o'),
+        capabilities: { temperature: false },
+        temperature: 0.6,
+      }),
+      'temperature',
+    ),
+    false,
+  );
 });
 
 test('Planner and Answer snapshots use the same temperature compatibility policy', () => {
@@ -51,31 +113,57 @@ test('Planner and Answer snapshots use the same temperature compatibility policy
   const answer = langGraphModelOptions({ ...snapshot('openai', 'gpt-6-luna'), role: 'ANSWER' });
   assert.equal(Object.hasOwn(planner, 'temperature'), false);
   assert.equal(Object.hasOwn(answer, 'temperature'), false);
-  assert.equal(langGraphModelOptions({ ...snapshot('openai', 'gpt-4o'), role: 'PLANNER', temperature: 0.25 }).temperature, 0.25);
-  assert.equal(langGraphModelOptions({ ...snapshot('openai', 'gpt-4o'), role: 'ANSWER', temperature: 0.65 }).temperature, 0.65);
+  assert.equal(
+    langGraphModelOptions({ ...snapshot('openai', 'gpt-4o'), role: 'PLANNER', temperature: 0.25 })
+      .temperature,
+    0.25,
+  );
+  assert.equal(
+    langGraphModelOptions({ ...snapshot('openai', 'gpt-4o'), role: 'ANSWER', temperature: 0.65 }).temperature,
+    0.65,
+  );
 });
 
 test('OpenRouter model metadata can suppress temperature without changing other provider settings', () => {
-  const options = langGraphModelOptions({ ...snapshot('openrouter', 'vendor/reasoner'), capabilities: { temperature: false }, temperature: 0.4 });
+  const options = langGraphModelOptions({
+    ...snapshot('openrouter', 'vendor/reasoner'),
+    capabilities: { temperature: false },
+    temperature: 0.4,
+  });
   assert.equal(Object.hasOwn(options, 'temperature'), false);
   assert.equal(options.configuration?.baseURL, 'https://openrouter.ai/api/v1');
-  assert.equal(Object.hasOwn(langGraphModelOptions(snapshot('openrouter', 'vendor/unknown')), 'temperature'), false);
+  assert.equal(
+    Object.hasOwn(langGraphModelOptions(snapshot('openrouter', 'vendor/unknown')), 'temperature'),
+    false,
+  );
 });
 
 test('provider factory validates missing credentials, provider, model id, and token limits before model creation', () => {
-  assert.throws(() => langGraphModelOptions({ ...snapshot('google', 'gemini-test'), apiKey: undefined }), /ACTIVE_MODEL_UNAVAILABLE/);
+  assert.throws(
+    () => langGraphModelOptions({ ...snapshot('google', 'gemini-test'), apiKey: undefined }),
+    /ACTIVE_MODEL_UNAVAILABLE/,
+  );
   assert.throws(() => langGraphModelOptions(snapshot('unknown', 'model')), /INVALID_MODEL_PROVIDER/);
   assert.throws(() => langGraphModelOptions(snapshot('ollama', ' ')), /INVALID_MODEL_ID/);
-  assert.throws(() => langGraphModelOptions({ ...snapshot('ollama', 'qwen-test'), maxOutputTokens: 0 }), /INVALID_RUNTIME_OUTPUT_TOKEN_LIMIT/);
+  assert.throws(
+    () => langGraphModelOptions({ ...snapshot('ollama', 'qwen-test'), maxOutputTokens: 0 }),
+    /INVALID_RUNTIME_OUTPUT_TOKEN_LIMIT/,
+  );
 });
 
 test('factory constructs a LangChain chat model without making a provider request', () => {
-  assert.equal(typeof createLangGraphModel(snapshot('google', 'gemini-test')).withStructuredOutput, 'function');
+  assert.equal(
+    typeof createLangGraphModel(snapshot('google', 'gemini-test')).withStructuredOutput,
+    'function',
+  );
   assert.equal(typeof createLangGraphModel(snapshot('openai', 'gpt-test')).stream, 'function');
   const reasoningParams = (createLangGraphModel(snapshot('openai', 'gpt-6-luna')) as any).invocationParams();
   assert.equal(reasoningParams.temperature, undefined);
+  assert.equal((createLangGraphModel(snapshot('openai', 'gpt-6-luna')) as any)._useResponsesApi(), true);
   assert.doesNotMatch(JSON.stringify(reasoningParams), /temperature/);
   assert.equal(Object.hasOwn(reasoningParams.modelKwargs ?? {}, 'temperature'), false);
-  const supportedParams = (createLangGraphModel({ ...snapshot('openai', 'gpt-4o'), temperature: 0.4 }) as any).invocationParams();
+  const supportedParams = (
+    createLangGraphModel({ ...snapshot('openai', 'gpt-4o'), temperature: 0.4 }) as any
+  ).invocationParams();
   assert.equal(supportedParams.temperature, 0.4);
 });

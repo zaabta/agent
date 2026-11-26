@@ -10,8 +10,19 @@ test('ranks five employees from parsed Excel cells using PostgreSQL SQL and acti
   const book = XLSX.utils.book_new();
   const employees = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6'];
   const rows = employees.flatMap((id, i) => Array.from({ length: 6 - i }, () => [id, 2025]));
-  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['Employee', 'Year'], ...rows, ...Array.from({ length: 10 }, () => ['E6', 2024])]), 'Violations');
-  const parsed = await parseDocument('violations.xlsx', XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }));
+  XLSX.utils.book_append_sheet(
+    book,
+    XLSX.utils.aoa_to_sheet([
+      ['Employee', 'Year'],
+      ...rows,
+      ...Array.from({ length: 10 }, () => ['E6', 2024]),
+    ]),
+    'Violations',
+  );
+  const parsed = await parseDocument(
+    'violations.xlsx',
+    XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }),
+  );
   assert.ok(parsed.structuredCells?.length);
   const db = new PGlite();
   const doc = '11111111-1111-4111-8111-111111111111';
@@ -23,31 +34,54 @@ test('ranks five employees from parsed Excel cells using PostgreSQL SQL and acti
       CREATE TABLE app_document_cells (document_id uuid, tenant_id text, version_id uuid, sheet_name text, row_number int, column_name text, value text);
     `);
     for (const tenant of ['own', 'other']) {
-      await db.query("INSERT INTO app_documents VALUES ($1,$2,'violations.xlsx',$3,'ready','xlsx')", [doc, tenant, version]);
+      await db.query("INSERT INTO app_documents VALUES ($1,$2,'violations.xlsx',$3,'ready','xlsx')", [
+        doc,
+        tenant,
+        version,
+      ]);
       for (const cell of parsed.structuredCells) {
         const values = [doc, tenant, version, cell.sheetName, cell.rowNumber, cell.columnName, cell.value];
         await db.query('INSERT INTO app_document_cells VALUES ($1,$2,$3,$4,$5,$6,$7)', values);
       }
     }
-    await db.query("INSERT INTO app_document_cells SELECT document_id,tenant_id,$1,sheet_name,row_number,column_name,value FROM app_document_cells WHERE tenant_id='own'", [stale]);
+    await db.query(
+      "INSERT INTO app_document_cells SELECT document_id,tenant_id,$1,sheet_name,row_number,column_name,value FROM app_document_cells WHERE tenant_id='own'",
+      [stale],
+    );
     const service = new StructuredDataService({
       appDocument: { findMany: async () => [{ activeVersionId: version }] },
       appDocumentCell: { findMany: async () => [{ columnName: 'Employee' }, { columnName: 'Year' }] },
-      $queryRaw: async (query: { text: string; values: unknown[] }) => (await db.query(query.text, query.values)).rows,
+      $queryRaw: async (query: { text: string; values: unknown[] }) =>
+        (await db.query(query.text, query.values)).rows,
     } as never);
     const result = await service.aggregate('GROUP_BY', 'Employee', 'own', {
-      documentId: doc, sheetName: 'Violations', groupLimit: 5,
+      documentId: doc,
+      sheetName: 'Violations',
+      groupLimit: 5,
       filters: [{ columnName: 'Year', operator: 'EQ', value: '2025' }],
     });
-    assert.ok("groups" in result && result.groups);
-    assert.deepEqual(result.groups.map(group => [group.value, group.count]), employees.slice(0, 5).map((id, i) => [id, 6 - i]));
+    assert.ok('groups' in result && result.groups);
+    assert.deepEqual(
+      result.groups.map((group) => [group.value, group.count]),
+      employees.slice(0, 5).map((id, i) => [id, 6 - i]),
+    );
     const selection = structuredSelectionSchema.parse('selection' in result ? result.selection : undefined);
-    const followup = await service.aggregate('COUNT', undefined, 'own', { filters: selection.filters, selection });
+    const followup = await service.aggregate('COUNT', undefined, 'own', {
+      filters: selection.filters,
+      selection,
+    });
     assert.equal('total' in followup && followup.total, 20);
-    const outdated = await service.aggregate('COUNT', undefined, 'own', { filters: selection.filters, selection: { ...selection, versionId: stale } });
+    const outdated = await service.aggregate('COUNT', undefined, 'own', {
+      filters: selection.filters,
+      selection: { ...selection, versionId: stale },
+    });
     assert.equal('total' in outdated && outdated.total, 0);
     assert.equal(result.sources.length, 5);
-    assert.ok(result.sources.every(source => source.documentVersionId === version && source.sourceRef.includes('Violations')));
+    assert.ok(
+      result.sources.every(
+        (source) => source.documentVersionId === version && source.sourceRef.includes('Violations'),
+      ),
+    );
   } finally {
     await db.close();
   }

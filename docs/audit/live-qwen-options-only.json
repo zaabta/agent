@@ -1308,9 +1308,7 @@
           "chunkIndex": 0
         }
       ],
-      "toolsCalled": [
-        "documentSearch"
-      ],
+      "toolsCalled": ["documentSearch"],
       "citationValidation": "valid",
       "conversationId": "b12773cc-06f3-4111-b841-6a44f3eae1ef",
       "requestId": "39ce399f-d9f7-4b86-a8f1-3d924d2c2ec2",

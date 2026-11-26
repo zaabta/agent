@@ -21,7 +21,7 @@ export function createExternalGptMasker(_tenantId: string) {
     mask(value: string): string {
       let text = value;
       for (const pattern of patterns) {
-        text = text.replace(pattern, original => {
+        text = text.replace(pattern, (original) => {
           if (original.includes('[PRIVATE_')) return original;
           const token = `[PRIVATE_${++index}]`;
           replacements.set(token, original);
@@ -42,14 +42,20 @@ export function createExternalGptMasker(_tenantId: string) {
 export function maskForExternalGpt(value: string, tenantId: string): MaskedText {
   const masker = createExternalGptMasker(tenantId);
   const text = masker.mask(value);
-  return { text, replacements: new Map([...text.matchAll(/\[PRIVATE_[^\]]+\]/g)].flatMap(match => {
-    const token = match[0];
-    return masker.restore(token) !== token ? [[token, masker.restore(token)] as const] : [];
-  })) };
+  return {
+    text,
+    replacements: new Map(
+      [...text.matchAll(/\[PRIVATE_[^\]]+\]/g)].flatMap((match) => {
+        const token = match[0];
+        return masker.restore(token) !== token ? [[token, masker.restore(token)] as const] : [];
+      }),
+    ),
+  };
 }
 
 export function maskConversationForExternalGpt<T extends { role: string; content: string }>(
-  turns: readonly T[], tenantId: string,
+  turns: readonly T[],
+  tenantId: string,
 ): Array<{ role: string; content: string }> {
-  return turns.map(turn => ({ role: turn.role, content: maskForExternalGpt(turn.content, tenantId).text }));
+  return turns.map((turn) => ({ role: turn.role, content: maskForExternalGpt(turn.content, tenantId).text }));
 }

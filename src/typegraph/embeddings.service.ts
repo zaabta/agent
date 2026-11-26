@@ -6,7 +6,10 @@ import { config } from '../config.js';
 interface OllamaEmbedResponse {
   embeddings?: unknown;
 }
-export interface EmbeddingBatchProgress { done: number; total: number }
+export interface EmbeddingBatchProgress {
+  done: number;
+  total: number;
+}
 
 @Injectable()
 export class EmbeddingsService implements Embedder, OnModuleDestroy {
@@ -15,9 +18,17 @@ export class EmbeddingsService implements Embedder, OnModuleDestroy {
   readonly maxBatchSize = 32;
   readonly supportsAsymmetric = false;
   private readonly logger = new Logger(EmbeddingsService.name);
-  private readonly requestTiming = new AsyncLocalStorage<{ intervals: Array<[number, number]>; abortSignal?: AbortSignal; onEmbeddingProgress?: (progress: EmbeddingBatchProgress) => void }>();
+  private readonly requestTiming = new AsyncLocalStorage<{
+    intervals: Array<[number, number]>;
+    abortSignal?: AbortSignal;
+    onEmbeddingProgress?: (progress: EmbeddingBatchProgress) => void;
+  }>();
 
-  async measure<T>(operation: () => Promise<T>, abortSignal?: AbortSignal, onEmbeddingProgress?: (progress: EmbeddingBatchProgress) => void): Promise<{ result: T; embeddingMs: number }> {
+  async measure<T>(
+    operation: () => Promise<T>,
+    abortSignal?: AbortSignal,
+    onEmbeddingProgress?: (progress: EmbeddingBatchProgress) => void,
+  ): Promise<{ result: T; embeddingMs: number }> {
     const timing = { intervals: [] as Array<[number, number]>, abortSignal, onEmbeddingProgress };
     const result = await this.requestTiming.run(timing, operation);
     // Embed calls may overlap inside TypeGraph. Sum would double-count that
@@ -29,9 +40,14 @@ export class EmbeddingsService implements Embedder, OnModuleDestroy {
     let intervalEnd: number | undefined;
     for (const [start, end] of intervals) {
       if (intervalStart === undefined || intervalEnd === undefined) {
-        intervalStart = start; intervalEnd = end;
+        intervalStart = start;
+        intervalEnd = end;
       } else if (start <= intervalEnd) intervalEnd = Math.max(intervalEnd, end);
-      else { embeddingMs += intervalEnd - intervalStart; intervalStart = start; intervalEnd = end; }
+      else {
+        embeddingMs += intervalEnd - intervalStart;
+        intervalStart = start;
+        intervalEnd = end;
+      }
     }
     if (intervalStart !== undefined && intervalEnd !== undefined) embeddingMs += intervalEnd - intervalStart;
     return { result, embeddingMs: Math.round(embeddingMs) };
@@ -44,21 +60,21 @@ export class EmbeddingsService implements Embedder, OnModuleDestroy {
     // the SDK's async work using this request-local context.
     const signal = abortSignal ?? this.requestTiming.getStore()?.abortSignal;
     try {
-    if (!Number.isInteger(this.dimensions) || this.dimensions < 1) {
-      throw new Error(`Invalid OLLAMA_EMBED_DIMENSIONS: ${this.dimensions}`);
-    }
-    if (texts.length === 0) return [];
+      if (!Number.isInteger(this.dimensions) || this.dimensions < 1) {
+        throw new Error(`Invalid OLLAMA_EMBED_DIMENSIONS: ${this.dimensions}`);
+      }
+      if (texts.length === 0) return [];
 
-    const results: number[][] = [];
-    let completed = 0;
-    this.requestTiming.getStore()?.onEmbeddingProgress?.({ done: 0, total: texts.length });
-    for (let offset = 0; offset < texts.length; offset += this.maxBatchSize) {
-      const batch = texts.slice(offset, offset + this.maxBatchSize);
-      results.push(...await this.embedBatch(batch, signal));
-      completed += batch.length;
-      this.requestTiming.getStore()?.onEmbeddingProgress?.({ done: completed, total: texts.length });
-    }
-    return results;
+      const results: number[][] = [];
+      let completed = 0;
+      this.requestTiming.getStore()?.onEmbeddingProgress?.({ done: 0, total: texts.length });
+      for (let offset = 0; offset < texts.length; offset += this.maxBatchSize) {
+        const batch = texts.slice(offset, offset + this.maxBatchSize);
+        results.push(...(await this.embedBatch(batch, signal)));
+        completed += batch.length;
+        this.requestTiming.getStore()?.onEmbeddingProgress?.({ done: completed, total: texts.length });
+      }
+      return results;
     } finally {
       const timing = this.requestTiming.getStore();
       if (timing) timing.intervals.push([startedAt, performance.now()]);
@@ -87,7 +103,7 @@ export class EmbeddingsService implements Embedder, OnModuleDestroy {
 
     let payload: OllamaEmbedResponse;
     try {
-      payload = await response.json() as OllamaEmbedResponse;
+      payload = (await response.json()) as OllamaEmbedResponse;
     } catch (cause) {
       throw new Error('LOCAL_EMBEDDING_INVALID_RESPONSE: response was not JSON', { cause });
     }
@@ -96,10 +112,15 @@ export class EmbeddingsService implements Embedder, OnModuleDestroy {
     }
 
     return payload.embeddings.map((embedding, index) => {
-      if (!Array.isArray(embedding) || embedding.length !== this.dimensions ||
-        !embedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
+      if (
+        !Array.isArray(embedding) ||
+        embedding.length !== this.dimensions ||
+        !embedding.every((value) => typeof value === 'number' && Number.isFinite(value))
+      ) {
         const actual = Array.isArray(embedding) ? embedding.length : 'non-array';
-        throw new Error(`LOCAL_EMBEDDING_INVALID_DIMENSIONS: ${this.name} expected ${this.dimensions}, received ${actual} for item ${index}`);
+        throw new Error(
+          `LOCAL_EMBEDDING_INVALID_DIMENSIONS: ${this.name} expected ${this.dimensions}, received ${actual} for item ${index}`,
+        );
       }
       return embedding as number[];
     });
