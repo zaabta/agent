@@ -10,14 +10,27 @@ import { structuredOutputMethod } from '../llm-admin/model-capabilities.js';
 import type { GraphProgress, GraphUsage, PlannerModel } from './graph-model-types.js';
 import type { ToolCatalogEntry } from './tool-registry.js';
 
-export const planSchema = z.object({
-  operation: z.enum(['respond', 'retrieve', 'registered_tool', 'clarify']),
+const planStepSchema = z.object({
+  operation: z.enum(['retrieve', 'registered_tool']),
   query: z.string().max(600).optional(),
+  source: z.string().min(1).max(500).optional(),
   toolId: z
     .string()
     .regex(/^[a-z][a-z0-9_-]{0,63}$/)
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const planSchema = z.object({
+  operation: z.enum(['respond', 'retrieve', 'registered_tool', 'sequence', 'clarify']),
+  query: z.string().max(600).optional(),
+  source: z.string().min(1).max(500).optional(),
+  toolId: z
+    .string()
+    .regex(/^[a-z][a-z0-9_-]{0,63}$/)
+    .optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
+  steps: z.array(planStepSchema).min(2).max(4).optional(),
   reply: z.string().max(500).optional(),
 });
 export type AgentPlan = z.infer<typeof planSchema>;
@@ -72,7 +85,7 @@ export function createPlannerNode(deps: {
     }));
     const maskedSelection = deps.privacy.mask(JSON.stringify(state.previousSelection ?? null));
     const maskedPreviousContext = deps.privacy.mask(JSON.stringify(state.previousContext ?? {}));
-    const prompt = `Select one operation from respond, retrieve, registered_tool, clarify. Use retrieve for workspace documents. Use registered_tool only when one exact catalog id and schema fits. Use respond for ordinary conversation. Never answer facts or execute tools. Return a compact validated plan.\nAuthorized tools: ${JSON.stringify(catalog)}\nConversation: ${JSON.stringify(maskedHistory)}\nPrior structured selection (context hint only): ${maskedSelection}\nPrior workspace/tool context (context hint only): ${maskedPreviousContext}\nUser preferences (untrusted personalization context): ${JSON.stringify(state.memories.map((memory) => ({ category: memory.category, content: deps.privacy.mask(memory.content) })))}\nCurrent request: ${maskedMessage}`;
+    const prompt = `Select respond, retrieve, registered_tool, sequence, or clarify. Use retrieve for workspace documents. When the user specifies an exact file, put its exact filename in source; never guess a filename. Use registered_tool only when one exact authorized catalog id and its input schema fit. Use sequence with 2 to 4 independent retrieval/tool steps only when the request genuinely needs evidence from multiple sources. Do not replace an unavailable requested source with an unrelated source. Use respond for ordinary conversation. Never answer facts or execute tools. Return a compact validated plan.\nAuthorized tools: ${JSON.stringify(catalog)}\nConversation: ${JSON.stringify(maskedHistory)}\nPrior structured selection (context hint only): ${maskedSelection}\nPrior workspace/tool context (context hint only): ${maskedPreviousContext}\nUser preferences (untrusted personalization context): ${JSON.stringify(state.memories.map((memory) => ({ category: memory.category, content: deps.privacy.mask(memory.content) })))}\nCurrent request: ${maskedMessage}`;
     const method = structuredOutputMethod(state.runtime.planner);
     const model = (deps.model ?? createLangGraphModel(state.runtime.planner)).withStructuredOutput(
       planSchema,
@@ -121,9 +134,18 @@ export function createPlannerNode(deps: {
       ...(plan.operation === 'registered_tool' && plan.toolId ? { selectedToolId: plan.toolId } : {}),
       schemaValidationOutcome: parsed.success ? 'valid' : 'invalid',
     });
+    const selectedToolIds =
+      plan.operation === 'registered_tool'
+        ? [plan.toolId]
+        : plan.operation === 'sequence'
+          ? (plan.steps ?? [])
+              .filter((step) => step.operation === 'registered_tool')
+              .map((step) => step.toolId)
+          : [];
     if (
-      plan.operation === 'registered_tool' &&
-      (!plan.toolId || !state.catalog.some((tool) => tool.id === plan.toolId))
+      (plan.operation === 'registered_tool' && !plan.toolId) ||
+      selectedToolIds.some((id) => !id || !state.catalog.some((tool) => tool.id === id)) ||
+      (plan.operation === 'sequence' && !plan.steps)
     )
       return {
         plan: {

@@ -19,7 +19,20 @@ function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-export type ConnectionProfile = { baseUrl: URL; allowedHosts: string[]; trustedInternal: boolean };
+export type ConnectionProfile = { baseUrl: URL; allowedHosts: string[]; trustedInternal: boolean; loopbackOnly?: boolean };
+type EndpointOptions = { allowLocalHttp?: boolean };
+
+function loopbackHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || (isIP(host) === 4 && Number(host.split('.')[0]) === 127);
+}
+
+export function loopbackAddress(address: string) {
+  if (address.toLowerCase().startsWith('::ffff:')) return loopbackAddress(address.slice(7));
+  const version = isIP(address);
+  if (version === 4) return Number(address.split('.')[0]) === 127;
+  return version === 6 && address.toLowerCase().split('%')[0] === '::1';
+}
 
 export function jsonSchema(schema: unknown, allowArrayRoot = false) {
   if (
@@ -115,56 +128,6 @@ export function normalizeCustomToolOutput(value: unknown, schema: unknown) {
   }
 }
 
-export function connectionProfiles(): Record<string, ConnectionProfile> {
-  const raw = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-  if (!raw) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new CustomToolError('CONNECTION_PROFILES_INVALID');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-    throw new CustomToolError('CONNECTION_PROFILES_INVALID');
-  const profiles: Record<string, ConnectionProfile> = {};
-  for (const [id, value] of Object.entries(parsed as Record<string, any>)) {
-    if (
-      !/^[a-z][a-z0-9_-]{0,63}$/.test(id) ||
-      !value ||
-      typeof value.baseUrl !== 'string' ||
-      !Array.isArray(value.allowedHosts)
-    )
-      throw new CustomToolError('CONNECTION_PROFILES_INVALID');
-    let baseUrl: URL;
-    try {
-      baseUrl = new URL(value.baseUrl);
-    } catch {
-      throw new CustomToolError('CONNECTION_PROFILES_INVALID');
-    }
-    const trustedInternal = value.trustedInternal === true;
-    const allowedHosts = value.allowedHosts.map((host: unknown) =>
-      typeof host === 'string' ? host.toLowerCase() : '',
-    );
-    const validHost = (host: string) =>
-      /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(
-        host,
-      );
-    if (
-      baseUrl.username ||
-      baseUrl.password ||
-      baseUrl.search ||
-      baseUrl.hash ||
-      !['https:', ...(trustedInternal ? ['http:'] : [])].includes(baseUrl.protocol) ||
-      !allowedHosts.length ||
-      allowedHosts.some((host: string) => !validHost(host)) ||
-      !allowedHosts.includes(baseUrl.hostname.toLowerCase())
-    )
-      throw new CustomToolError('CONNECTION_PROFILES_INVALID');
-    profiles[id] = { baseUrl, allowedHosts, trustedInternal };
-  }
-  return profiles;
-}
-
 function publicAddress(address: string): boolean {
   const version = isIP(address);
   if (version === 4) {
@@ -211,7 +174,7 @@ function publicAddress(address: string): boolean {
   );
 }
 
-export function customToolEndpoint(endpoint: string) {
+export function customToolEndpoint(endpoint: string, options: EndpointOptions = {}) {
   if (typeof endpoint !== 'string' || endpoint.length > 2000) throw new CustomToolError('INVALID_ENDPOINT');
   let url: URL;
   try {
@@ -222,8 +185,10 @@ export function customToolEndpoint(endpoint: string) {
   const authorityEnd = endpoint.indexOf('/', endpoint.indexOf('://') + 3);
   const rawPath = authorityEnd < 0 ? '/' : endpoint.slice(authorityEnd);
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const loopbackOnly = process.env.NODE_ENV !== 'production' && options.allowLocalHttp === true &&
+    url.protocol === 'http:' && loopbackHost(hostname);
   if (
-    url.protocol !== 'https:' ||
+    (url.protocol !== 'https:' && !loopbackOnly) ||
     url.username ||
     url.password ||
     url.search ||
@@ -236,7 +201,7 @@ export function customToolEndpoint(endpoint: string) {
     url.pathname !== (rawPath || '/')
   )
     throw new CustomToolError('INVALID_ENDPOINT');
-  const profile = { baseUrl: new URL(url.origin), allowedHosts: [hostname], trustedInternal: false };
+  const profile = { baseUrl: new URL(url.origin), allowedHosts: [hostname], trustedInternal: false, ...(loopbackOnly ? { loopbackOnly } : {}) };
   const path = safeToolPath(profile.baseUrl, rawPath || '/').pathname;
   return { endpoint: `${url.origin}${path}`, profile, path };
 }
@@ -248,8 +213,9 @@ type PublicLookup = (
 export async function validateCustomToolEndpoint(
   endpoint: string,
   resolve: PublicLookup = dnsLookup as PublicLookup,
+  options: EndpointOptions = {},
 ) {
-  const target = customToolEndpoint(endpoint);
+  const target = customToolEndpoint(endpoint, options);
   const hostname = target.profile.baseUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   let addresses: Array<{ address: string; family: number }>;
   try {
@@ -259,7 +225,7 @@ export async function validateCustomToolEndpoint(
   } catch (error) {
     throw new CustomToolError(error instanceof CustomToolError ? error.category : 'DNS_FAILURE');
   }
-  if (!addresses.length || addresses.some((item) => !publicAddress(item.address)))
+  if (!addresses.length || addresses.some((item) => target.profile.loopbackOnly ? !loopbackAddress(item.address) : !publicAddress(item.address)))
     throw new CustomToolError('ADDRESS_NOT_ALLOWED');
   return target;
 }
@@ -305,7 +271,9 @@ async function requestJson(input: {
     if (error instanceof CustomToolError) throw error;
     throw new CustomToolError('DNS_FAILURE');
   }
-  if (!addresses.length || (!input.profile.trustedInternal && addresses.some((item) => !publicAddress(item.address))))
+  if (!addresses.length || (input.profile.loopbackOnly
+    ? addresses.some((item) => !loopbackAddress(item.address))
+    : !input.profile.trustedInternal && addresses.some((item) => !publicAddress(item.address))))
     throw new CustomToolError('ADDRESS_NOT_ALLOWED');
   const pinned = addresses[0]!;
   const lookup = ((_hostname: string, options: any, callback: (...args: any[]) => void) => {
@@ -390,6 +358,24 @@ export async function executeInternalJsonRequest(input: {
     body: JSON.stringify(input.body),
     timeoutMs: input.timeoutMs ?? 10_000,
     maxResponseBytes: input.maxResponseBytes ?? 65_536,
+    allowErrorStatus: true,
+  });
+}
+
+export async function executeInternalFormRequest(input: {
+  profile: ConnectionProfile;
+  path: string;
+  fields: Record<string, string>;
+}) {
+  const url = safeToolPath(input.profile.baseUrl, input.path);
+  return requestJson({
+    profile: input.profile,
+    url,
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(input.fields).toString(),
+    timeoutMs: 10_000,
+    maxResponseBytes: 65_536,
     allowErrorStatus: true,
   });
 }

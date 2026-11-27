@@ -24,6 +24,11 @@ export type StructuredSource = {
   documentVersionId?: string;
   chunkId?: string;
   contentHash?: string;
+  sheetName?: string;
+  rowStart?: number;
+  rowEnd?: number;
+  rowNumbers?: number[];
+  cellRefs?: string[];
 };
 type QueryRow = Record<string, unknown>;
 
@@ -66,11 +71,18 @@ function source(
   rows: number[],
   chunkIndex: number,
   documentVersionId?: string,
+  cellRefs: string[] = [],
 ): StructuredSource {
+  const rowNumbers = [...new Set(rows)].sort((a, b) => a - b);
+  const contiguous = rowNumbers.every((row, index) => index === 0 || row === rowNumbers[index - 1]! + 1);
   return {
     documentId,
     ...(documentVersionId ? { documentVersionId } : {}),
     filename,
+    sheetName,
+    rowNumbers,
+    ...(contiguous && rowNumbers.length ? { rowStart: rowNumbers[0], rowEnd: rowNumbers.at(-1) } : {}),
+    ...(cellRefs.length ? { cellRefs } : {}),
     sourceRef: `${filename} [${documentId.slice(0, 8)}] (${sheetName}, ${rowRanges(rows)})`,
     chunkIndex,
   };
@@ -325,7 +337,15 @@ export class StructuredDataService {
         select: { address: true, columnName: true, value: true },
       });
       const versionId = String(row.versionId);
-      const ref = source(documentId, String(row.filename), sheetName, [rowNumber], sources.length, versionId);
+      const ref = source(
+        documentId,
+        String(row.filename),
+        sheetName,
+        [rowNumber],
+        sources.length,
+        versionId,
+        cells.map((cell) => cell.address),
+      );
       sources.push(ref);
       records.push({ documentId, filename: String(row.filename), sheetName, rowNumber, cells, source: ref });
     }

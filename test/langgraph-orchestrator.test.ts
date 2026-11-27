@@ -29,7 +29,10 @@ function models(
       invoke: async (messages) => {
         count.router++;
         inspectRouter?.(messages);
-        return { parsed: { route }, raw: { usage_metadata: { input_tokens: 2, output_tokens: 1 } } };
+        return {
+          parsed: { route, contextRelevant: false },
+          raw: { usage_metadata: { input_tokens: 2, output_tokens: 1 } },
+        };
       },
     }),
   };
@@ -202,6 +205,236 @@ test('invalid semantic Router output fails closed without planner or answer call
   assert.equal(answerCalls, 0);
 });
 
+test('planner selects and executes multiple dynamically catalogued tools with scoped context', async () => {
+  const executed: Array<{ id: string; args: unknown }> = [];
+  let plannerPrompt = '';
+  let answerPrompt = '';
+  const backendTools = {
+    catalog: async () => [
+      {
+        id: 'source_alpha',
+        description: 'Read the first authorized source',
+        input: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+        version: 1,
+      },
+      {
+        id: 'source_beta',
+        description: 'Read the second authorized source',
+        input: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+        version: 1,
+      },
+    ],
+    execute: async ({ id, args }: any) => {
+      executed.push({ id, args });
+      return { value: `${id}:${args.key}` };
+    },
+  };
+  const graph = createLangGraphOrchestrator({
+    typegraph: {
+      searchDocuments: async () => ({
+        hits: [
+          {
+            sourceRef: 'unrelated.pdf (page 1)',
+            content: 'Unrelated file result.',
+            citation: { documentId: 'unrelated-id', filename: 'unrelated.pdf', chunkIndex: 0 },
+          },
+        ],
+      }),
+    } as any,
+    backendTools: backendTools as any,
+    principal,
+    runtime,
+    models: {
+      router: {
+        withStructuredOutput: () => ({
+          invoke: async () => ({ parsed: { route: 'workspace', contextRelevant: true } }),
+        }),
+      },
+      planner: {
+        withStructuredOutput: () => ({
+          invoke: async (messages) => {
+            plannerPrompt = JSON.stringify(messages);
+            return {
+              operation: 'sequence',
+              steps: [
+                { operation: 'registered_tool', toolId: 'source_alpha', args: { key: 'shared-context' } },
+                { operation: 'registered_tool', toolId: 'source_beta', args: { key: 'shared-context' } },
+                { operation: 'retrieve', query: 'the requested facts', source: 'requested.pdf' },
+              ],
+            };
+          },
+        }),
+      },
+      answer: {
+        withStructuredOutput: () => ({
+          invoke: async (messages) => {
+            answerPrompt = String((messages[1] as any).content);
+            const evidenceText = answerPrompt.split('Evidence Package: ')[1]!;
+            const evidence = JSON.parse(evidenceText) as Array<{ id: string }>;
+            return {
+              parsed: {
+                claims: [
+                  {
+                    text: 'Combined evidence from both sources.',
+                    evidenceIds: evidence.map(({ id }) => id),
+                  },
+                ],
+                missingInformation: [],
+              },
+            };
+          },
+        }),
+      },
+    },
+  });
+
+  const result = await graph.invoke({
+    message: 'Combine the two relevant records',
+    history: [{ role: 'assistant', content: 'We were discussing the same project.' }],
+    previousContext: { summary: 'shared-context', entities: ['Project'], sources: [] },
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.answer, 'Combined evidence from both sources.');
+  assert.equal(result.contextRelevant, true);
+  assert.deepEqual(executed, [
+    { id: 'source_alpha', args: { key: 'shared-context' } },
+    { id: 'source_beta', args: { key: 'shared-context' } },
+  ]);
+  assert.deepEqual(result.toolsCalled, ['source_alpha', 'source_beta', 'documentSearch']);
+  assert.match(plannerPrompt, /Read the first authorized source/);
+  assert.match(plannerPrompt, /properties/);
+  assert.match(plannerPrompt, /key/);
+  assert.match(plannerPrompt, /shared-context/);
+  assert.match(answerPrompt, /source_alpha:shared-context/);
+  assert.match(answerPrompt, /source_beta:shared-context/);
+  assert.match(answerPrompt, /requested file returned no relevant authorized evidence/);
+});
+
+test('router can drop stale structured context without changing authorization or history', async () => {
+  let plannerPrompt = '';
+  const graph = createLangGraphOrchestrator({
+    typegraph: { searchDocuments: async () => ({ hits: [] }) } as any,
+    principal,
+    runtime,
+    models: {
+      router: {
+        withStructuredOutput: () => ({
+          invoke: async () => ({ parsed: { route: 'workspace', contextRelevant: false } }),
+        }),
+      },
+      planner: {
+        withStructuredOutput: () => ({
+          invoke: async (messages) => {
+            plannerPrompt = JSON.stringify(messages);
+            return { operation: 'retrieve', query: 'new unrelated request' };
+          },
+        }),
+      },
+      answer: {
+        withStructuredOutput: () => ({ invoke: async () => ({ parsed: { claims: [], missingInformation: [] } }) }),
+      },
+    },
+  });
+  const result = await graph.invoke({
+    message: 'Search the workspace for a new topic',
+    history: [{ role: 'assistant', content: 'Older conversation remains available.' }],
+    previousContext: { summary: 'stale-only-context-marker', entities: ['Old project'], sources: [] },
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.contextRelevant, false);
+  assert.doesNotMatch(plannerPrompt, /stale-only-context-marker|Old project/);
+  assert.match(plannerPrompt, /Older conversation remains available/);
+});
+
+test('requested document source is enforced against verified retrieval metadata', async () => {
+  let searches = 0;
+  const graph = createLangGraphOrchestrator({
+    typegraph: {
+      searchDocuments: async (query: string, limit: number) => {
+        searches++;
+        assert.equal(query, 'requested facts requested.pdf');
+        assert.equal(limit, 64);
+        return {
+          hits: [
+            {
+              sourceRef: 'other.pdf (page 1)',
+              content: 'Unrelated result.',
+              citation: { documentId: 'other-id', filename: 'other.pdf', chunkIndex: 0 },
+            },
+            {
+              sourceRef: 'requested.pdf (page 3)',
+              content: 'Requested source evidence.',
+              citation: { documentId: 'requested-id', filename: 'requested.pdf', chunkIndex: 2, pageNumber: 3 },
+            },
+          ],
+        };
+      },
+    } as any,
+    principal,
+    runtime,
+    models: models(
+      { operation: 'retrieve', query: 'requested facts', source: 'requested.pdf' },
+      { claims: [{ text: 'Supported by the requested file.', evidenceIds: ['E1'] }] },
+      undefined,
+      undefined,
+      'workspace',
+    ),
+  });
+  const result = await graph.invoke({
+    message: 'Use requested.pdf only',
+    history: [],
+    signal: new AbortController().signal,
+  });
+  assert.equal(searches, 1);
+  assert.deepEqual(result.sources.map((source) => source.filename), ['requested.pdf']);
+});
+
+test('missing requested document source is reported without substituting another file', async () => {
+  let answerCalls = 0;
+  const graph = createLangGraphOrchestrator({
+    typegraph: {
+      searchDocuments: async () => ({
+        hits: [
+          {
+            sourceRef: 'other.pdf (page 1)',
+            content: 'Unrelated result.',
+            citation: { documentId: 'other-id', filename: 'other.pdf', chunkIndex: 0 },
+          },
+        ],
+      }),
+    } as any,
+    principal,
+    runtime,
+    models: {
+      ...models(
+        { operation: 'retrieve', query: 'requested facts', source: 'requested.pdf' },
+        { claims: [] },
+        undefined,
+        undefined,
+        'workspace',
+      ),
+      answer: {
+        withStructuredOutput: () => ({
+          invoke: async () => {
+            answerCalls++;
+            return { parsed: { claims: [], missingInformation: [] } };
+          },
+        }),
+      },
+    },
+  });
+  const result = await graph.invoke({
+    message: 'Use requested.pdf only',
+    history: [],
+    signal: new AbortController().signal,
+  });
+  assert.equal(answerCalls, 0);
+  assert.deepEqual(result.sources, []);
+  assert.match(result.answer, /specifically requested file/);
+  assert.match(result.answer, /did not substitute another source/);
+});
+
 test('workspace route resolves and validates authorized RAG evidence before structured answer generation', async () => {
   const order: string[] = [];
   const count = { router: 0, planner: 0, answer: 0 };
@@ -269,6 +502,64 @@ test('workspace route resolves and validates authorized RAG evidence before stru
   );
   assert.equal(result.sources[0]?.sourceRef, 'report page 2');
   assert.deepEqual(count, { router: 1, planner: 1, answer: 1 });
+});
+
+test('answer citations stay tied to selected retrieved chunks and retain exact PDF and Excel locations', async () => {
+  let searches = 0;
+  let answerPrompt = '';
+  const pdf = {
+    sourceRef: 'policy.pdf (page 2)',
+    content: 'Policy evidence.',
+    citation: {
+      documentId: 'doc-pdf', documentVersionId: 'v-pdf', filename: 'policy.pdf',
+      chunkIndex: 0, chunkId: 'pdf-chunk', pageNumber: 2, location: 'page 2',
+    },
+  };
+  const excel = {
+    sourceRef: 'costs.xlsx (sheet Costs, rows 4-5, cells A4:B5)',
+    content: 'Sheet: Costs\nRows 4-5.',
+    citation: {
+      documentId: 'doc-xlsx', documentVersionId: 'v-xlsx', filename: 'costs.xlsx',
+      chunkIndex: 1, chunkId: 'xlsx-chunk', sheetName: 'Costs', rowStart: 4, rowEnd: 5, cellRange: 'A4:B5',
+    },
+  };
+  const graph = createLangGraphOrchestrator({
+    typegraph: {
+      searchDocuments: async () => {
+        searches++;
+        return { hits: [pdf, { ...pdf }, excel] };
+      },
+    } as any,
+    principal,
+    runtime,
+    models: models(
+      { operation: 'retrieve', query: 'policy and costs' },
+      { claims: [
+        { text: 'The policy states the condition.', evidenceIds: ['E1'] },
+        { text: 'The spreadsheet covers costs.', evidenceIds: ['E2'] },
+      ] },
+      undefined,
+      (messages) => { answerPrompt = JSON.stringify(messages); },
+      'workspace',
+    ),
+  });
+  const result = await graph.invoke({
+    message: 'Summarize policy and cost evidence.',
+    history: [],
+    signal: new AbortController().signal,
+  });
+  assert.equal(searches, 1);
+  assert.deepEqual(result.evidenceReferences.map((reference) => reference.evidenceIds), [['E1'], ['E2']]);
+  assert.deepEqual(result.evidenceReferences.map((reference) => reference.citationIds), [['C1'], ['C2']]);
+  assert.deepEqual(result.sources.map((source) => source.citationId), ['C1', 'C2']);
+  assert.deepEqual(result.sources.map((source) => source.documentId), ['doc-pdf', 'doc-xlsx']);
+  assert.equal(result.sources[0]?.pageNumber, 2);
+  assert.equal(result.sources[1]?.sheetName, 'Costs');
+  assert.equal(result.sources[1]?.rowStart, 4);
+  assert.equal(result.sources[1]?.rowEnd, 5);
+  assert.equal(result.sources[1]?.cellRange, 'A4:B5');
+  assert.match(answerPrompt, /request-scoped citations listed for each evidence item/i);
+  assert.match(answerPrompt, /A4:B5/);
 });
 
 test('missing authorized evidence returns safely without calling Answer Provider', async () => {
@@ -625,6 +916,40 @@ test('workspace claims cannot omit their prepared evidence references', async ()
       history: [],
       signal: new AbortController().signal,
     }),
+    /ANSWER_GENERATION_INVALID/,
+  );
+  assert.equal(answerCalls, 1);
+});
+
+test('answer generation rejects a hallucinated citation ID without a recovery call', async () => {
+  let answerCalls = 0;
+  const answer: AnswerModel = {
+    withStructuredOutput: () => ({
+      invoke: async () => {
+        answerCalls++;
+        return { parsed: { claims: [{ text: 'Unsupported citation.', evidenceIds: ['E999'] }], missingInformation: [] } };
+      },
+    }),
+  };
+  const graph = createLangGraphOrchestrator({
+    typegraph: {
+      searchDocuments: async () => ({
+        hits: [{
+          sourceRef: 'doc.pdf (page 1)',
+          content: 'A supported fact.',
+          citation: { documentId: 'd1', filename: 'doc.pdf', chunkIndex: 0, pageNumber: 1 },
+        }],
+      }),
+    } as any,
+    principal,
+    runtime,
+    models: {
+      ...models({ operation: 'retrieve', query: 'fact' }, { claims: [] }, undefined, undefined, 'workspace'),
+      answer,
+    },
+  });
+  await assert.rejects(
+    graph.invoke({ message: 'Find the fact', history: [], signal: new AbortController().signal }),
     /ANSWER_GENERATION_INVALID/,
   );
   assert.equal(answerCalls, 1);

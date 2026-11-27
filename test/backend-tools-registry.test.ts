@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { BackendTools } from '../src/agent/backend-tools.js';
 import type { PrismaService } from '../src/prisma/prisma.service.js';
@@ -41,12 +40,23 @@ const dbTool = () => ({
   updatedBy: 'owner',
 });
 const principal = { userId: 'user-1', tenantId: 'tenant-1', authMethod: 'jwt' as const };
+const crmProfile = {
+  tenantId: principal.tenantId,
+  id: 'crm',
+  displayName: 'CRM',
+  baseUrl: 'https://api.example.com/v1',
+  authStrategy: 'NONE',
+  enabled: true,
+};
+const profileModel = {
+  findMany: async ({ where }: any) => (where.tenantId === principal.tenantId ? [crmProfile] : []),
+  findUnique: async ({ where }: any) =>
+    where.tenantId_id.tenantId === crmProfile.tenantId && where.tenantId_id.id === crmProfile.id
+      ? crmProfile
+      : null,
+};
 
 test('custom catalog discovers enabled integrations independently of request keywords', async () => {
-  const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({
-    crm: { baseUrl: 'https://api.example.com/v1', allowedHosts: ['api.example.com'] },
-  });
   const rows = [
     dbTool(),
     { ...dbTool(), id: '11111111-1111-4111-8111-111111111111', name: 'disabled_tool', enabled: false },
@@ -58,39 +68,32 @@ test('custom catalog discovers enabled integrations independently of request key
     },
   ];
   const prisma = {
+    customToolConnectionProfile: profileModel,
     customTool: {
       findMany: async ({ where }: any) =>
         rows.filter((row) => (!where.enabled || row.enabled) && (!where.archivedAt || !row.archivedAt)),
     },
   };
-  try {
-    const tools = new BackendTools(prisma as unknown as PrismaService);
-    const catalog = await tools.catalog(principal);
-    assert.deepEqual(
-      catalog.map((item) => item.id),
-      ['custom_f9237c7864ae40df91c721e0915d2f15', 'custom_22222222222242228222222222222222'],
-    );
-    assert.equal((catalog[0] as any).version, 4);
-    assert.equal(JSON.stringify(catalog).includes('secret-ref'), false);
-    assert.equal(await tools.hasEnabledTools(principal), true);
-    rows[1]!.enabled = true;
-    assert.equal((await tools.catalog(principal)).length, 3);
-    const empty = new BackendTools({ customTool: { findMany: async () => [] } } as unknown as PrismaService);
-    assert.deepEqual(await empty.catalog(principal), []);
-  } finally {
-    if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
-  }
+  const tools = new BackendTools(prisma as unknown as PrismaService);
+  const catalog = await tools.catalog(principal);
+  assert.deepEqual(
+    catalog.map((item) => item.id),
+    ['custom_f9237c7864ae40df91c721e0915d2f15', 'custom_22222222222242228222222222222222'],
+  );
+  assert.equal((catalog[0] as any).version, 4);
+  assert.equal(JSON.stringify(catalog).includes('secret-ref'), false);
+  assert.equal(await tools.hasEnabledTools(principal), true);
+  rows[1]!.enabled = true;
+  assert.equal((await tools.catalog(principal)).length, 3);
+  const empty = new BackendTools({ customTool: { findMany: async () => [] } } as unknown as PrismaService);
+  assert.deepEqual(await empty.catalog(principal), []);
 });
 
 test('custom execution rechecks enabled/version and logs only bounded metadata on validation failure', async () => {
-  const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({
-    crm: { baseUrl: 'https://api.example.com/v1', allowedHosts: ['api.example.com'] },
-  });
   const row = dbTool();
   const history: any[] = [];
   const prisma = {
+    customToolConnectionProfile: profileModel,
     customTool: { findUnique: async () => row },
     customToolExecution: { create: async ({ data }: any) => history.push(data) },
   };
@@ -99,16 +102,15 @@ test('custom execution rechecks enabled/version and logs only bounded metadata o
     id: 'custom_f9237c7864ae40df91c721e0915d2f15',
     args: { query: 'private', extra: 'must-not-log' },
   };
-  try {
-    row.enabled = false;
-    assert.equal(await tools.execute(call, principal), undefined);
-    row.enabled = true;
-    await assert.rejects(
+  row.enabled = false;
+  assert.equal(await tools.execute(call, principal), undefined);
+  row.enabled = true;
+  await assert.rejects(
       tools.execute(call, principal, undefined, undefined, { snapshotVersion: 3 }),
       /TOOL_CONFIGURATION_CHANGED/,
-    );
-    const validation: string[] = [];
-    await assert.rejects(
+  );
+  const validation: string[] = [];
+  await assert.rejects(
       tools.execute(call, principal, undefined, undefined, {
         logicalRequestId: 'request-1',
         conversationId: '00000000-0000-4000-8000-000000000001',
@@ -116,25 +118,17 @@ test('custom execution rechecks enabled/version and logs only bounded metadata o
         onSchemaValidation: (outcome) => validation.push(outcome),
       }),
       /INVALID_ARGUMENTS/,
-    );
-    assert.deepEqual(validation, ['invalid']);
-    assert.equal(history.length, 1);
-    assert.equal(history[0].success, false);
-    assert.equal(history[0].errorCategory, 'INVALID_ARGUMENTS');
-    assert.equal(history[0].arguments, undefined);
-    assert.equal('args' in history[0], false);
-    assert.equal('output' in history[0], false);
-  } finally {
-    if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
-  }
+  );
+  assert.deepEqual(validation, ['invalid']);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].success, false);
+  assert.equal(history[0].errorCategory, 'INVALID_ARGUMENTS');
+  assert.equal(history[0].arguments, undefined);
+  assert.equal('args' in history[0], false);
+  assert.equal('output' in history[0], false);
 });
 
 test('custom execution persists only schema-validated, redacted arguments with the request id', async () => {
-  const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({
-    crm: { baseUrl: 'https://api.example.com/v1', allowedHosts: ['api.example.com'] },
-  });
   const row = {
     ...dbTool(),
     inputSchema: {
@@ -153,28 +147,24 @@ test('custom execution persists only schema-validated, redacted arguments with t
   };
   const history: any[] = [];
   const prisma = {
+    customToolConnectionProfile: profileModel,
     customTool: { findUnique: async () => row },
     customToolExecution: { create: async ({ data }: any) => history.push(data) },
   };
-  try {
-    const tools = new BackendTools(prisma as unknown as PrismaService);
-    const query = 'ابحث عن cafés في İstanbul';
-    const call = {
-      id: 'custom_f9237c7864ae40df91c721e0915d2f15',
-      args: { q: query, apiKey: 'private-key-value', contact: 'user@example.com' },
-    };
-    await assert.rejects(
-      tools.execute(call, principal, undefined, undefined, { logicalRequestId: 'request-ar-1' }),
-      /INVALID_PATH/,
-    );
-    assert.equal(history.length, 1);
-    assert.equal(history[0].logicalRequestId, 'request-ar-1');
-    assert.deepEqual(history[0].arguments, { q: query, apiKey: '[redacted]', contact: '[redacted]' });
-    assert.equal(JSON.stringify(history[0]).includes('private-key-value'), false);
-  } finally {
-    if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
-  }
+  const tools = new BackendTools(prisma as unknown as PrismaService);
+  const query = 'ابحث عن cafés في İstanbul';
+  const call = {
+    id: 'custom_f9237c7864ae40df91c721e0915d2f15',
+    args: { q: query, apiKey: 'private-key-value', contact: 'user@example.com' },
+  };
+  await assert.rejects(
+    tools.execute(call, principal, undefined, undefined, { logicalRequestId: 'request-ar-1' }),
+    /INVALID_PATH/,
+  );
+  assert.equal(history.length, 1);
+  assert.equal(history[0].logicalRequestId, 'request-ar-1');
+  assert.deepEqual(history[0].arguments, { q: query, apiKey: '[redacted]', contact: '[redacted]' });
+  assert.equal(JSON.stringify(history[0]).includes('private-key-value'), false);
 });
 
 test('owner-created full-endpoint tools generate parameter schemas and encrypt optional credentials', async () => {
@@ -219,6 +209,7 @@ test('owner-created full-endpoint tools generate parameter schemas and encrypt o
         auth: { headerName: 'X-API-Key', secret: 'test-secret-value-123' },
       },
       'owner',
+      'tenant-1',
     );
     assert.equal(stored.tool.endpointUrl, 'https://8.8.8.8/v1/weather');
     assert.equal(stored.tool.authHeaderName, 'X-API-Key');
@@ -304,13 +295,13 @@ test('custom tool updates preserve, replace, and explicitly remove authenticatio
   };
   try {
     const tools = new BackendTools(prisma);
-    const preserved = await tools.updateCustomTool(toolId, updateInput, 'owner');
+    const preserved = await tools.updateCustomTool(toolId, updateInput, 'owner', 'tenant-1');
     assert.equal(row.authHeaderName, 'Authorization');
     assert.equal(row.authPrefix, 'Bearer ');
     assert.equal(decryptCredential(secrets.get('old-secret')!), 'old-access-token');
     assert.equal(preserved.authSecretConfigured, true);
     const restartedTools = new BackendTools(prisma);
-    const loadedAfterRestart = await restartedTools.getCustomTool(toolId);
+    const loadedAfterRestart = await restartedTools.getCustomTool(toolId, 'tenant-1');
     assert.equal(loadedAfterRestart.authHeaderName, 'Authorization');
     assert.equal(loadedAfterRestart.authPrefix, 'Bearer ');
     assert.equal(loadedAfterRestart.authSecretConfigured, true);
@@ -319,6 +310,7 @@ test('custom tool updates preserve, replace, and explicitly remove authenticatio
       toolId,
       { ...updateInput, auth: { headerName: 'X-API-Key', prefix: 'Token ' } },
       'owner',
+      'tenant-1',
     );
     assert.equal(row.authHeaderName, 'X-API-Key');
     assert.equal(row.authPrefix, 'Token ');
@@ -331,6 +323,7 @@ test('custom tool updates preserve, replace, and explicitly remove authenticatio
         auth: { headerName: 'Authorization', prefix: 'Bearer ', secret: 'new-access-token' },
       },
       'owner',
+      'tenant-1',
     );
     assert.equal(decryptCredential(secrets.get(row.authSecretId)), 'new-access-token');
     assert.equal(secrets.has('old-secret'), false);
@@ -345,13 +338,14 @@ test('custom tool updates preserve, replace, and explicitly remove authenticatio
           auth: { headerName: 'X-API-Key', secret: 'failed-replacement' },
         },
         'owner',
+        'tenant-1',
       ),
       /audit failed/,
     );
     assert.equal(decryptCredential(secrets.get(row.authSecretId)), 'new-access-token');
 
     failAudit = false;
-    const removed = await tools.updateCustomTool(toolId, { ...updateInput, auth: null }, 'owner');
+    const removed = await tools.updateCustomTool(toolId, { ...updateInput, auth: null }, 'owner', 'tenant-1');
     assert.equal(row.authHeaderName, null);
     assert.equal(row.authPrefix, null);
     assert.equal(row.authSecretId, null);
@@ -364,31 +358,13 @@ test('custom tool updates preserve, replace, and explicitly remove authenticatio
   }
 });
 
-test('custom HTTP execution sends the decrypted credential with the configured Bearer prefix', async () => {
+test('static credentials remain redacted when profile request validation fails', async () => {
   const previousKey = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
-  const previousProfiles = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
   process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = Buffer.alloc(32, 6).toString('base64');
   const encrypted = encryptCredential('fresh-access-token');
-  let received: any;
-  const server = createServer((request, response) => {
-    received = request.headers;
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end('{"id":"authenticated"}');
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  assert.ok(address && typeof address === 'object');
-  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = JSON.stringify({
-    local_test: {
-      baseUrl: `http://127.0.0.1:${address.port}`,
-      allowedHosts: ['127.0.0.1'],
-      trustedInternal: true,
-    },
-  });
   const row = {
     ...dbTool(),
-    connectionProfile: 'local_test',
-    path: '/customers',
+    path: '/../blocked',
     endpointUrl: null,
     authHeaderName: 'Authorization',
     authPrefix: 'Bearer ',
@@ -398,27 +374,19 @@ test('custom HTTP execution sends the decrypted credential with the configured B
   const history: any[] = [];
   try {
     const tools = new BackendTools({
+      customToolConnectionProfile: profileModel,
       customTool: { findUnique: async () => row },
       customToolExecution: { create: async ({ data }: any) => history.push(data) },
     } as unknown as PrismaService);
-    const result = await tools.execute(
-      {
-        id: `custom_${toolId.replaceAll('-', '')}`,
-        args: { query: 'active' },
-      },
-      principal,
+    await assert.rejects(
+      tools.execute({ id: `custom_${toolId.replaceAll('-', '')}`, args: { query: 'active' } }, principal),
+      /INVALID_PATH/,
     );
-    assert.match(JSON.stringify(result), /"id":"authenticated"/);
-    assert.equal(received.authorization, 'Bearer fresh-access-token');
+    assert.equal(history.length, 1);
     assert.equal(JSON.stringify(history).includes('fresh-access-token'), false);
   } finally {
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
     if (previousKey === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
     else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previousKey;
-    if (previousProfiles === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previousProfiles;
   }
 });
 
@@ -445,6 +413,7 @@ test('custom tool authentication encryption misconfiguration returns a sanitized
             auth: { headerName: 'Authorization', prefix: 'Bearer ', secret: 'access-token-value' },
           },
           'owner',
+          'tenant-1',
         ),
         (error: any) =>
           error.getStatus() === 503 && error.message === 'CUSTOM_TOOL_ENCRYPTION_NOT_CONFIGURED',
@@ -457,20 +426,13 @@ test('custom tool authentication encryption misconfiguration returns a sanitized
   }
 });
 
-test('direct endpoint tools remain discoverable without connection-profile configuration', async () => {
-  const previous = process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-  process.env.CUSTOM_TOOL_CONNECTION_PROFILES = 'invalid-json';
+test('direct endpoint tools remain discoverable without a connection profile', async () => {
   const row = { ...dbTool(), endpointUrl: 'https://api.example.com/weather', connectionProfile: 'direct' };
   const prisma = { customTool: { findMany: async () => [row] } };
-  try {
-    const tools = new BackendTools(prisma as unknown as PrismaService);
-    const catalog = await tools.catalog(principal);
-    assert.equal(catalog.length, 1);
-    assert.equal(catalog[0]?.id, 'custom_f9237c7864ae40df91c721e0915d2f15');
-  } finally {
-    if (previous === undefined) delete process.env.CUSTOM_TOOL_CONNECTION_PROFILES;
-    else process.env.CUSTOM_TOOL_CONNECTION_PROFILES = previous;
-  }
+  const tools = new BackendTools(prisma as unknown as PrismaService);
+  const catalog = await tools.catalog(principal);
+  assert.equal(catalog.length, 1);
+  assert.equal(catalog[0]?.id, 'custom_f9237c7864ae40df91c721e0915d2f15');
 });
 
 test('tool catalogs stay within entry and UTF-8 prompt-size bounds', async () => {

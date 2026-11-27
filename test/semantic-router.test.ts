@@ -52,7 +52,7 @@ test('semantic router succeeds for ordinary conversation and reports its configu
   const router = createSemanticRouter({
     catalog,
     privacy,
-    model: model(async () => ({ parsed: { route: 'conversation' } })),
+    model: model(async () => ({ parsed: { route: 'conversation', contextRelevant: false } })),
     onUsage: (record) => {
       usageRole = record.role;
     },
@@ -113,7 +113,7 @@ test('structured-output setup failure is classified without leaking exception te
       catalog,
       privacy,
       model: model(
-        async () => ({ parsed: { route: 'conversation' } }),
+        async () => ({ parsed: { route: 'conversation', contextRelevant: false } }),
         () => {
           throw new Error('schema internals with private details');
         },
@@ -173,7 +173,7 @@ test('usage tracking failures are logged safely and do not fail a valid route', 
     const router = createSemanticRouter({
       catalog,
       privacy,
-      model: model(async () => ({ parsed: { route: 'conversation' } })),
+      model: model(async () => ({ parsed: { route: 'conversation', contextRelevant: false } })),
       onUsage: async () => {
         throw new Error('database includes a private value');
       },

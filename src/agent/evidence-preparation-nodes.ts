@@ -55,6 +55,9 @@ export function createEvidencePreparationNodes(deps: { privacy: { mask: (value: 
       ...source,
       filename: deps.privacy.mask(source.filename),
       sourceRef: deps.privacy.mask(source.sourceRef),
+      ...(source.location ? { location: deps.privacy.mask(source.location) } : {}),
+      ...(source.headingPath ? { headingPath: source.headingPath.map(deps.privacy.mask) } : {}),
+      ...(source.sheetName ? { sheetName: deps.privacy.mask(source.sheetName) } : {}),
     }));
     const publicBindings = resolved.bindings.map((binding) => ({
       ...binding,
@@ -62,6 +65,9 @@ export function createEvidencePreparationNodes(deps: { privacy: { mask: (value: 
         ...source,
         filename: deps.privacy.mask(source.filename),
         sourceRef: deps.privacy.mask(source.sourceRef),
+        ...(source.location ? { location: deps.privacy.mask(source.location) } : {}),
+        ...(source.headingPath ? { headingPath: source.headingPath.map(deps.privacy.mask) } : {}),
+        ...(source.sheetName ? { sheetName: deps.privacy.mask(source.sheetName) } : {}),
       })),
     }));
     return { bindings: resolved.bindings, publicBindings, persistenceSources: resolved.sources, sources };

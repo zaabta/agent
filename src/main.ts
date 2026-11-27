@@ -15,6 +15,10 @@ async function main() {
     throw new Error('AUTH_JWT_SECRET must be configured with at least 32 bytes in production');
   }
   const app = await NestFactory.create(AppModule);
+  const proxyHops = process.env.TRUST_PROXY_HOPS === undefined ? 0 : Number(process.env.TRUST_PROXY_HOPS);
+  if (!Number.isInteger(proxyHops) || proxyHops < 0 || proxyHops > 5)
+    throw new Error('TRUST_PROXY_HOPS must be an integer from 0 to 5');
+  app.getHttpAdapter().getInstance().set('trust proxy', proxyHops);
   if (process.env.NODE_ENV !== 'production') {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('SitePilot AI API')

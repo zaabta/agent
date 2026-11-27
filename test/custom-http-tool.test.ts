@@ -96,6 +96,49 @@ test('endpoint DNS validation rejects any private answer, mapped metadata IP, an
   assert.equal(allowed.endpoint, 'https://api.example.com/weather');
 });
 
+test('database-approved development loopback HTTP remains loopback-only and is disabled in production', async () => {
+  const previous = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'development';
+    const options = { allowLocalHttp: true };
+    const local = await validateCustomToolEndpoint('http://localhost:3000', async () => [
+      { address: '::1', family: 6 },
+      { address: '127.0.0.1', family: 4 },
+    ], options);
+    assert.equal(local.profile.loopbackOnly, true);
+    assert.equal(local.endpoint, 'http://localhost:3000/');
+    await assert.rejects(
+      validateCustomToolEndpoint('http://localhost:3000', async () => [
+        { address: '127.0.0.1', family: 4 },
+        { address: '10.0.0.2', family: 4 },
+      ], options),
+      /ADDRESS_NOT_ALLOWED/,
+    );
+    assert.throws(() => customToolEndpoint('http://localhost:3000'), /INVALID_ENDPOINT/);
+    assert.throws(() => customToolEndpoint('http://10.0.0.2:3000', options), /INVALID_ENDPOINT/);
+    const executionTarget = customToolEndpoint('http://127.0.0.1:1', options);
+    await assert.rejects(
+      executeHttpTool({
+        profile: executionTarget.profile,
+        path: '/',
+        queryMappings: {},
+        inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        outputSchema,
+        args: {},
+        timeoutMs: 1000,
+        maxResponseBytes: 1000,
+      }),
+      (error: unknown) => error instanceof CustomToolError && error.category === 'NETWORK_ERROR',
+    );
+
+    process.env.NODE_ENV = 'production';
+    assert.throws(() => customToolEndpoint('http://localhost:3000', options), /INVALID_ENDPOINT/);
+  } finally {
+    if (previous === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous;
+  }
+});
+
 test('generated parameter schema is strict and the default response schema accepts bounded JSON objects', () => {
   const input = jsonSchema({
     type: 'object',

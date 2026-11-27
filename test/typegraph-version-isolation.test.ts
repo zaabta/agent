@@ -34,7 +34,7 @@ function result(id: string, logicalId: string, content: string, metadata: Record
   };
 }
 
-test('TypeGraph search filters active versions before ranking and fails closed on stale/unversioned hits', async () => {
+test('TypeGraph search excludes unauthorized source metadata before citation output', async () => {
   let receivedOptions: Record<string, any> | undefined;
   const listed = [
     indexedDocument(`${documentId}::version-one::g1::chunk`, documentId, 'F-4 2400 x 4400 mm', {
@@ -166,6 +166,7 @@ test('TypeGraph search filters active versions before ranking and fails closed o
     ['F-4 2600 x 4400 mm', 'legacy active content'],
   );
   assert.ok(response.hits.every((hit) => hit.citation.documentId !== 'doc-other-tenant'));
+  assert.ok(response.hits.every((hit) => !JSON.stringify(hit.citation).includes('another tenant')));
 });
 
 test('completed legacy data recovers only when the unversioned index proves tenant, filename, and checksum identity', async () => {

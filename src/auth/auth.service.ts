@@ -313,7 +313,12 @@ export class AuthService implements OnModuleDestroy {
       throw new Error('invalid claims');
     return payload;
   }
-  private async enforceLoginLimit(operation: 'register' | 'login', ip: string, identifier: string) {
+  async enforceConnectionLoginLimit(ip: string, identifier: string) {
+    const identity = typeof identifier === 'string' ? identifier.toLowerCase().trim().slice(0, 254) : 'invalid';
+    return this.enforceLoginLimit('connection', ip || 'unknown', identity);
+  }
+
+  private async enforceLoginLimit(operation: 'register' | 'login' | 'connection', ip: string, identifier: string) {
     try {
       if (this.redis.status === 'wait') await this.redis.connect();
       const emailKey = `sitepilot:auth:${operation}:identity:${createHash('sha256').update(identifier).digest('hex')}`;

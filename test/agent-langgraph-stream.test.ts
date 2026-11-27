@@ -28,8 +28,8 @@ test('LangGraph SSE emits only the assembled answer and persists the same final 
       await progress('stage', { stage: 'planning', status: 'in_progress' });
       return {
         answer: 'The answer is 350 mm.',
-        sources: [{ documentId: 'doc-a', filename: 'report.pdf', sourceRef: 'report page 2', chunkIndex: 1 }],
-        evidenceReferences: [{ claimIndex: 0, evidenceIds: ['E1'] }],
+        sources: [{ citationId: 'C1', documentId: 'doc-a', filename: 'report.pdf', sourceRef: 'report page 2', chunkIndex: 1, pageNumber: 2 }],
+        evidenceReferences: [{ claimIndex: 0, evidenceIds: ['E1'], citationIds: ['C1'], sources: [{ citationId: 'C1', documentId: 'doc-a', filename: 'report.pdf', sourceRef: 'report page 2', chunkIndex: 1, pageNumber: 2 }] }],
         toolsCalled: ['documentSearch'],
         citationValidation: 'valid',
         verificationStatus: 'unverified',
@@ -57,7 +57,9 @@ test('LangGraph SSE emits only the assembled answer and persists the same final 
   assert.equal(events.filter((event) => event.name === 'text-delta').length, 1);
   assert.ok(!events.some((event) => event.name === 'text-reset'));
   assert.deepEqual(events.find((event) => event.name === 'sources')?.data.sources, result.sources);
+  assert.deepEqual((events.find((event) => event.name === 'done')?.data.evidenceReferences as any[])[0]?.citationIds, ['C1']);
   assert.equal((persisted[0] as unknown[])[2], result.answer);
+  assert.deepEqual((persisted[0] as unknown[])[8], result.evidenceReferences);
 });
 
 test('LangGraph SSE failure marks the assistant turn failed and emits no completion', async () => {

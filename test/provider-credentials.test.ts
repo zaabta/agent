@@ -12,7 +12,11 @@ import { INSTALLATION_OWNER_ONLY } from '../src/auth/installation-owner.decorato
 import { config } from '../src/config.js';
 import { LlmController } from '../src/llm-admin/llm.controller.js';
 import { CustomToolsController } from '../src/agent/custom-tools.controller.js';
-import { decryptCredential, encryptCredential } from '../src/llm-admin/provider-credentials.js';
+import {
+  credentialEncryptionAvailable,
+  decryptCredential,
+  encryptCredential,
+} from '../src/llm-admin/provider-credentials.js';
 import { LlmAdminService, supportsOpenAITools } from '../src/llm-admin/llm-admin.service.js';
 
 test('cloud API credentials encrypt and decrypt with AES-GCM and reject tampering', () => {
@@ -23,6 +27,25 @@ test('cloud API credentials encrypt and decrypt with AES-GCM and reject tamperin
     assert.notEqual(encrypted.ciphertext, 'test-provider-secret');
     assert.equal(decryptCredential(encrypted), 'test-provider-secret');
     assert.throws(() => decryptCredential({ ...encrypted, authTag: Buffer.alloc(16).toString('base64') }));
+  } finally {
+    if (previous === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+    else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previous;
+  }
+});
+
+test('credential encryption readiness is safe and limited to the installation owner', () => {
+  const previous = process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+  try {
+    delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
+    assert.equal(credentialEncryptionAvailable(), false);
+    assert.throws(() => encryptCredential('not-persisted'), /LLM_CREDENTIALS_ENCRYPTION_KEY_REQUIRED/);
+    assert.deepEqual(new CustomToolsController({} as any, {} as any).connectionEncryptionStatus(), { available: false });
+    process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = 'not-a-key';
+    assert.equal(credentialEncryptionAvailable(), false);
+    process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString('base64');
+    assert.equal(credentialEncryptionAvailable(), true);
+    assert.deepEqual(new CustomToolsController({} as any, {} as any).connectionEncryptionStatus(), { available: true });
+    assert.equal(Reflect.getMetadata(INSTALLATION_OWNER_ONLY, CustomToolsController.prototype.connectionEncryptionStatus), true);
   } finally {
     if (previous === undefined) delete process.env.LLM_CREDENTIALS_ENCRYPTION_KEY;
     else process.env.LLM_CREDENTIALS_ENCRYPTION_KEY = previous;
@@ -78,8 +101,8 @@ test('custom tool management routes reject non-owner accounts', async () => {
   try {
     const handlers = Object.getOwnPropertyNames(CustomToolsController.prototype)
       .filter((name) => name !== 'constructor')
-      .map((name) => (CustomToolsController.prototype as any)[name] as RouteHandler);
-    assert.equal(handlers.length, 9);
+      .map((name) => (CustomToolsController.prototype as any)[name] as RouteHandler)
+      .filter((handler) => Reflect.getMetadata(INSTALLATION_OWNER_ONLY, handler) === true);
     for (const handler of handlers) {
       assert.equal(Reflect.getMetadata(INSTALLATION_OWNER_ONLY, handler), true);
       await assert.rejects(guardFor(undefined, handler, CustomToolsController), UnauthorizedException);

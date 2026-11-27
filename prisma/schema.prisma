@@ -33,15 +33,15 @@ model AppDocument {
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
+  @@unique([tenantId, checksum])
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([tenantId, status, createdAt(sort: Desc)])
-  @@unique([tenantId, checksum])
   @@map("app_documents")
 }
 
 model AppDocumentVersion {
   id                 String   @id @default(uuid()) @db.Uuid
-  documentId         String   @db.Uuid @map("document_id")
+  documentId            String      @map("document_id") @db.Uuid
   tenantId           String   @map("tenant_id")
   versionNumber      Int      @map("version_number")
   filename           String
@@ -77,7 +77,7 @@ model AppDocumentVersion {
 // parser or TypeGraph SDK does not expose measurable incremental progress.
 model DocumentProgressEvent {
   id             String      @id @default(uuid()) @db.Uuid
-  documentId     String      @db.Uuid @map("document_id")
+  documentId          String      @map("document_id") @db.Uuid
   tenantId       String      @map("tenant_id")
   jobId          String      @map("job_id")
   attempt        Int
@@ -99,8 +99,8 @@ model DocumentProgressEvent {
 
 model AppDocumentCell {
   id          String      @id @default(uuid()) @db.Uuid
-  documentId  String      @db.Uuid @map("document_id")
-  versionId   String?     @db.Uuid @map("version_id")
+  documentId String      @map("document_id") @db.Uuid
+  versionId  String?     @map("version_id") @db.Uuid
   tenantId    String      @map("tenant_id")
   sheetName   String      @map("sheet_name")
   rowNumber   Int         @map("row_number")
@@ -134,8 +134,9 @@ model Conversation {
 
 model Message {
   structuredSelection Json? @map("structured_selection")
+  evidenceReferences Json @default("[]") @map("evidence_references")
   id             String       @id @default(uuid()) @db.Uuid
-  conversationId String       @db.Uuid @map("conversation_id")
+  conversationId      String       @map("conversation_id") @db.Uuid
   role           String
   content        String       @db.Text
   status         String       @default("completed")
@@ -150,7 +151,7 @@ model Message {
 // Small, durable conversation state. Evidence references are hints only; every
 // document search still runs through the tenant/user-scoped TypeGraph tools.
 model ConversationContext {
-  conversationId String   @id @db.Uuid @map("conversation_id")
+  conversationId  String       @id @map("conversation_id") @db.Uuid
   tenantId       String   @map("tenant_id")
   ownerId        String   @map("owner_id")
   summary        String?  @db.Text
@@ -218,7 +219,7 @@ model User {
 
 model Membership {
   tenantId  String     @map("tenant_id")
-  userId    String     @db.Uuid @map("user_id")
+  userId    String     @map("user_id") @db.Uuid
   role      TenantRole @default(MEMBER)
   createdAt DateTime   @default(now()) @map("created_at")
   tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -232,9 +233,9 @@ model Membership {
 model RefreshSession {
   id        String    @id @default(uuid()) @db.Uuid
   tokenHash String    @unique @map("token_hash")
-  familyId  String    @db.Uuid @map("family_id")
+  familyId  String    @map("family_id") @db.Uuid
   tenantId  String    @map("tenant_id")
-  userId    String    @db.Uuid @map("user_id")
+  userId    String    @map("user_id") @db.Uuid
   expiresAt DateTime  @map("expires_at")
   revokedAt DateTime? @map("revoked_at")
   createdAt DateTime  @default(now()) @map("created_at")
@@ -249,7 +250,7 @@ model RefreshSession {
 model AuditLog {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String?  @map("tenant_id")
-  userId    String?  @db.Uuid @map("user_id")
+  userId    String?  @map("user_id") @db.Uuid
   action    String
   ipAddress String?  @map("ip_address")
   details   Json     @default("{}")
@@ -267,6 +268,7 @@ model RuntimeSetting {
   value     String   @db.Text
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by")
+
   @@map("runtime_settings")
 }
 
@@ -285,6 +287,7 @@ model RegisteredModel {
   contextLength Int? @map("context_length")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+
   @@unique([provider, modelId])
   @@index([provider, available, compatible])
   @@map("registered_models")
@@ -297,6 +300,7 @@ model RuntimeSettingAudit {
   newValue  String   @map("new_value") @db.Text
   updatedBy String?  @map("updated_by")
   createdAt DateTime @default(now()) @map("created_at")
+
   @@index([key, createdAt(sort: Desc)])
   @@map("runtime_setting_audit")
 }
@@ -308,6 +312,7 @@ model ProviderCredential {
   authTag    String   @map("auth_tag")
   updatedBy  String?  @map("updated_by")
   updatedAt  DateTime @updatedAt @map("updated_at")
+
   @@map("provider_credentials")
 }
 
@@ -335,6 +340,7 @@ model LlmUsage {
   finishReason      String?  @map("finish_reason")
   maxOutputTokens   Int?     @map("max_output_tokens")
   createdAt         DateTime @default(now()) @map("created_at")
+
   @@index([tenantId, createdAt])
   @@index([provider, modelId, createdAt])
   @@index([tenantId, role, createdAt])
@@ -366,20 +372,44 @@ model CustomToolSecret {
   createdBy  String      @map("created_by")
   createdAt  DateTime    @default(now()) @map("created_at")
   tool       CustomTool?
+
   @@map("custom_tool_secrets")
+}
+
+model CustomToolConnectionProfile {
+  tenantId       String   @map("tenant_id")
+  id             String
+  displayName    String   @map("display_name")
+  baseUrl        String   @map("base_url") @db.Text
+  allowLocalHttp Boolean  @default(false) @map("allow_local_http")
+  authStrategy   String   @default("NONE") @map("auth_strategy") @db.VarChar(40)
+  tokenUrl       String?  @map("token_url") @db.Text
+  clientId       String?  @map("client_id")
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, id])
+  @@index([tenantId, enabled])
+  @@map("custom_tool_connection_profiles")
 }
 
 model CustomToolConnectionCredential {
   id                       String       @id @default(uuid()) @db.Uuid
+  tenantId                String       @default("*") @map("tenant_id")
+  userId                  String       @default("*") @map("user_id")
   profileId                String       @map("profile_id")
   name                     String       @db.VarChar(80)
   authStrategy             String       @map("auth_strategy") @db.VarChar(40)
   accessTokenCiphertext    String       @map("access_token_ciphertext") @db.Text
   accessTokenIv            String       @map("access_token_iv")
   accessTokenAuthTag       String       @map("access_token_auth_tag")
-  refreshCookieCiphertext  String       @map("refresh_cookie_ciphertext") @db.Text
-  refreshCookieIv          String       @map("refresh_cookie_iv")
-  refreshCookieAuthTag     String       @map("refresh_cookie_auth_tag")
+  refreshCookieCiphertext String?      @map("refresh_cookie_ciphertext") @db.Text
+  refreshCookieIv         String?      @map("refresh_cookie_iv")
+  refreshCookieAuthTag    String?      @map("refresh_cookie_auth_tag")
+  refreshTokenCiphertext  String?      @map("refresh_token_ciphertext") @db.Text
+  refreshTokenIv          String?      @map("refresh_token_iv")
+  refreshTokenAuthTag     String?      @map("refresh_token_auth_tag")
   tokenExpiresAt           DateTime     @map("token_expires_at")
   lastRefreshedAt          DateTime?    @map("last_refreshed_at")
   credentialVersion        Int          @default(1) @map("credential_version")
@@ -391,7 +421,7 @@ model CustomToolConnectionCredential {
   updatedAt                DateTime     @updatedAt @map("updated_at")
   tools                    CustomTool[]
 
-  @@unique([profileId, name])
+  @@unique([profileId, name, tenantId, userId])
   @@index([profileId, authStatus])
   @@map("custom_tool_connection_credentials")
 }
@@ -411,6 +441,7 @@ model CustomTool {
   outputSchema          Json                  @map("output_schema")
   authHeaderName        String?               @map("auth_header_name")
   authPrefix            String?               @map("auth_prefix")
+  authScope              String                          @default("NONE") @map("auth_scope") @db.VarChar(16)
   authSecretId          String?               @unique @map("auth_secret_id") @db.Uuid
   authSecret            CustomToolSecret?     @relation(fields: [authSecretId], references: [id], onDelete: SetNull)
   connectionCredentialId String?              @map("connection_credential_id") @db.Uuid
@@ -427,6 +458,7 @@ model CustomTool {
   updatedAt             DateTime              @updatedAt @map("updated_at")
   archivedAt            DateTime?             @map("archived_at")
   executions            CustomToolExecution[]
+
   @@index([enabled, archivedAt])
   @@index([updatedAt(sort: Desc)])
   @@map("custom_tools")
@@ -446,6 +478,7 @@ model CustomToolExecution {
   isTest            Boolean   @default(false) @map("is_test")
   createdAt         DateTime  @default(now()) @map("created_at")
   tool              CustomTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
   @@index([toolId, createdAt(sort: Desc)])
   @@index([logicalRequestId])
   @@index([conversationId, createdAt(sort: Desc)])

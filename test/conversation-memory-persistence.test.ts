@@ -72,7 +72,6 @@ test('verified document references persist with a conversation and reload after 
   assert.equal(turn.prompt.at(-2).content, messages[0]!.content);
   assert.equal(turn.evidenceRefs[0].filename, 'orion.pdf');
   assert.equal(turn.evidenceRefs[0].documentVersionId, '22222222-2222-4222-8222-222222222222');
-  assert.equal(turn.preserveConversationContext, true);
 
   // A later completed turn on a different topic clears prior document hints.
   savedContext.activeSelection = { documentId: 'old-selection' };

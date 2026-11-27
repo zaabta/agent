@@ -32,6 +32,14 @@ export interface DocumentSearchHit {
     chunkCount: number;
     location?: string;
     pageNumber?: number;
+    headingPath?: string[];
+    sheetName?: string;
+    rowStart?: number;
+    rowEnd?: number;
+    rowNumbers?: number[];
+    cellRange?: string;
+    cellRefs?: string[];
+    matchedCell?: string;
     documentVersionId?: string;
     chunkId?: string;
     contentHash?: string;
@@ -648,6 +656,24 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
           : hit.chunk.total,
         ...(location ? { location } : {}),
         ...(Number.isInteger(hit.metadata.pageNumber) ? { pageNumber: Number(hit.metadata.pageNumber) } : {}),
+        ...(Array.isArray(hit.metadata.headingPath)
+          ? { headingPath: hit.metadata.headingPath.filter((part): part is string => typeof part === 'string') }
+          : {}),
+        ...(typeof hit.metadata.sheetName === 'string' ? { sheetName: hit.metadata.sheetName } : {}),
+        ...(Number.isInteger(hit.metadata.rowStart) ? { rowStart: Number(hit.metadata.rowStart) } : {}),
+        ...(Number.isInteger(hit.metadata.rowEnd) ? { rowEnd: Number(hit.metadata.rowEnd) } : {}),
+        ...(Array.isArray(hit.metadata.rowNumbers)
+          ? { rowNumbers: hit.metadata.rowNumbers.filter((row): row is number => Number.isInteger(row)) }
+          : Number.isInteger(hit.metadata.rowNumber)
+            ? { rowNumbers: [Number(hit.metadata.rowNumber)] }
+            : {}),
+        ...(typeof hit.metadata.cellRange === 'string' ? { cellRange: hit.metadata.cellRange } : {}),
+        ...(Array.isArray(hit.metadata.cellRefs)
+          ? { cellRefs: hit.metadata.cellRefs.filter((cell): cell is string => typeof cell === 'string') }
+          : typeof hit.metadata.matchedCell === 'string'
+            ? { cellRefs: [hit.metadata.matchedCell] }
+            : {}),
+        ...(typeof hit.metadata.matchedCell === 'string' ? { matchedCell: hit.metadata.matchedCell } : {}),
         ...(typeof hit.metadata.documentVersionId === 'string'
           ? { documentVersionId: hit.metadata.documentVersionId }
           : {}),
@@ -671,6 +697,8 @@ export class TypegraphService implements OnModuleInit, OnModuleDestroy {
     if (Number.isInteger(metadata.pageNumber)) return `page ${metadata.pageNumber}`;
     if (Array.isArray(metadata.headingPath) && metadata.headingPath.length)
       return `section ${metadata.headingPath.join(' › ')}${Number.isInteger(metadata.paragraphStart) ? `, paragraph${metadata.paragraphStart === metadata.paragraphEnd ? '' : 's'} ${metadata.paragraphStart}${metadata.paragraphStart === metadata.paragraphEnd ? '' : `-${metadata.paragraphEnd}`}` : ''}`;
+    if (typeof metadata.sheetName === 'string' && Number.isInteger(metadata.rowNumber))
+      return `sheet ${metadata.sheetName}, row ${metadata.rowNumber}${typeof metadata.matchedCell === 'string' ? `, cell ${metadata.matchedCell}` : ''}`;
     if (typeof metadata.sheetName === 'string' && Number.isInteger(metadata.rowStart)) {
       const rows =
         metadata.rowStart === metadata.rowEnd

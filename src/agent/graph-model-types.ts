@@ -2,10 +2,20 @@ import type { z } from 'zod';
 
 export type GraphTurn = { role: 'user' | 'assistant'; content: string };
 export type GraphSource = {
+  citationId: string;
   documentId: string;
   documentVersionId?: string;
   chunkId?: string;
   pageNumber?: number;
+  location?: string;
+  headingPath?: string[];
+  sheetName?: string;
+  rowStart?: number;
+  rowEnd?: number;
+  rowNumbers?: number[];
+  cellRange?: string;
+  cellRefs?: string[];
+  matchedCell?: string;
   contentHash?: string;
   paragraphStart?: number;
   paragraphEnd?: number;

@@ -32,4 +32,35 @@ Evidence validation checks evidence scope, stable evidence identities, source pr
 
 ## SSE and persistence
 
-The existing authenticated controller and persistence services remain in place. LangGraph stage progress is streamed; resolved sources and one assembled final-answer delta follow answer generation. No provisional answer is sent. On model failure, the controller emits a safe error and the pending assistant message is marked failed/interrupted. Completed turns persist through existing Prisma conversation and context services.
+The existing authenticated controller and persistence services remain in place. LangGraph stage progress is streamed; resolved sources and one assembled final-answer delta follow answer generation. No provisional answer is sent. On model failure, the controller emits a safe error and the pending assistant message is marked failed/interrupted. Completed turns persist through existing Prisma conversation and context services, including their verified `evidenceReferences`; `GET /api/agent/conversations/:id` returns these references with each assistant message so citations survive reloads.
+
+## Answer citations
+
+`POST /api/agent/ask` returns `answer`, `sources`, and `evidenceReferences`. Each evidence reference has `{ claimIndex, evidenceIds, citationIds, sources }`; `claimIndex` maps to the corresponding structured answer claim. Evidence IDs (`E1`, `S1`, etc.) are generated from the request's actual tool results and validated against the Answer output schema. Source citation IDs (`C1`, `C2`, etc.) are assigned from those resolved sources before Answer generation. The Answer model receives the evidence IDs, citation IDs, and verified metadata together. The response only includes sources selected by the generated claims. No search or citation-recovery model call runs afterward.
+
+Example:
+
+```json
+{
+  "sources": [{
+    "citationId": "C1",
+    "documentId": "document-uuid",
+    "documentVersionId": "version-uuid",
+    "filename": "policy.pdf",
+    "sourceRef": "policy.pdf (page 2)",
+    "chunkIndex": 3,
+    "pageNumber": 2,
+    "location": "page 2"
+  }],
+  "evidenceReferences": [{
+    "claimIndex": 0,
+    "evidenceIds": ["E1"],
+    "citationIds": ["C1"],
+    "sources": [{ "citationId": "C1", "documentId": "document-uuid", "filename": "policy.pdf", "sourceRef": "policy.pdf (page 2)", "chunkIndex": 3, "pageNumber": 2 }]
+  }]
+}
+```
+
+Each source includes `citationId`, `documentId`, `filename`, `sourceRef`, and `chunkIndex`, plus verified optional fields such as `documentVersionId`, `chunkId`, `pageNumber`, `location`, `headingPath`, `paragraphStart`/`paragraphEnd`, and spreadsheet `sheetName`, `rowStart`/`rowEnd`, `rowNumbers`, `cellRange`, `cellRefs`, or `matchedCell`. Missing page or location metadata is omitted rather than inferred. Results are tenant scoped and TypeGraph filters candidates to authorized active documents before retrieval.
+
+For `/api/agent/stream`, the `sources` event carries `{ sources }` after answer generation; the final `done` event includes both `sources` and `evidenceReferences`. `text-delta` carries the assembled answer. Existing clients can ignore the additive citation fields. The current frontend has no document preview route; citation links can jump to their matching source details in the answer.

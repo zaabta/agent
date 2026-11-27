@@ -1,7 +1,7 @@
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { RuntimeModelSnapshot } from '../llm-admin/runtime-model.js';
-import type { AgentEvidencePackage } from './evidence.js';
+import type { AgentEvidencePackage, EvidenceReferenceBinding } from './evidence.js';
 import type { AgentPlan } from './planner-node.js';
 import { createLangGraphModel } from './model-factory.js';
 import { normalizeUsage } from './graph-usage.js';
@@ -15,11 +15,13 @@ export type AnswerProviderState = {
   plan?: AgentPlan;
   evidenceReadiness: 'authorized' | 'no-evidence' | 'invalid';
   evidence?: AgentEvidencePackage;
+  bindings: EvidenceReferenceBinding[];
   message: string;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
   memories: Array<{ category: string; content: string }>;
   catalog: ToolCatalogEntry[];
   answerStrategy?: string;
+  sourceLimitations?: string[];
   signal: AbortSignal;
   requestId: string;
   runtime: { answer: RuntimeModelSnapshot };
@@ -60,7 +62,9 @@ export function createAnswerProvider(deps: {
       return {
         claims: [
           {
-            text: 'The authorized documents do not contain evidence to answer this question.',
+            text: state.sourceLimitations?.length
+              ? 'The specifically requested file returned no relevant authorized evidence, so I cannot answer from it. I did not substitute another source.'
+              : 'The authorized documents do not contain evidence to answer this question.',
             evidenceIds: [],
           },
         ],
@@ -99,8 +103,13 @@ export function createAnswerProvider(deps: {
       memories: state.memories,
       catalog: state.catalog,
       items,
+      bindings: state.bindings,
       privacy: deps.privacy,
     });
+    const sourceLimitations = state.sourceLimitations ?? [];
+    const prompt = sourceLimitations.length
+      ? `${promptStrategy.prompt}\nSource limitations: ${JSON.stringify(sourceLimitations.map(deps.privacy.mask))}\nDo not claim evidence from a limited source; state the limitation and answer only what other evidence supports.`
+      : promptStrategy.prompt;
     const method = structuredOutputMethod(state.runtime.answer);
     const model = (deps.model ?? createLangGraphModel(state.runtime.answer)).withStructuredOutput(
       claimSchema,
@@ -109,7 +118,7 @@ export function createAnswerProvider(deps: {
     const startedAt = performance.now();
     try {
       const result: any = await model.invoke(
-        [new SystemMessage(promptStrategy.system), new HumanMessage(promptStrategy.prompt)],
+        [new SystemMessage(promptStrategy.system), new HumanMessage(prompt)],
         { signal: state.signal },
       );
       if (!result?.parsed || !claimSchema.safeParse(result.parsed).success)

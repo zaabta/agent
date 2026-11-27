@@ -40,3 +40,26 @@ test('unverified fallback is saved as failed and excluded from conversation evid
   assert.equal(updates[0].data.stage, 'failed');
   assert.equal(savedContext, 0);
 });
+
+test('verified evidence references are persisted with the assistant message', async () => {
+  let update: any;
+  const transaction = {
+    message: { updateMany: async (args: any) => { update = args; } },
+    conversation: { update: async () => undefined },
+  };
+  const service = Object.create(AgentService.prototype) as any;
+  service.prisma = {
+    ...transaction,
+    $transaction: async (operations: unknown[]) => operations,
+  };
+  const evidenceReferences = [{
+    claimIndex: 0,
+    evidenceIds: ['E1'],
+    citationIds: ['C1'],
+    sources: [{ citationId: 'C1', documentId: 'doc-a', filename: 'pricing.md', sourceRef: 'Section 2', chunkIndex: 3 }],
+  }];
+
+  await service.saveAssistant('conversation', 'message', 'The price is listed in the file.', undefined, undefined, [], false, 'completed', evidenceReferences);
+
+  assert.deepEqual(update.data.evidenceReferences, evidenceReferences);
+});

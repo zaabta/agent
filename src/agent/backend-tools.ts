@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   Inject,
@@ -6,6 +7,7 @@ import {
   NotFoundException,
   Optional,
   ServiceUnavailableException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -13,15 +15,19 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthPrincipal } from '../auth/auth.types.js';
 import { decryptCredential, encryptCredential } from '../llm-admin/provider-credentials.js';
 import {
-  connectionProfiles,
   customToolEndpoint,
   CustomToolError,
   executeHttpTool,
-  executeInternalJsonRequest,
   jsonSchema,
   safeToolPath,
   validateCustomToolEndpoint,
+  type ConnectionProfile,
 } from './custom-http-tool.js';
+import {
+  AtomicCookieCredentialAdapter,
+  OAuth2RefreshCredentialAdapter,
+  type CustomToolCredentialAdapter,
+} from './custom-tool-credential-adapters.js';
 
 export const backendCallSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
@@ -61,27 +67,13 @@ type ToolDefinition = {
   timeoutMs?: number;
   maxResponseBytes?: number;
   auth?: { headerName: 'Authorization' | 'X-API-Key'; prefix?: string; secret?: string } | null;
+  authScope?: 'NONE' | 'SHARED' | 'PER_USER';
   connectionCredentialId?: string | null;
   allowedUserIds?: string[];
 };
 const DEFAULT_OUTPUT_SCHEMA = { type: 'object', properties: {}, required: [], additionalProperties: true };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOOL_ID = (id: string) => 'custom_' + id.replaceAll('-', '');
-const refreshCookieName = 'sitepilot_refresh';
-function tokenFromResponse(response: { body: unknown; statusCode: number; responseHeaders: Record<string, string | string[] | undefined> }) {
-  const body = response.body as Record<string, unknown> | null;
-  const accessToken = body && typeof body.accessToken === 'string' ? body.accessToken : '';
-  const expiresIn = body && Number.isInteger(body.expiresIn) ? Number(body.expiresIn) : 0;
-  const cookies = response.responseHeaders['set-cookie'];
-  const cookieLines = Array.isArray(cookies) ? cookies : cookies ? [cookies] : [];
-  const refreshCookie = cookieLines
-    .map((line) => line.split(';', 1)[0] ?? '')
-    .find((line) => line.startsWith(`${refreshCookieName}=`))
-    ?.slice(refreshCookieName.length + 1);
-  if (response.statusCode < 200 || response.statusCode >= 300 || !accessToken || accessToken.length > 8192 || !refreshCookie || refreshCookie.length > 4096 || expiresIn < 1 || expiresIn > 86_400)
-    throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED', response.statusCode);
-  return { accessToken, refreshCookie, expiresIn };
-}
 function encryptToolCredential(secret: string) {
   try {
     return encryptCredential(secret);
@@ -129,48 +121,220 @@ const idFromCall = (id: string) =>
 @Injectable()
 export class BackendTools {
   private readonly tools = new Map<string, ReadTool>();
+  private readonly atomicCredentials = new AtomicCookieCredentialAdapter();
+  private readonly oauthCredentials = new OAuth2RefreshCredentialAdapter();
   constructor(@Optional() @Inject(PrismaService) private readonly prisma?: PrismaService) {}
 
-  private authProfile(profileId: string) {
-    const allowlist = (process.env.CUSTOM_TOOL_AUTH_ENDPOINT_PROFILES ?? '').split(',').map((item) => item.trim()).filter(Boolean);
-    let profile: ReturnType<typeof connectionProfiles>[string] | undefined;
-    try { profile = connectionProfiles()[profileId]; } catch { /* handled below */ }
-    if (!profile || !allowlist.includes(profileId) || profile.baseUrl.protocol !== 'https:' || profile.baseUrl.pathname !== '/')
+  private async authProfile(profileId: string, tenantId: string) {
+    const profile = await this.resolveConnectionProfile(profileId, tenantId);
+    if (!profile || profile.baseUrl.pathname !== '/')
       throw new BadRequestException('AUTH_ENDPOINT_NOT_ALLOWED');
     return profile;
   }
 
-  listConnectionCredentials(profileId: string) {
-    this.authProfile(profileId);
+  private async atomicUserAuthProfile(profileId: string, tenantId: string) {
+    const profile = await this.authProfile(profileId, tenantId);
+    const record = await this.db().customToolConnectionProfile.findUnique({
+      where: { tenantId_id: { tenantId, id: profileId } },
+    });
+    if (!this.atomicPerUserLoginAvailable(record))
+      throw new BadRequestException('ATOMIC_ORIGIN_NOT_APPROVED');
+    return profile;
+  }
+
+  private atomicPerUserLoginAvailable(profile: any) {
+    if (!profile?.enabled || profile.authStrategy !== 'ATOMIC_COOKIE_REFRESH') return false;
+    try {
+      const target = customToolEndpoint(profile.baseUrl, { allowLocalHttp: profile.allowLocalHttp });
+      return target.profile.baseUrl.pathname === '/';
+    } catch {
+      return false;
+    }
+  }
+
+  private oauthPerUserConnectionAvailable(profile: any) {
+    if (!profile?.enabled || profile.authStrategy !== 'OAUTH2_REFRESH' || !profile.tokenUrl || !profile.clientId)
+      return false;
+    try {
+      customToolEndpoint(profile.baseUrl, { allowLocalHttp: profile.allowLocalHttp });
+      customToolEndpoint(profile.tokenUrl, { allowLocalHttp: profile.allowLocalHttp });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async connectionProfilesFor(tenantId: string) {
+    const profiles: Record<string, ConnectionProfile> = {};
+    const rows = await this.db().customToolConnectionProfile.findMany({ where: { tenantId, enabled: true } });
+    for (const row of rows) {
+      try {
+        const target = customToolEndpoint(row.baseUrl, { allowLocalHttp: row.allowLocalHttp });
+        profiles[row.id] = target.profile;
+      } catch {
+        // Invalid database values fail closed.
+      }
+    }
+    return profiles;
+  }
+
+  private async resolveConnectionProfile(profileId: string, tenantId: string) {
+    const row = await this.db().customToolConnectionProfile.findUnique({
+      where: { tenantId_id: { tenantId, id: profileId } },
+    });
+    if (row) {
+      if (!row.enabled) return undefined;
+      try {
+        return customToolEndpoint(row.baseUrl, { allowLocalHttp: row.allowLocalHttp }).profile;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  async listConnectionCredentials(profileId: string, tenantId: string) {
+    await this.authProfile(profileId, tenantId);
     return this.db().customToolConnectionCredential.findMany({
-      where: { profileId },
+      where: { profileId, tenantId: '*', userId: '*' },
       select: { id: true, name: true, authStrategy: true, tokenExpiresAt: true, lastRefreshedAt: true, credentialVersion: true, authStatus: true },
       orderBy: { name: 'asc' },
     });
   }
 
-  async loginConnectionCredential(profileId: string, name: string, email: string, password: string, userId: string) {
-    const profile = this.authProfile(profileId);
+  async connectUserCredential(profileId: string, input: { accessToken: string; refreshToken: string; expiresIn: number }, principal: AuthPrincipal) {
+    const profile = await this.db().customToolConnectionProfile.findUnique({
+      where: { tenantId_id: { tenantId: principal.tenantId, id: profileId } },
+    });
+    if (!profile?.enabled || profile.authStrategy !== 'OAUTH2_REFRESH')
+      throw new BadRequestException('PER_USER_AUTH_UNAVAILABLE');
+    const validToken = (value: unknown) => typeof value === 'string' && value.length >= 8 && value.length <= 8192 && !/[\u0000-\u001f\u007f]/.test(value);
+    if (!validToken(input?.accessToken) || !validToken(input?.refreshToken) ||
+      !Number.isInteger(input?.expiresIn) || input.expiresIn < 1 || input.expiresIn > 86_400)
+      throw new BadRequestException('INVALID_CONNECTION_CREDENTIAL');
+    await this.storePerUserCredential(profileId, principal, 'OAUTH2_REFRESH', input.accessToken, input.refreshToken, input.expiresIn);
+    return this.userCredentialStatus(profileId, principal);
+  }
+
+  async connectAtomicUserCredential(profileId: string, email: string, password: string, principal: AuthPrincipal) {
+    const profile = await this.atomicUserAuthProfile(profileId, principal.tenantId);
+    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 120 ||
+      typeof password !== 'string' || password.length < 8 || password.length > 1024)
+      throw new BadRequestException('INVALID_ATOMIC_CREDENTIALS');
+    try {
+      const tokens = await this.atomicCredentials.login(profile, email, password);
+      if (!tokens.refreshToken) throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
+      await this.storePerUserCredential(profileId, principal, 'ATOMIC_COOKIE_REFRESH', tokens.accessToken, tokens.refreshToken, tokens.expiresIn);
+      return this.userCredentialStatus(profileId, principal);
+    } catch (error) {
+      if (error instanceof CustomToolError) {
+        if (error.statusCode === 401) throw new UnauthorizedException('ATOMIC_CREDENTIALS_INVALID');
+        throw new BadGatewayException('ATOMIC_CONNECTION_FAILED');
+      }
+      throw error;
+    }
+  }
+
+  private async storePerUserCredential(
+    profileId: string,
+    principal: AuthPrincipal,
+    authStrategy: 'OAUTH2_REFRESH' | 'ATOMIC_COOKIE_REFRESH',
+    accessToken: string,
+    refreshToken: string,
+    expiresIn: number,
+  ) {
+    const access = encryptToolCredential(accessToken);
+    const refresh = encryptToolCredential(refreshToken);
+    const refreshFields = authStrategy === 'ATOMIC_COOKIE_REFRESH'
+      ? { refreshCookieCiphertext: refresh.ciphertext, refreshCookieIv: refresh.iv, refreshCookieAuthTag: refresh.authTag,
+          refreshTokenCiphertext: null, refreshTokenIv: null, refreshTokenAuthTag: null }
+      : { refreshCookieCiphertext: null, refreshCookieIv: null, refreshCookieAuthTag: null,
+          refreshTokenCiphertext: refresh.ciphertext, refreshTokenIv: refresh.iv, refreshTokenAuthTag: refresh.authTag };
+    const where = {
+      profileId_name_tenantId_userId: {
+        profileId,
+        name: 'per-user',
+        tenantId: principal.tenantId,
+        userId: principal.userId,
+      },
+    };
+    const db = this.db().customToolConnectionCredential;
+    await db.upsert({
+      where,
+      create: {
+        ...where.profileId_name_tenantId_userId,
+        authStrategy,
+        accessTokenCiphertext: access.ciphertext,
+        accessTokenIv: access.iv,
+        accessTokenAuthTag: access.authTag,
+        ...refreshFields,
+        tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
+        lastRefreshedAt: new Date(),
+        authStatus: 'ACTIVE',
+        credentialVersion: 1,
+        createdBy: principal.userId,
+      },
+      update: {
+        authStrategy,
+        accessTokenCiphertext: access.ciphertext,
+        accessTokenIv: access.iv,
+        accessTokenAuthTag: access.authTag,
+        ...refreshFields,
+        tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
+        lastRefreshedAt: new Date(),
+        credentialVersion: { increment: 1 },
+        refreshLeaseId: null,
+        refreshLeaseUntil: null,
+        authStatus: 'ACTIVE',
+      },
+    });
+  }
+
+  async disconnectUserCredential(profileId: string, principal: AuthPrincipal) {
+    await this.db().customToolConnectionCredential.deleteMany({
+      where: { profileId, name: 'per-user', tenantId: principal.tenantId, userId: principal.userId },
+    });
+    return this.userCredentialStatus(profileId, principal);
+  }
+
+  async userCredentialStatus(profileId: string, principal: AuthPrincipal) {
+    const row = await this.db().customToolConnectionCredential.findUnique({
+      where: {
+        profileId_name_tenantId_userId: {
+          profileId,
+          name: 'per-user',
+          tenantId: principal.tenantId,
+          userId: principal.userId,
+        },
+      },
+      select: { authStatus: true, tokenExpiresAt: true, lastRefreshedAt: true },
+    });
+    return {
+      connected: row?.authStatus === 'ACTIVE',
+      authStatus: row?.authStatus ?? 'DISCONNECTED',
+      tokenExpiresAt: row?.tokenExpiresAt ?? null,
+      lastRefreshedAt: row?.lastRefreshedAt ?? null,
+    };
+  }
+
+  async loginConnectionCredential(profileId: string, name: string, email: string, password: string, userId: string, tenantId: string) {
+    const profile = await this.authProfile(profileId, tenantId);
     if (!/^[a-z][a-z0-9_-]{0,63}$/.test(name) || !email || email.length > 254 || !password || password.length > 1024)
       throw new BadRequestException('INVALID_CONNECTION_CREDENTIAL');
-    let result: ReturnType<typeof tokenFromResponse>;
+    let result;
     try {
-      result = tokenFromResponse(await executeInternalJsonRequest({
-        profile,
-        path: '/api/v1/auth/login',
-        body: { email, password },
-      }));
+      result = await this.atomicCredentials.login(profile, email, password);
     } catch (error) {
       if (error instanceof CustomToolError) throw new BadRequestException(error.category);
       throw error;
     }
     const access = encryptToolCredential(result.accessToken);
-    const refresh = encryptToolCredential(result.refreshCookie);
+    const refresh = encryptToolCredential(result.refreshToken!);
     const db = this.db();
     const row = await db.customToolConnectionCredential.upsert({
-      where: { profileId_name: { profileId, name } },
+      where: { profileId_name_tenantId_userId: { profileId, name, tenantId: '*', userId: '*' } },
       create: {
-        profileId, name, authStrategy: 'ATOMIC_COOKIE_REFRESH',
+        profileId, name, tenantId: '*', userId: '*', authStrategy: 'ATOMIC_COOKIE_REFRESH',
         accessTokenCiphertext: access.ciphertext, accessTokenIv: access.iv, accessTokenAuthTag: access.authTag,
         refreshCookieCiphertext: refresh.ciphertext, refreshCookieIv: refresh.iv, refreshCookieAuthTag: refresh.authTag,
         tokenExpiresAt: new Date(Date.now() + result.expiresIn * 1000), lastRefreshedAt: new Date(),
@@ -180,6 +344,7 @@ export class BackendTools {
         authStrategy: 'ATOMIC_COOKIE_REFRESH',
         accessTokenCiphertext: access.ciphertext, accessTokenIv: access.iv, accessTokenAuthTag: access.authTag,
         refreshCookieCiphertext: refresh.ciphertext, refreshCookieIv: refresh.iv, refreshCookieAuthTag: refresh.authTag,
+        tenantId: '*', userId: '*',
         tokenExpiresAt: new Date(Date.now() + result.expiresIn * 1000), lastRefreshedAt: new Date(),
         credentialVersion: { increment: 1 }, refreshLeaseId: null, refreshLeaseUntil: null, authStatus: 'ACTIVE',
       },
@@ -188,16 +353,24 @@ export class BackendTools {
     return row;
   }
 
-  private async refreshConnectionCredential(initial: any, force: boolean) {
+  private async refreshConnectionCredential(initial: any, force: boolean, tenantId: string) {
     const db = this.db().customToolConnectionCredential;
     const originalVersion = initial.credentialVersion;
-    const profile = this.authProfile(initial.profileId);
     const lockId = randomUUID();
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline) {
       const latest = await db.findUnique({ where: { id: initial.id } });
-      if (!latest || latest.authStatus !== 'ACTIVE') throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
-      if (latest.credentialVersion > originalVersion || (!force && latest.tokenExpiresAt.getTime() > Date.now() + 30_000))
+      if (!latest || latest.tenantId !== initial.tenantId || latest.userId !== initial.userId || latest.authStatus !== 'ACTIVE')
+        throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
+      if (latest.credentialVersion > originalVersion) {
+        initial.credentialVersion = latest.credentialVersion;
+        return decryptCredential({
+          ciphertext: latest.accessTokenCiphertext,
+          iv: latest.accessTokenIv,
+          authTag: latest.accessTokenAuthTag,
+        });
+      }
+      if (!force && latest.tokenExpiresAt.getTime() > Date.now() + 30_000)
         return decryptCredential({
           ciphertext: latest.accessTokenCiphertext,
           iv: latest.accessTokenIv,
@@ -218,32 +391,65 @@ export class BackendTools {
         continue;
       }
       try {
-        const refreshCookie = decryptCredential({
-          ciphertext: latest.refreshCookieCiphertext,
-          iv: latest.refreshCookieIv,
-          authTag: latest.refreshCookieAuthTag,
-        });
-        const result = tokenFromResponse(await executeInternalJsonRequest({
-          profile,
-          path: '/api/v1/auth/refresh',
-          body: {},
-          headers: { cookie: `${refreshCookieName}=${refreshCookie}` },
-        }));
+        const atomic = latest.authStrategy === 'ATOMIC_COOKIE_REFRESH';
+        const encryptedRefresh = atomic
+          ? { ciphertext: latest.refreshCookieCiphertext, iv: latest.refreshCookieIv, authTag: latest.refreshCookieAuthTag }
+          : latest.refreshTokenCiphertext && latest.refreshTokenIv && latest.refreshTokenAuthTag
+            ? { ciphertext: latest.refreshTokenCiphertext, iv: latest.refreshTokenIv, authTag: latest.refreshTokenAuthTag }
+            : null;
+        if (!encryptedRefresh) throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
+        const refreshToken = decryptCredential(encryptedRefresh);
+        let adapter: CustomToolCredentialAdapter;
+        let profile: ConnectionProfile;
+        let adapterConfig: { tokenPath?: string; clientId?: string } | undefined;
+        if (atomic) {
+          adapter = this.atomicCredentials;
+          profile = initial.tenantId === '*' ? await this.authProfile(initial.profileId, tenantId) : await this.atomicUserAuthProfile(initial.profileId, tenantId);
+        } else if (latest.authStrategy === 'OAUTH2_REFRESH') {
+          adapter = this.oauthCredentials;
+          const record = await this.db().customToolConnectionProfile.findUnique({
+            where: { tenantId_id: { tenantId, id: initial.profileId } },
+          });
+          if (!record?.enabled || record.authStrategy !== 'OAUTH2_REFRESH' || !record.tokenUrl || !record.clientId)
+            throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
+          const endpoint = customToolEndpoint(record.tokenUrl, { allowLocalHttp: record.allowLocalHttp });
+          profile = endpoint.profile;
+          adapterConfig = { tokenPath: endpoint.path, clientId: record.clientId };
+        } else throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
+        const result = await adapter.refresh(profile, refreshToken, adapterConfig);
         const access = encryptToolCredential(result.accessToken);
-        const refresh = encryptToolCredential(result.refreshCookie);
+        const nextRefresh = result.refreshToken ? encryptToolCredential(result.refreshToken) : encryptedRefresh;
+        const refreshFields = atomic
+          ? { refreshCookieCiphertext: nextRefresh.ciphertext, refreshCookieIv: nextRefresh.iv, refreshCookieAuthTag: nextRefresh.authTag }
+          : { refreshTokenCiphertext: nextRefresh.ciphertext, refreshTokenIv: nextRefresh.iv, refreshTokenAuthTag: nextRefresh.authTag };
         const saved = await db.updateMany({
-          where: { id: latest.id, credentialVersion: latest.credentialVersion, refreshLeaseId: lockId },
+          where: {
+            id: latest.id,
+            tenantId: latest.tenantId,
+            userId: latest.userId,
+            credentialVersion: latest.credentialVersion,
+            refreshLeaseId: lockId,
+          },
           data: {
             accessTokenCiphertext: access.ciphertext, accessTokenIv: access.iv, accessTokenAuthTag: access.authTag,
-            refreshCookieCiphertext: refresh.ciphertext, refreshCookieIv: refresh.iv, refreshCookieAuthTag: refresh.authTag,
+            ...refreshFields,
             tokenExpiresAt: new Date(Date.now() + result.expiresIn * 1000), lastRefreshedAt: new Date(),
             credentialVersion: { increment: 1 }, refreshLeaseId: null, refreshLeaseUntil: null, authStatus: 'ACTIVE',
           },
         });
-        if (saved.count === 1) return result.accessToken;
+        if (saved.count === 1) {
+          initial.credentialVersion = latest.credentialVersion + 1;
+          return result.accessToken;
+        }
       } catch {
         await db.updateMany({
-          where: { id: latest.id, credentialVersion: latest.credentialVersion, refreshLeaseId: lockId },
+          where: {
+            id: latest.id,
+            tenantId: latest.tenantId,
+            userId: latest.userId,
+            credentialVersion: latest.credentialVersion,
+            refreshLeaseId: lockId,
+          },
           data: { authStatus: 'EXPIRED', refreshLeaseId: null, refreshLeaseUntil: null },
         });
         throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
@@ -280,12 +486,8 @@ export class BackendTools {
       .filter((tool) => tool.authorize(principal))
       .map((tool) => ({ id: tool.id, description: tool.description, input: tool.inputSchema }));
     if (!this.prisma) return built;
-    let profiles: ReturnType<typeof connectionProfiles> = {};
-    try {
-      profiles = connectionProfiles();
-    } catch {
-      /* Direct endpoints do not use server profiles. */
-    }
+    let profiles: Record<string, ConnectionProfile> = {};
+    try { profiles = await this.connectionProfilesFor(principal.tenantId); } catch { /* Direct endpoints do not use profiles. */ }
     const rows =
       principal.userId && principal.authMethod === 'jwt'
         ? await (this.prisma as any).customTool.findMany({
@@ -294,10 +496,19 @@ export class BackendTools {
             take: 1000,
           })
         : [];
+    const userProfileIds = rows.filter((row: any) => (row.authScope ?? this.toolAuthScope(row)) === 'PER_USER').map((row: any) => row.connectionProfile);
+    const userCredentials = userProfileIds.length
+      ? await (this.prisma as any).customToolConnectionCredential.findMany({
+          where: { tenantId: principal.tenantId, userId: principal.userId, profileId: { in: userProfileIds }, name: 'per-user', authStatus: 'ACTIVE' },
+          select: { profileId: true },
+        }).catch(() => [])
+      : [];
+    const connectedProfiles = new Set(userCredentials.map((credential: any) => credential.profileId));
     const candidates = rows
       .filter((row: any) =>
         (row.endpointUrl || profiles[row.connectionProfile]) &&
-        (!row.connectionCredentialId || row.allowedUserIds?.includes(principal.userId)),
+        (!row.connectionCredentialId || row.allowedUserIds?.includes(principal.userId)) &&
+        ((row.authScope ?? this.toolAuthScope(row)) !== 'PER_USER' || connectedProfiles.has(row.connectionProfile)),
       )
       .map((row: any) => ({
         id: TOOL_ID(row.id),
@@ -323,20 +534,25 @@ export class BackendTools {
   async hasEnabledTools(principal: AuthPrincipal) {
     if (!this.prisma || !principal.userId || principal.authMethod !== 'jwt') return false;
     try {
-      let profiles: ReturnType<typeof connectionProfiles> = {};
-      try {
-        profiles = connectionProfiles();
-      } catch {
-        /* Direct endpoints do not use server profiles. */
-      }
+      let profiles: Record<string, ConnectionProfile> = {};
+      try { profiles = await this.connectionProfilesFor(principal.tenantId); } catch { /* Direct endpoints do not use profiles. */ }
       const rows = await (this.prisma as any).customTool.findMany({
         where: { enabled: true, archivedAt: null },
-        select: { endpointUrl: true, connectionProfile: true, connectionCredentialId: true, allowedUserIds: true },
+        select: { endpointUrl: true, connectionProfile: true, connectionCredentialId: true, allowedUserIds: true, authScope: true, authSecretId: true },
         take: 1000,
       });
+      const userProfileIds = rows.filter((row: any) => this.toolAuthScope(row) === 'PER_USER').map((row: any) => row.connectionProfile);
+      const userCredentials = userProfileIds.length
+        ? await (this.prisma as any).customToolConnectionCredential.findMany({
+            where: { tenantId: principal.tenantId, userId: principal.userId, profileId: { in: userProfileIds }, name: 'per-user', authStatus: 'ACTIVE' },
+            select: { profileId: true },
+          })
+        : [];
+      const connectedProfiles = new Set(userCredentials.map((credential: any) => credential.profileId));
       return rows.some((row: any) => Boolean(
         (row.endpointUrl || profiles[row.connectionProfile]) &&
-        (!row.connectionCredentialId || row.allowedUserIds?.includes(principal.userId)),
+        (!row.connectionCredentialId || row.allowedUserIds?.includes(principal.userId)) &&
+        (this.toolAuthScope(row) !== 'PER_USER' || connectedProfiles.has(row.connectionProfile)),
       ));
     } catch {
       return false;
@@ -380,17 +596,15 @@ export class BackendTools {
     const db = this.prisma as any;
     const row = await db.customTool.findUnique({ where: { id: toolId }, include: { authSecret: true, connectionCredential: true } });
     if (!row || row.archivedAt || (!row.enabled && !context.allowDisabled)) return undefined;
+    const authScope = this.toolAuthScope(row);
     if (row.connectionCredentialId && !row.allowedUserIds?.includes(principal.userId))
       throw new CustomToolError('TOOL_ACCESS_DENIED');
     if (context.snapshotVersion !== undefined && row.configurationVersion !== context.snapshotVersion)
       throw new CustomToolError('TOOL_CONFIGURATION_CHANGED');
     const target = row.endpointUrl
       ? customToolEndpoint(row.endpointUrl)
-      : (() => {
-          const profile = connectionProfiles()[row.connectionProfile];
-          if (!profile) throw new CustomToolError('CONNECTION_PROFILE_UNAVAILABLE');
-          return { profile, path: row.path };
-        })();
+      : { profile: await this.resolveConnectionProfile(row.connectionProfile, principal.tenantId), path: row.path };
+    if (!target.profile) throw new CustomToolError('CONNECTION_PROFILE_UNAVAILABLE');
     const { profile, path } = target;
     const timeout = AbortSignal.timeout(row.timeoutMs);
     const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
@@ -401,18 +615,46 @@ export class BackendTools {
     let success = false;
     let errorCategory: string | null = null;
     let credential = '';
+    let credentialSession: any = null;
     let safeArguments: unknown;
     try {
       const headers: Record<string, string> = {};
-      if (row.connectionCredentialId) {
+      if (authScope === 'PER_USER') {
+        if (row.connectionCredentialId || row.authSecretId || row.authHeaderName)
+          throw new CustomToolError('AUTH_SCOPE_CONFIGURATION_MISMATCH');
+        const profileRecord = await db.customToolConnectionProfile.findUnique({
+          where: { tenantId_id: { tenantId: principal.tenantId, id: row.connectionProfile } },
+          select: { enabled: true, authStrategy: true },
+        });
+        if (!profileRecord?.enabled || !['OAUTH2_REFRESH', 'ATOMIC_COOKIE_REFRESH'].includes(profileRecord.authStrategy))
+          throw new CustomToolError('PER_USER_AUTH_UNAVAILABLE');
+        credentialSession = await db.customToolConnectionCredential.findUnique({
+          where: {
+            profileId_name_tenantId_userId: {
+              profileId: row.connectionProfile,
+              name: 'per-user',
+              tenantId: principal.tenantId,
+              userId: principal.userId,
+            },
+          },
+        });
+        if (!credentialSession || credentialSession.authStrategy !== profileRecord.authStrategy || credentialSession.authStatus !== 'ACTIVE')
+          throw new CustomToolError('PER_USER_CREDENTIAL_REQUIRED');
+        credential = await this.refreshConnectionCredential(credentialSession, false, principal.tenantId);
+        headers.authorization = `Bearer ${credential}`;
+      } else if (authScope === 'SHARED' && row.connectionCredentialId) {
         const session = row.connectionCredential;
         if (!session || session.authStrategy !== 'ATOMIC_COOKIE_REFRESH' || session.authStatus !== 'ACTIVE')
           throw new CustomToolError('CONNECTION_AUTHENTICATION_FAILED');
-        credential = await this.refreshConnectionCredential(session, false);
-      } else if (row.authHeaderName) {
+        credentialSession = session;
+        credential = await this.refreshConnectionCredential(session, false, principal.tenantId);
+        headers.authorization = `Bearer ${credential}`;
+      } else if (authScope === 'SHARED' && row.authHeaderName) {
         if (!row.authSecret) throw new CustomToolError('AUTH_SECRET_UNAVAILABLE');
         credential = decryptCredential(row.authSecret);
         headers[row.authHeaderName] = (row.authPrefix ?? '') + credential;
+      } else if (authScope === 'NONE' && (row.authSecretId || row.connectionCredentialId || row.authHeaderName)) {
+        throw new CustomToolError('AUTH_SCOPE_CONFIGURATION_MISMATCH');
       }
       const request = () => executeHttpTool({
           profile,
@@ -421,7 +663,7 @@ export class BackendTools {
           inputSchema: row.inputSchema,
           outputSchema: row.outputSchema,
           args: call.args,
-          headers: row.connectionCredentialId ? { authorization: `Bearer ${credential}` } : headers,
+          headers,
           timeoutMs: row.timeoutMs,
           maxResponseBytes: row.maxResponseBytes,
           signal,
@@ -432,9 +674,10 @@ export class BackendTools {
       try {
         result = await request();
       } catch (error) {
-        if (!row.connectionCredential || !(error instanceof CustomToolError) || error.statusCode !== 401)
+        if (!credentialSession || !(error instanceof CustomToolError) || error.statusCode !== 401)
           throw error;
-        credential = await this.refreshConnectionCredential(row.connectionCredential, true);
+        credential = await this.refreshConnectionCredential(credentialSession, true, principal.tenantId);
+        headers.authorization = `Bearer ${credential}`;
         try {
           result = await request();
         } catch (retryError) {
@@ -475,35 +718,165 @@ export class BackendTools {
     }
   }
 
-  listConnectionProfiles() {
+  async listConnectionProfiles(tenantId: string) {
     try {
-      return Object.entries(connectionProfiles()).map(([id, profile]) => ({
-        id,
-        host: profile.baseUrl.hostname,
-        trustedInternal: profile.trustedInternal,
-      }));
+      const stored = await this.db().customToolConnectionProfile.findMany({ where: { tenantId } });
+      return stored.map((row: any) => this.publicConnectionProfile(row));
     } catch (error) {
       throw new BadRequestException(
-        error instanceof CustomToolError ? error.category : 'CONNECTION_PROFILES_INVALID',
+        error instanceof CustomToolError ? error.category : 'CONNECTION_PROFILES_UNAVAILABLE',
       );
     }
   }
 
-  async listCustomTools() {
+  async listAvailableUserConnections(tenantId: string) {
+    const profiles = await this.db().customToolConnectionProfile.findMany({
+      where: { tenantId, enabled: true },
+      orderBy: { displayName: 'asc' },
+    });
+    return profiles.flatMap((profile: any) => {
+      const authenticationCapabilities = {
+        atomicPerUserLogin: this.atomicPerUserLoginAvailable(profile),
+        oauth2Refresh: this.oauthPerUserConnectionAvailable(profile),
+      };
+      return Object.values(authenticationCapabilities).some(Boolean)
+        ? [{ id: profile.id, displayName: profile.displayName, authenticationCapabilities }]
+        : [];
+    });
+  }
+
+  async getConnectionProfile(id: string, tenantId: string) {
+    const row = await this.db().customToolConnectionProfile.findUnique({ where: { tenantId_id: { tenantId, id } } });
+    if (!row) throw new NotFoundException('CONNECTION_PROFILE_NOT_FOUND');
+    return this.publicConnectionProfile(row);
+  }
+
+  async createConnectionProfile(input: { id: string; displayName: string; baseUrl: string; allowLocalHttp?: boolean; authStrategy?: string; tokenUrl?: string; clientId?: string }, tenantId: string) {
+    const data = this.connectionProfileInput(input);
+    try {
+      await validateCustomToolEndpoint(data.baseUrl, undefined, { allowLocalHttp: data.allowLocalHttp });
+      if (data.tokenUrl) await validateCustomToolEndpoint(data.tokenUrl, undefined, { allowLocalHttp: data.allowLocalHttp });
+    } catch (error) {
+      throw new BadRequestException(error instanceof CustomToolError ? error.category : 'INVALID_ENDPOINT');
+    }
+    try {
+      const row = await this.db().customToolConnectionProfile.create({ data: { ...data, tenantId } });
+      return this.publicConnectionProfile(row);
+    } catch (error) {
+      if ((error as any)?.code === 'P2002') throw new ConflictException('CONNECTION_PROFILE_EXISTS');
+      throw error;
+    }
+  }
+
+  async updateConnectionProfile(id: string, input: { displayName?: string; baseUrl?: string; allowLocalHttp?: boolean; authStrategy?: string; tokenUrl?: string; clientId?: string; enabled?: boolean }, tenantId: string) {
+    const current = await this.db().customToolConnectionProfile.findUnique({ where: { tenantId_id: { tenantId, id } } });
+    if (!current) throw new NotFoundException('CONNECTION_PROFILE_NOT_FOUND');
+    if (input.enabled !== undefined && typeof input.enabled !== 'boolean') throw new BadRequestException('INVALID_ENABLED_VALUE');
+    const data = this.connectionProfileInput({
+      id,
+      displayName: input.displayName ?? current.displayName,
+      baseUrl: input.baseUrl ?? current.baseUrl,
+      allowLocalHttp: input.allowLocalHttp ?? current.allowLocalHttp,
+      authStrategy: input.authStrategy ?? current.authStrategy,
+      tokenUrl: input.tokenUrl ?? current.tokenUrl ?? undefined,
+      clientId: input.clientId ?? current.clientId ?? undefined,
+    });
+    if (input.enabled !== false || input.baseUrl !== undefined) {
+      try { await validateCustomToolEndpoint(data.baseUrl, undefined, { allowLocalHttp: data.allowLocalHttp }); }
+      catch (error) { throw new BadRequestException(error instanceof CustomToolError ? error.category : 'INVALID_ENDPOINT'); }
+    }
+    if (data.tokenUrl && (input.tokenUrl !== undefined || input.authStrategy === 'OAUTH2_REFRESH')) {
+      try { await validateCustomToolEndpoint(data.tokenUrl, undefined, { allowLocalHttp: data.allowLocalHttp }); }
+      catch (error) { throw new BadRequestException(error instanceof CustomToolError ? error.category : 'INVALID_TOKEN_ENDPOINT'); }
+    }
+    const row = await this.db().customToolConnectionProfile.update({
+      where: { tenantId_id: { tenantId, id } },
+      data: {
+        displayName: data.displayName,
+        baseUrl: data.baseUrl,
+        allowLocalHttp: data.allowLocalHttp,
+        authStrategy: data.authStrategy,
+        tokenUrl: data.tokenUrl,
+        clientId: data.clientId,
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      },
+    });
+    return this.publicConnectionProfile(row);
+  }
+
+  async deleteConnectionProfile(id: string, tenantId: string) {
+    const model = this.db().customToolConnectionProfile;
+    const row = await model.findUnique({ where: { tenantId_id: { tenantId, id } } });
+    if (!row) throw new NotFoundException('CONNECTION_PROFILE_NOT_FOUND');
+    const inUse = await this.db().customTool.count({ where: { connectionProfile: id, endpointUrl: null, archivedAt: null } });
+    const credentials = await this.db().customToolConnectionCredential.count({ where: { profileId: id } });
+    if (inUse || credentials) throw new ConflictException('CONNECTION_PROFILE_IN_USE');
+    await model.delete({ where: { tenantId_id: { tenantId, id } } });
+    return { id, deleted: true };
+  }
+
+  private connectionProfileInput(input: { id: string; displayName: string; baseUrl: string; allowLocalHttp?: boolean; authStrategy?: string; tokenUrl?: string; clientId?: string }) {
+    if (!input || typeof input !== 'object') throw new BadRequestException('INVALID_CONNECTION_PROFILE');
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(input.id)) throw new BadRequestException('INVALID_CONNECTION_PROFILE_ID');
+    if (typeof input.displayName !== 'string' || !input.displayName.trim() || input.displayName.trim().length > 120)
+      throw new BadRequestException('INVALID_CONNECTION_PROFILE_NAME');
+    if (input.allowLocalHttp !== undefined && typeof input.allowLocalHttp !== 'boolean')
+      throw new BadRequestException('INVALID_LOCAL_HTTP_POLICY');
+    const allowLocalHttp = input.allowLocalHttp ?? false;
+    const authStrategy = input.authStrategy ?? 'NONE';
+    if (!['NONE', 'SHARED', 'ATOMIC_COOKIE_REFRESH', 'OAUTH2_REFRESH'].includes(authStrategy))
+      throw new BadRequestException('INVALID_CONNECTION_PROFILE_AUTH');
+    let endpoint: string;
+    try { endpoint = customToolEndpoint(input.baseUrl, { allowLocalHttp }).endpoint; }
+    catch (error) { throw new BadRequestException(error instanceof CustomToolError ? error.category : 'INVALID_ENDPOINT'); }
+    let tokenUrl: string | null = null;
+    let clientId: string | null = null;
+    if (authStrategy === 'OAUTH2_REFRESH') {
+      if (typeof input.tokenUrl !== 'string' || !input.tokenUrl || typeof input.clientId !== 'string' || !input.clientId.trim() || input.clientId.length > 512)
+        throw new BadRequestException('INVALID_OAUTH_CONFIGURATION');
+      try { tokenUrl = customToolEndpoint(input.tokenUrl, { allowLocalHttp }).endpoint; }
+      catch (error) { throw new BadRequestException(error instanceof CustomToolError ? error.category : 'INVALID_TOKEN_ENDPOINT'); }
+      clientId = input.clientId.trim();
+    }
+    return { id: input.id, displayName: input.displayName.trim(), baseUrl: endpoint, allowLocalHttp, authStrategy, tokenUrl, clientId };
+  }
+
+  private publicConnectionProfile(row: any) {
+    return {
+      id: row.id,
+      displayName: row.displayName,
+      baseUrl: row.baseUrl,
+      allowLocalHttp: row.allowLocalHttp === true,
+      tokenUrl: row.tokenUrl,
+      clientId: row.clientId,
+      host: new URL(row.baseUrl).hostname,
+      trustedInternal: false,
+      authStrategy: row.authStrategy,
+      enabled: row.enabled,
+      authenticationCapabilities: {
+        atomicPerUserLogin: this.atomicPerUserLoginAvailable(row),
+        oauth2Refresh: this.oauthPerUserConnectionAvailable(row),
+      },
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async listCustomTools(tenantId: string) {
     const rows = await this.db().customTool.findMany({
       where: { archivedAt: null },
       orderBy: { createdAt: 'desc' },
     });
-    return rows.map((row: any) => this.publicTool(row));
+    return Promise.all(rows.map((row: any) => this.publicTool(row, tenantId)));
   }
 
-  async getCustomTool(id: string) {
+  async getCustomTool(id: string, tenantId: string) {
     const row = await this.findTool(id);
-    return this.publicTool(row);
+    return this.publicTool(row, tenantId);
   }
 
-  async createCustomTool(input: ToolDefinition, userId: string) {
-    const definition = await this.validateDefinition(input);
+  async createCustomTool(input: ToolDefinition, userId: string, tenantId: string) {
+    const definition = await this.validateDefinition(input, tenantId);
     await this.validateSharedCredential(definition);
     if (definition.auth && !definition.auth.secret) throw new BadRequestException('AUTH_SECRET_REQUIRED');
     const db = this.db();
@@ -527,6 +900,7 @@ export class BackendTools {
             outputSchema: definition.outputSchema!,
             authHeaderName: definition.auth?.headerName ?? null,
             authPrefix: definition.auth?.prefix ?? null,
+            authScope: definition.authScope,
             authSecretId: secretId ?? null,
             connectionCredentialId: definition.connectionCredentialId ?? null,
             allowedUserIds: definition.allowedUserIds ?? [],
@@ -547,17 +921,19 @@ export class BackendTools {
         });
         return created;
       });
-      return this.publicTool(row);
+      return this.publicTool(row, tenantId);
     } catch (error) {
       if ((error as any)?.code === 'P2002') throw new ConflictException('TOOL_NAME_EXISTS');
       throw error;
     }
   }
 
-  async updateCustomTool(id: string, input: ToolDefinition, userId: string) {
+  async updateCustomTool(id: string, input: ToolDefinition, userId: string, tenantId: string) {
     const current = await this.findTool(id);
-    const definition = await this.validateDefinition(input);
-    const connectionCredentialId = definition.connectionCredentialId !== undefined
+    const definition = await this.validateDefinition({ ...input, authScope: input.authScope ?? this.toolAuthScope(current) }, tenantId);
+    const connectionCredentialId = definition.authScope !== 'SHARED'
+      ? null
+      : definition.connectionCredentialId !== undefined
       ? definition.connectionCredentialId
       : definition.auth !== undefined
         ? null
@@ -573,13 +949,15 @@ export class BackendTools {
       throw new BadRequestException('AUTH_SECRET_REQUIRED');
     const db = this.db();
     const secretId =
-      definition.auth === undefined && !connectionCredentialId
+      definition.authScope !== 'SHARED'
+        ? undefined
+        : definition.auth === undefined && !connectionCredentialId
         ? current.authSecretId
         : definition.auth === undefined && connectionCredentialId
           ? undefined
         : definition.auth === null
           ? undefined
-          : definition.auth.secret
+          : definition.auth?.secret
             ? randomUUID()
             : current.authSecretId;
     const encrypted = definition.auth?.secret ? encryptToolCredential(definition.auth.secret) : undefined;
@@ -601,13 +979,18 @@ export class BackendTools {
             queryMappings: definition.queryMappings!,
             inputSchema: definition.inputSchema!,
             outputSchema: definition.outputSchema!,
-            authHeaderName: connectionCredentialId
+            authHeaderName: definition.authScope !== 'SHARED'
+              ? null
+              : connectionCredentialId
               ? null
               : definition.auth === undefined ? current.authHeaderName : (definition.auth?.headerName ?? null),
-            authPrefix: connectionCredentialId
+            authPrefix: definition.authScope !== 'SHARED'
+              ? null
+              : connectionCredentialId
               ? null
               : definition.auth === undefined ? current.authPrefix : (definition.auth?.prefix ?? null),
-            authSecretId: connectionCredentialId || definition.auth === null
+            authScope: definition.authScope,
+            authSecretId: definition.authScope !== 'SHARED' || connectionCredentialId || definition.auth === null
               ? null
               : definition.auth === undefined ? current.authSecretId : (secretId ?? null),
             connectionCredentialId,
@@ -633,21 +1016,25 @@ export class BackendTools {
       if ((error as any)?.code === 'P2002') throw new ConflictException('TOOL_NAME_EXISTS');
       throw error;
     }
-    return this.publicTool(row);
+    return this.publicTool(row, tenantId);
   }
 
-  async setCustomToolEnabled(id: string, enabled: boolean, userId: string) {
+  async setCustomToolEnabled(id: string, enabled: boolean, userId: string, tenantId: string) {
     const current = await this.findTool(id);
     if (typeof enabled !== 'boolean') throw new BadRequestException('INVALID_ENABLED_VALUE');
     if (enabled) {
       try {
         if (current.endpointUrl) await validateCustomToolEndpoint(current.endpointUrl);
-        else if (!connectionProfiles()[current.connectionProfile])
-          throw new BadRequestException('CONNECTION_PROFILE_UNAVAILABLE');
+        else {
+          const profile = await this.resolveConnectionProfile(current.connectionProfile, tenantId);
+          if (!profile) throw new BadRequestException('CONNECTION_PROFILE_UNAVAILABLE');
+          if (!profile.trustedInternal)
+            await validateCustomToolEndpoint(profile.baseUrl.href, undefined, { allowLocalHttp: profile.loopbackOnly });
+        }
       } catch (error) {
         if (error instanceof BadRequestException) throw error;
         throw new BadRequestException(
-          error instanceof CustomToolError ? error.category : 'CONNECTION_PROFILES_INVALID',
+          error instanceof CustomToolError ? error.category : 'CONNECTION_PROFILE_INVALID',
         );
       }
     }
@@ -656,7 +1043,7 @@ export class BackendTools {
       data: { enabled, configurationVersion: { increment: 1 }, updatedBy: userId },
     });
     await this.audit('CUSTOM_TOOL_TOGGLED', userId, id, row.configurationVersion);
-    return this.publicTool(row);
+    return this.publicTool(row, tenantId);
   }
 
   async archiveCustomTool(id: string, userId: string) {
@@ -685,13 +1072,13 @@ export class BackendTools {
     return { id: row.id, archived: true };
   }
 
-  async testCustomTool(id: string, sampleInput: unknown, userId: string) {
+  async testCustomTool(id: string, sampleInput: unknown, userId: string, tenantId: string) {
     const row = await this.findTool(id);
     const started = performance.now();
     try {
       const output = await this.execute(
         { id: TOOL_ID(row.id), args: sampleInput as Record<string, unknown> },
-        { userId, tenantId: '', authMethod: 'jwt' },
+        { userId, tenantId, authMethod: 'jwt' },
         undefined,
         undefined,
         { snapshotVersion: row.configurationVersion, isTest: true, allowDisabled: true },
@@ -724,11 +1111,13 @@ export class BackendTools {
     return rows;
   }
 
-  private async validateDefinition(input: ToolDefinition): Promise<ToolDefinition> {
+  private async validateDefinition(input: ToolDefinition, tenantId: string): Promise<ToolDefinition> {
     const fail = (code: string): never => {
       throw new BadRequestException(code);
     };
     if (!input || typeof input !== 'object') return fail('INVALID_TOOL_DEFINITION');
+    const authScope = input.authScope ?? (input.auth || input.connectionCredentialId ? 'SHARED' : 'NONE');
+    if (!['NONE', 'SHARED', 'PER_USER'].includes(authScope)) return fail('INVALID_AUTH_SCOPE');
     if (!/^[a-z][a-z0-9_-]{0,63}$/.test(input.name)) return fail('INVALID_TOOL_NAME');
     const displayName =
       typeof input.displayName === 'string' && input.displayName.trim()
@@ -757,12 +1146,7 @@ export class BackendTools {
     } else {
       connectionProfile = input.connectionProfile;
       if (!connectionProfile || typeof input.path !== 'string') return fail('INVALID_ENDPOINT');
-      let profile: ReturnType<typeof connectionProfiles>[string] | undefined;
-      try {
-        profile = connectionProfiles()[connectionProfile];
-      } catch {
-        return fail('CONNECTION_PROFILES_INVALID');
-      }
+      const profile = await this.resolveConnectionProfile(connectionProfile, tenantId);
       if (!profile) return fail('CONNECTION_PROFILE_UNAVAILABLE');
       try {
         safeToolPath(profile.baseUrl, input.path);
@@ -855,6 +1239,16 @@ export class BackendTools {
       return fail('INVALID_TOOL_ACCESS_POLICY');
     if (input.connectionCredentialId && input.auth && input.auth !== null)
       return fail('STATIC_AND_SHARED_AUTH_CONFLICT');
+    if ((authScope === 'NONE' && (input.auth || input.connectionCredentialId)) ||
+      (authScope === 'PER_USER' && (input.auth || input.connectionCredentialId || endpoint)))
+      return fail('AUTH_SCOPE_CONFIGURATION_MISMATCH');
+    if (authScope === 'PER_USER') {
+      const profile = await this.db().customToolConnectionProfile.findUnique({
+        where: { tenantId_id: { tenantId, id: connectionProfile! } },
+      });
+      if (!this.atomicPerUserLoginAvailable(profile) && !this.oauthPerUserConnectionAvailable(profile))
+        return fail('PER_USER_AUTH_UNAVAILABLE');
+    }
     if (
       input.timeoutMs !== undefined &&
       (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 500 || input.timeoutMs > 30000)
@@ -878,6 +1272,7 @@ export class BackendTools {
       displayName,
       description: input.description.trim(),
       auth: input.auth,
+      authScope,
       connectionCredentialId: input.connectionCredentialId,
       allowedUserIds: input.allowedUserIds,
     };
@@ -887,13 +1282,17 @@ export class BackendTools {
     if (!this.prisma) throw new Error('CUSTOM_TOOL_DATABASE_UNAVAILABLE');
     return this.prisma as any;
   }
+  private toolAuthScope(row: any): 'NONE' | 'SHARED' | 'PER_USER' {
+    if (['NONE', 'SHARED', 'PER_USER'].includes(row.authScope)) return row.authScope;
+    return row.authSecretId || row.connectionCredentialId ? 'SHARED' : 'NONE';
+  }
   private async validateSharedCredential(definition: ToolDefinition) {
     if (!definition.connectionCredentialId) return;
     const credential = await this.db().customToolConnectionCredential.findUnique({
       where: { id: definition.connectionCredentialId },
-      select: { id: true, profileId: true, authStatus: true },
+      select: { id: true, profileId: true, tenantId: true, userId: true, authStatus: true },
     });
-    if (!credential || credential.authStatus !== 'ACTIVE')
+    if (!credential || credential.authStatus !== 'ACTIVE' || credential.tenantId !== '*' || credential.userId !== '*')
       throw new BadRequestException('CONNECTION_CREDENTIAL_UNAVAILABLE');
     if (definition.endpoint || definition.connectionProfile !== credential.profileId)
       throw new BadRequestException('CONNECTION_CREDENTIAL_PROFILE_MISMATCH');
@@ -906,11 +1305,11 @@ export class BackendTools {
     if (!row) throw new NotFoundException('CUSTOM_TOOL_NOT_FOUND');
     return row;
   }
-  private publicTool(row: any) {
+  private async publicTool(row: any, tenantId?: string) {
     let endpoint = row.endpointUrl ?? null;
     if (!endpoint) {
       try {
-        const profile = connectionProfiles()[row.connectionProfile];
+        const profile = tenantId ? await this.resolveConnectionProfile(row.connectionProfile, tenantId) : undefined;
         if (profile) endpoint = safeToolPath(profile.baseUrl, row.path).href;
       } catch {
         /* Legacy profile may have been removed. */
@@ -949,6 +1348,7 @@ export class BackendTools {
       outputSchema: row.outputSchema,
       authHeaderName: row.authHeaderName ?? null,
       authPrefix: row.authPrefix ?? null,
+      authScope: this.toolAuthScope(row),
       connectionCredentialId: row.connectionCredentialId ?? null,
       allowedUserIds: row.allowedUserIds ?? [],
       authSecretRef: row.authSecretId ?? null,

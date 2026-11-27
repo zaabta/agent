@@ -8,6 +8,15 @@ export type DocumentCitation = {
   documentVersionId?: string;
   chunkId?: string;
   pageNumber?: number;
+  location?: string;
+  headingPath?: string[];
+  sheetName?: string;
+  rowStart?: number;
+  rowEnd?: number;
+  rowNumbers?: number[];
+  cellRange?: string;
+  cellRefs?: string[];
+  matchedCell?: string;
   contentHash?: string;
   chunkerVersion?: string;
   paragraphStart?: number;
@@ -53,10 +62,20 @@ export type AgentEvidencePackage = {
   items: AgentEvidence[];
 };
 export type ResolvedEvidenceSource = {
+  citationId: string;
   documentId: string;
   documentVersionId?: string;
   chunkId?: string;
   pageNumber?: number;
+  location?: string;
+  headingPath?: string[];
+  sheetName?: string;
+  rowStart?: number;
+  rowEnd?: number;
+  rowNumbers?: number[];
+  cellRange?: string;
+  cellRefs?: string[];
+  matchedCell?: string;
   contentHash?: string;
   paragraphStart?: number;
   paragraphEnd?: number;
@@ -196,7 +215,21 @@ export function createEvidencePackage(input: {
         type: 'document',
         scope: input.scope,
         sourceRef: hit.sourceRef,
-        citation,
+        citation: {
+          ...citation,
+          ...(typeof hit.metadata?.location === 'string' ? { location: hit.metadata.location } : {}),
+          ...(Array.isArray(hit.metadata?.headingPath) ? { headingPath: hit.metadata.headingPath } : {}),
+          ...(typeof hit.metadata?.sheetName === 'string' ? { sheetName: hit.metadata.sheetName } : {}),
+          ...(Number.isInteger(hit.metadata?.rowStart) ? { rowStart: hit.metadata.rowStart } : {}),
+          ...(Number.isInteger(hit.metadata?.rowEnd) ? { rowEnd: hit.metadata.rowEnd } : {}),
+          ...(Number.isInteger(hit.metadata?.rowNumber)
+            ? { rowStart: hit.metadata.rowNumber, rowEnd: hit.metadata.rowNumber, rowNumbers: [hit.metadata.rowNumber] }
+            : {}),
+          ...(Array.isArray(hit.metadata?.rowNumbers) ? { rowNumbers: hit.metadata.rowNumbers } : {}),
+          ...(typeof hit.metadata?.cellRange === 'string' ? { cellRange: hit.metadata.cellRange } : {}),
+          ...(Array.isArray(hit.metadata?.cellRefs) ? { cellRefs: hit.metadata.cellRefs } : {}),
+          ...(typeof hit.metadata?.matchedCell === 'string' ? { matchedCell: hit.metadata.matchedCell } : {}),
+        },
         content: hit.content,
       });
     }
@@ -215,6 +248,7 @@ export function createEvidencePackage(input: {
 function sourceFromDocument(item: DocumentEvidence): ResolvedEvidenceSource {
   const citation = item.citation;
   return {
+    citationId: item.id,
     documentId: citation.documentId,
     filename: citation.filename,
     sourceRef: item.sourceRef,
@@ -222,6 +256,15 @@ function sourceFromDocument(item: DocumentEvidence): ResolvedEvidenceSource {
     ...(citation.documentVersionId ? { documentVersionId: citation.documentVersionId } : {}),
     ...(citation.chunkId ? { chunkId: citation.chunkId } : {}),
     ...(Number.isInteger(citation.pageNumber) ? { pageNumber: citation.pageNumber } : {}),
+    ...(citation.location ? { location: citation.location } : {}),
+    ...(citation.headingPath ? { headingPath: citation.headingPath } : {}),
+    ...(citation.sheetName ? { sheetName: citation.sheetName } : {}),
+    ...(Number.isInteger(citation.rowStart) ? { rowStart: citation.rowStart } : {}),
+    ...(Number.isInteger(citation.rowEnd) ? { rowEnd: citation.rowEnd } : {}),
+    ...(Array.isArray(citation.rowNumbers) ? { rowNumbers: citation.rowNumbers } : {}),
+    ...(citation.cellRange ? { cellRange: citation.cellRange } : {}),
+    ...(citation.cellRefs ? { cellRefs: citation.cellRefs } : {}),
+    ...(citation.matchedCell ? { matchedCell: citation.matchedCell } : {}),
     ...(citation.contentHash ? { contentHash: citation.contentHash } : {}),
     ...(Number.isInteger(citation.paragraphStart) ? { paragraphStart: citation.paragraphStart } : {}),
     ...(Number.isInteger(citation.paragraphEnd) ? { paragraphEnd: citation.paragraphEnd } : {}),
@@ -238,6 +281,7 @@ function structuredSources(item: StructuredEvidence): ResolvedEvidenceSource[] {
     ...(data?.record?.source ? [data.record.source] : []),
     ...(Array.isArray(data?.group?.sources) ? data.group.sources : []),
   ];
+  const seen = new Set<string>();
   return candidates
     .filter(
       (source: any) =>
@@ -247,7 +291,14 @@ function structuredSources(item: StructuredEvidence): ResolvedEvidenceSource[] {
         typeof source.sourceRef === 'string' &&
         Number.isInteger(source.chunkIndex),
     )
+    .filter((source: any) => {
+      const key = `${source.documentId}:${source.documentVersionId ?? ''}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .map((source: any) => ({
+      citationId: item.id,
       documentId: source.documentId,
       filename: source.filename,
       sourceRef: source.sourceRef,
@@ -255,6 +306,17 @@ function structuredSources(item: StructuredEvidence): ResolvedEvidenceSource[] {
       ...(source.documentVersionId ? { documentVersionId: source.documentVersionId } : {}),
       ...(source.chunkId ? { chunkId: source.chunkId } : {}),
       ...(Number.isInteger(source.pageNumber) ? { pageNumber: source.pageNumber } : {}),
+      ...(typeof source.location === 'string' ? { location: source.location } : {}),
+      ...(Array.isArray(source.headingPath) ? { headingPath: source.headingPath } : {}),
+      ...(typeof source.sheetName === 'string' ? { sheetName: source.sheetName } : {}),
+      ...(Number.isInteger(source.rowNumber) ? { rowStart: source.rowNumber, rowEnd: source.rowNumber } : {}),
+      ...(Number.isInteger(source.rowStart) ? { rowStart: source.rowStart } : {}),
+      ...(Number.isInteger(source.rowEnd) ? { rowEnd: source.rowEnd } : {}),
+      ...(Array.isArray(source.rowNumbers) ? { rowNumbers: source.rowNumbers } : {}),
+      ...(typeof source.cellRange === 'string' ? { cellRange: source.cellRange } : {}),
+      ...(Array.isArray(source.cellRefs) ? { cellRefs: source.cellRefs } : {}),
+      ...(typeof source.matchedCell === 'string' ? { cellRange: source.matchedCell } : {}),
+      ...(typeof source.matchedCell === 'string' ? { matchedCell: source.matchedCell } : {}),
       ...(source.contentHash ? { contentHash: source.contentHash } : {}),
       ...(Number.isInteger(source.paragraphStart) ? { paragraphStart: source.paragraphStart } : {}),
       ...(Number.isInteger(source.paragraphEnd) ? { paragraphEnd: source.paragraphEnd } : {}),
@@ -268,19 +330,30 @@ export function resolveEvidenceSources(evidence: AgentEvidencePackage): {
 } {
   const bindings: EvidenceReferenceBinding[] = [];
   const sources = new Map<string, ResolvedEvidenceSource>();
+  let citationIndex = 0;
   for (const item of evidence.items) {
     if (item.type === 'conversation-context') continue;
-    const resolved =
+    const candidates =
       item.type === 'document'
         ? [sourceFromDocument(item)]
         : item.type === 'structured'
           ? structuredSources(item)
           : [];
-    for (const source of resolved)
-      sources.set(
-        `${source.documentId}:${source.documentVersionId ?? ''}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`,
-        source,
-      );
+    const seenBindingSources = new Set<string>();
+    const resolved: ResolvedEvidenceSource[] = [];
+    for (const source of candidates) {
+      const key = `${source.documentId}:${source.documentVersionId ?? ''}:${source.chunkId ?? source.chunkIndex}:${source.sourceRef}`;
+      if (seenBindingSources.has(key)) continue;
+      seenBindingSources.add(key);
+      const registered = sources.get(key);
+      if (registered) {
+        resolved.push(registered);
+        continue;
+      }
+      const citation = { ...source, citationId: `C${++citationIndex}` };
+      sources.set(key, citation);
+      resolved.push(citation);
+    }
     bindings.push({
       evidenceId: item.id,
       sourceRefs: resolved.map((source) => source.sourceRef),

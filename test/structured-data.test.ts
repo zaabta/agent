@@ -79,6 +79,9 @@ test('filtered CSV lookup includes its first stored row because CSV headers are 
   assert.match(query.sql, /c\.version_id = d\.active_version_id/);
   assert.match(query.sql, /h\.version_id = c\.version_id/);
   assert.equal((result.records[0] as any)?.source.documentVersionId, '88000000-0000-4000-8000-000000000001');
+  assert.equal((result.records[0] as any)?.source.sheetName, 'CSV');
+  assert.deepEqual((result.records[0] as any)?.source.rowNumbers, [2]);
+  assert.deepEqual((result.records[0] as any)?.source.cellRefs, ['2:1', '2:2', '2:3']);
 });
 
 test('structured COUNT and SUM analytics scope data and provenance to active document versions', async () => {
@@ -120,6 +123,9 @@ test('structured COUNT and SUM analytics scope data and provenance to active doc
   const summed = await service.aggregate('SUM', 'Amount', 'tenant-a');
   assert.equal(counted.sources[0]?.documentVersionId, '88000000-0000-4000-8000-000000000001');
   assert.equal(summed.sources[0]?.documentVersionId, '88000000-0000-4000-8000-000000000001');
+  assert.deepEqual(counted.sources[0]?.rowNumbers, [2]);
+  assert.deepEqual(summed.sources[0]?.rowNumbers, [2]);
+  assert.equal(counted.sources[0]?.sheetName, 'Sheet1');
   assert.ok(queries.every((query) => /c\.version_id = d\.active_version_id/.test(query.sql)));
   assert.match(queries[0].sql, /h\.version_id = c\.version_id/);
 });

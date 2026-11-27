@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createEvidencePackage } from '../src/agent/evidence.js';
+import { createEvidencePackage, resolveEvidenceSources } from '../src/agent/evidence.js';
 
 test('evidence packages preserve scoped provenance and keep conversation context unverified', () => {
   const hit = {
@@ -13,6 +13,7 @@ test('evidence packages preserve scoped provenance and keep conversation context
       chunkIndex: 0,
       filename: 'report.pdf',
       pageNumber: 2,
+      location: 'page 2',
     },
   };
   const result = createEvidencePackage({
@@ -34,6 +35,16 @@ test('evidence packages preserve scoped provenance and keep conversation context
     ['document', 'registered-tool', 'structured', 'conversation-context'],
   );
   assert.equal(result.items[0]?.type === 'document' && result.items[0].citation.pageNumber, 2);
+  assert.deepEqual(
+    result.items
+      .filter((item) => item.type === 'document')
+      .map((item) => item.id),
+    ['E1'],
+  );
+  const resolved = resolveEvidenceSources(result);
+  assert.equal(resolved.sources[0]?.citationId, 'C1');
+  assert.equal(resolved.sources[0]?.pageNumber, 2);
+  assert.deepEqual(resolved.bindings[0]?.sources.map((source) => source.citationId), ['C1']);
   assert.deepEqual(
     result.items[1]?.type === 'registered-tool' && [
       result.items[1].toolId,

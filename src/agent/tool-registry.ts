@@ -13,7 +13,10 @@ export const rowFilterSchema = z.object({
 });
 
 export const builtinToolSchemas = {
-  document_search: z.object({ query: z.string().min(2).max(600) }),
+  document_search: z.object({
+    query: z.string().min(2).max(600),
+    source: z.string().min(1).max(500).optional(),
+  }),
   list_documents: z.object({}),
   dataset_discovery: z.object({ documentId: z.string().uuid().optional() }),
   structured_data_lookup: z.object({ value: z.string().min(1).max(250) }),
@@ -62,13 +65,36 @@ type RegisteredTool = {
 const scoped = (context: ToolExecutionContext) =>
   Boolean(context.principal.tenantId && context.principal.userId);
 
-export function plannedToolSelection(
-  plan: { operation: string; toolId?: string; query?: string; args?: Record<string, unknown> },
+export function plannedToolSelections(
+  plan: {
+    operation: string;
+    toolId?: string;
+    query?: string;
+    source?: string;
+    args?: Record<string, unknown>;
+    steps?: Array<{
+      operation: string;
+      query?: string;
+      source?: string;
+      toolId?: string;
+      args?: Record<string, unknown>;
+    }>;
+  },
   message: string,
-): PlannedToolSelection | undefined {
-  if (plan.operation === 'retrieve') return { id: 'document_search', args: { query: plan.query ?? message } };
-  if (plan.operation === 'registered_tool' && plan.toolId) return { id: plan.toolId, args: plan.args ?? {} };
-  return undefined;
+): PlannedToolSelection[] {
+  const selections = plan.operation === 'sequence' ? (plan.steps ?? []) : [plan];
+  return selections.flatMap((step) => {
+    if (step.operation === 'retrieve')
+      return [
+        {
+          id: 'document_search',
+          args: { query: step.query ?? message, ...(step.source ? { source: step.source } : {}) },
+        },
+      ];
+    if (step.operation === 'registered_tool' && step.toolId)
+      return [{ id: step.toolId, args: step.args ?? {} }];
+    return [];
+  });
 }
 
 export function createAgentToolRegistry(deps: {
@@ -88,14 +114,20 @@ export function createAgentToolRegistry(deps: {
     description: 'Search authorized document content with existing RAG.',
     schema: builtinToolSchemas.document_search,
     authorize: (_args, context) => scoped(context),
-    execute: async ({ query }, context) => {
+    execute: async ({ query, source }, context) => {
       const result = await deps.typegraph.searchDocuments(
-        query,
-        8,
+        source ? `${query} ${source}` : query,
+        source ? 64 : 8,
         context.principal.tenantId,
         context.principal.userId,
         context.signal,
       );
+      if (source) {
+        const requested = source.trim().toLocaleLowerCase();
+        result.hits = result.hits.filter(
+          (hit) => hit.citation.filename.trim().toLocaleLowerCase() === requested,
+        );
+      }
       result.hits = mergeRetrievalEvidence(
         [result.hits],
         8,

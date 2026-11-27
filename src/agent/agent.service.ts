@@ -13,16 +13,26 @@ import { ActiveAgentRunRegistry, AgentRunCancelledError } from './active-run-reg
 import { ConversationContextService } from './conversation-context.service.js';
 import { conversationEntitiesSchema, conversationEvidenceReferencesSchema } from './conversation-context.js';
 import { UserMemoryService } from './user-memory.service.js';
-import { isEvidenceFollowUp } from './retrieval-policy.js';
 import { modelForRole, resolveRuntimeModels, type RuntimeModelInput } from '../llm-admin/runtime-model.js';
 import { persistUsage } from '../llm-admin/usage-recorder.js';
 import { createLangGraphOrchestrator } from './langgraph-orchestrator.js';
+import type { Prisma } from '@prisma/client';
 
 export interface VerifiedSource {
+  citationId: string;
   documentId: string;
   documentVersionId?: string;
   chunkId?: string;
   pageNumber?: number;
+  location?: string;
+  headingPath?: string[];
+  sheetName?: string;
+  rowStart?: number;
+  rowEnd?: number;
+  rowNumbers?: number[];
+  cellRange?: string;
+  cellRefs?: string[];
+  matchedCell?: string;
   contentHash?: string;
   paragraphStart?: number;
   paragraphEnd?: number;
@@ -34,7 +44,12 @@ export interface VerifiedSource {
 export interface AgentStreamResult {
   answer: string;
   sources: VerifiedSource[];
-  evidenceReferences: Array<{ claimIndex: number; evidenceIds: string[]; sources: VerifiedSource[] }>;
+  evidenceReferences: Array<{
+    claimIndex: number;
+    evidenceIds: string[];
+    citationIds: string[];
+    sources: VerifiedSource[];
+  }>;
   toolsCalled: string[];
   conversationId: string;
   timing: Record<string, number | null>;
@@ -372,8 +387,9 @@ export class AgentService implements OnModuleDestroy {
         undefined,
         principal,
         final.persistenceSources,
-        turn.preserveConversationContext,
+        final.contextRelevant,
         final.outcome === 'failure' ? 'failed' : 'completed',
+        final.evidenceReferences,
       );
       return {
         answer: final.answer,
@@ -458,8 +474,9 @@ export class AgentService implements OnModuleDestroy {
         undefined,
         principal,
         final.persistenceSources,
-        turn.preserveConversationContext,
+        final.contextRelevant,
         final.outcome === 'failure' ? 'failed' : 'completed',
+        final.evidenceReferences,
       );
       await write('sources', { sources: final.sources });
       timeToFirstTextMs = Math.round(performance.now() - startedAt);
@@ -541,7 +558,6 @@ export class AgentService implements OnModuleDestroy {
     }>;
     contextEntities: string[];
     conversationSummary: string;
-    preserveConversationContext: boolean;
   }> {
     const conversation = conversationId
       ? await this.prisma.conversation.findFirst({
@@ -606,12 +622,6 @@ export class AgentService implements OnModuleDestroy {
     const contextEntities = conversationEntitiesSchema.safeParse(context?.entities);
     const evidenceRefs = conversationEvidenceReferencesSchema.safeParse(context?.evidenceRefs);
     const savedEvidenceRefs = evidenceRefs.success ? evidenceRefs.data : [];
-    const preserveConversationContext = isEvidenceFollowUp(message, prompt.slice(0, -1), {
-      entities: contextEntities.success ? contextEntities.data : [],
-      summary: typeof context?.summary === 'string' ? context.summary : '',
-      evidenceRefs: savedEvidenceRefs,
-      activeSelection: previous.success ? previous.data : undefined,
-    });
     return {
       conversationId: conversation.id,
       assistantMessageId: assistantMessage.id,
@@ -621,7 +631,6 @@ export class AgentService implements OnModuleDestroy {
       evidenceRefs: savedEvidenceRefs,
       contextEntities: contextEntities.success ? contextEntities.data : [],
       conversationSummary: typeof context?.summary === 'string' ? context.summary.slice(0, 2000) : '',
-      preserveConversationContext,
     };
   }
 
@@ -634,6 +643,7 @@ export class AgentService implements OnModuleDestroy {
     sources: VerifiedSource[] = [],
     preserveConversationContext = false,
     status: 'completed' | 'failed' = 'completed',
+    evidenceReferences: AgentStreamResult['evidenceReferences'] = [],
   ) {
     const contextModel = (this.prisma as unknown as { conversationContext?: { upsert?: unknown } })
       .conversationContext;
@@ -645,6 +655,7 @@ export class AgentService implements OnModuleDestroy {
             content,
             status,
             stage: status === 'failed' ? 'failed' : null,
+            evidenceReferences: (status === 'completed' ? evidenceReferences : []) as unknown as Prisma.InputJsonValue,
             ...(selection ? { structuredSelection: selection } : {}),
           },
         });
@@ -672,6 +683,7 @@ export class AgentService implements OnModuleDestroy {
           content,
           status,
           stage: status === 'failed' ? 'failed' : null,
+          evidenceReferences: (status === 'completed' ? evidenceReferences : []) as unknown as Prisma.InputJsonValue,
           ...(selection ? { structuredSelection: selection } : {}),
         },
       }),

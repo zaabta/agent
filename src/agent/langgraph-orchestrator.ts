@@ -11,7 +11,7 @@ import { type AgentEvidencePackage, type EvidenceReferenceBinding } from './evid
 import { createExternalGptMasker } from './external-gpt-policy.js';
 import {
   createAgentToolRegistry,
-  plannedToolSelection,
+  plannedToolSelections,
   type ToolCatalogEntry,
   type ToolEvidenceResult,
 } from './tool-registry.js';
@@ -45,6 +45,7 @@ export type GraphResult = {
   evidenceReferences: Array<{
     claimIndex: number;
     evidenceIds: string[];
+    citationIds: string[];
     sources: GraphSource[];
   }>;
   toolsCalled: string[];
@@ -54,6 +55,7 @@ export type GraphResult = {
   executionStatus: 'completed' | 'failed';
   requestId: string;
   llmCalls: number;
+  contextRelevant: boolean;
 };
 export const SITEPILOT_GRAPH_EDGES = [
   'START->router',
@@ -88,10 +90,12 @@ const GraphState = Annotation.Root({
   backendTools: Annotation<BackendTools | undefined>,
   progress: Annotation<GraphProgress | undefined>,
   route: Annotation<'workspace' | 'conversation'>,
+  contextRelevant: Annotation<boolean>,
   catalog: Annotation<ToolCatalogEntry[]>,
   plan: Annotation<AgentPlan | undefined>,
   toolResults: Annotation<ToolResult[]>,
   toolsCalled: Annotation<string[]>,
+  sourceLimitations: Annotation<string[]>,
   answerStrategy: Annotation<string | undefined>,
   evidence: Annotation<AgentEvidencePackage | undefined>,
   bindings: Annotation<EvidenceReferenceBinding[]>,
@@ -103,7 +107,7 @@ const GraphState = Annotation.Root({
   tableHeaders: Annotation<string[]>,
   sources: Annotation<GraphSource[]>,
   evidenceReferences: Annotation<
-    Array<{ claimIndex: number; evidenceIds: string[]; sources: GraphSource[] }>
+    Array<{ claimIndex: number; evidenceIds: string[]; citationIds: string[]; sources: GraphSource[] }>
   >,
   evidenceReadiness: Annotation<'authorized' | 'no-evidence' | 'invalid'>,
   citationValidation: Annotation<GraphResult['citationValidation']>,
@@ -151,52 +155,59 @@ export function createLangGraphOrchestrator(deps: {
       status: 'in_progress',
       message: 'Executing authorized tools',
     });
-    const selection = plannedToolSelection(state.plan ?? { operation: 'respond' }, state.message);
-    if (!selection) return { toolResults: [], toolsCalled: [] };
-    const result = await toolRegistry.execute(selection, {
-      principal: state.principal,
-      signal: state.signal,
-      requestId: state.requestId,
-      previousSelection: state.previousSelection,
-      maxContextChars: state.runtime.answer.maxContextChars ?? config.answerMaxContextChars,
-      catalog: state.catalog,
-      backendTools: state.backendTools,
-      progress: state.progress,
-      restore: (value) => {
-        const restoreValue = (item: unknown): unknown =>
-          typeof item === 'string'
-            ? privacy.restore(item)
-            : Array.isArray(item)
-              ? item.map(restoreValue)
-              : item && typeof item === 'object'
-                ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, restoreValue(child)]))
-                : item;
-        return restoreValue(value);
-      },
-    });
-    if (result.status === 'invalid')
-      return {
-        plan: {
-          operation: 'clarify',
-          reply: 'The selected tool needs valid arguments. Please clarify the requested filters or details.',
+    const selections = plannedToolSelections(state.plan ?? { operation: 'respond' }, state.message);
+    if (!selections.length) return { toolResults: [], toolsCalled: [] };
+    const toolResults: ToolResult[] = [];
+    const toolsCalled: string[] = [];
+    const sourceLimitations: string[] = [];
+    let answerStrategy: string | undefined;
+    for (const selection of selections) {
+      const result = await toolRegistry.execute(selection, {
+        principal: state.principal,
+        signal: state.signal,
+        requestId: state.requestId,
+        previousSelection: state.previousSelection,
+        maxContextChars: state.runtime.answer.maxContextChars ?? config.answerMaxContextChars,
+        catalog: state.catalog,
+        backendTools: state.backendTools,
+        progress: state.progress,
+        restore: (value) => {
+          const restoreValue = (item: unknown): unknown =>
+            typeof item === 'string'
+              ? privacy.restore(item)
+              : Array.isArray(item)
+                ? item.map(restoreValue)
+                : item && typeof item === 'object'
+                  ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, restoreValue(child)]))
+                  : item;
+          return restoreValue(value);
         },
-        toolResults: [],
-        toolsCalled: [],
-      };
-    if (result.status === 'unavailable')
-      return {
-        plan: {
-          operation: 'clarify',
-          reply: 'I could not safely select an available capability. Please clarify your request.',
-        },
-        toolResults: [],
-        toolsCalled: [],
-      };
-    return {
-      toolResults: [result.result],
-      toolsCalled: [result.result.name],
-      answerStrategy: result.answerStrategy,
-    };
+      });
+      if (result.status !== 'executed')
+        return {
+          plan: {
+            operation: 'clarify',
+            reply:
+              result.status === 'invalid'
+                ? 'The selected tool needs valid arguments. Please clarify the requested filters or details.'
+                : 'I could not safely select an available capability. Please clarify your request.',
+          },
+          toolResults: [],
+          toolsCalled: [],
+        };
+      toolResults.push(result.result);
+      toolsCalled.push(result.result.name);
+      if (
+        selection.id === 'document_search' &&
+        typeof (selection.args as any)?.source === 'string' &&
+        (result.result.result as any)?.hits?.length === 0
+      )
+        sourceLimitations.push(
+          'The specifically requested file returned no relevant authorized evidence; do not substitute another source.',
+        );
+      answerStrategy = selections.length === 1 ? result.answerStrategy : undefined;
+    }
+    return { toolResults, toolsCalled, answerStrategy, sourceLimitations };
   };
 
   const { evidenceCollection, sourceResolution, evidenceValidation } = createEvidencePreparationNodes({
@@ -234,13 +245,17 @@ export function createLangGraphOrchestrator(deps: {
       status: 'completed',
       message: 'Final response assembled',
     });
-    const evidenceReferences = claims.map(({ claimIndex, evidenceIds }) => ({
-      claimIndex,
-      evidenceIds,
-      sources: evidenceIds.flatMap(
+    const evidenceReferences = claims.map(({ claimIndex, evidenceIds }) => {
+      const sources = evidenceIds.flatMap(
         (id) => state.publicBindings.find((binding) => binding.evidenceId === id)?.sources ?? [],
-      ),
-    }));
+      );
+      return {
+        claimIndex,
+        evidenceIds,
+        citationIds: [...new Set(sources.map((source) => source.citationId))],
+        sources,
+      };
+    });
     const sources = [
       ...new Map(
         evidenceReferences
@@ -263,6 +278,7 @@ export function createLangGraphOrchestrator(deps: {
             : ('not_required' as const)
           : ('not_required' as const),
       outcome: state.outcome,
+      contextRelevant: state.contextRelevant,
     };
   };
 
@@ -273,7 +289,7 @@ export function createLangGraphOrchestrator(deps: {
     .addNode('evidence_collection', evidenceCollection)
     .addNode('source_resolution', sourceResolution)
     .addNode('evidence_validation', evidenceValidation)
-    .addNode('answer_provider', answerProvider)
+    .addNode('answer_provider', (state) => answerProvider({ ...state, bindings: state.publicBindings }))
     .addNode('finalization', finalization)
     .addEdge(START, 'router')
     .addConditionalEdges('router', (state) => (state.route === 'workspace' ? 'planner' : 'tool_executor'), {
@@ -317,10 +333,12 @@ export function createLangGraphOrchestrator(deps: {
         backendTools: deps.backendTools,
         progress: deps.progress,
         route: 'conversation',
+        contextRelevant: false,
         catalog: [],
         plan: undefined,
         toolResults: [],
         toolsCalled: [],
+        sourceLimitations: [],
         answerStrategy: undefined,
         evidence: undefined,
         bindings: [],
@@ -350,6 +368,7 @@ export function createLangGraphOrchestrator(deps: {
         executionStatus: 'completed',
         requestId,
         llmCalls: state.llmCalls,
+        contextRelevant: state.contextRelevant,
       };
     },
   };

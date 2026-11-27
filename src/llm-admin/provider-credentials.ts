@@ -13,6 +13,15 @@ function encryptionKey() {
   return key;
 }
 
+export function credentialEncryptionAvailable() {
+  try {
+    encryptionKey();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function encryptCredential(secret: string): EncryptedCredential {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(), iv);
